@@ -1,61 +1,114 @@
 {
-  "$schema": "./stickers.schema.json",
-  "version": 1,
-  "settings": {
-    "enabled": true,
-    "minimum_score": 5,
-    "global_cooldown_seconds": 300,
-    "scene_cooldown_seconds": 900,
-    "default_sticker_cooldown_seconds": 1800,
-    "max_stickers_per_hour": 4,
-    "allowed_channels": ["openclaw-weixin"]
-  },
+  "schema_version": "1.0",
+  "generated_at": "2026-08-01T00:00:00+00:00",
+  "generated_by": "Yogurt Sticker Tagger",
+  "asset_root": ".",
   "stickers": [
     {
-      "id": "yogurt-celebrate-001",
-      "file": "images/yogurt-celebrate-001.png",
+      "id": "sticker-111111111111",
+      "file": "images/sticker-111111111111.webp",
+      "thumbnail": "thumbnails/sticker-111111111111.webp",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "status": "approved",
       "enabled": true,
-      "scenes": ["celebration", "casual"],
-      "emotions": ["happy", "excited", "warm"],
-      "keywords": ["成功", "完成", "好耶", "开心", "谢谢", "太好了"],
-      "tone": ["cute", "gentle", "energetic"],
-      "relationships": ["familiar", "close", "owner"],
+      "description": "角色开心举手庆祝，适合任务完成、连接成功或收到好消息时使用。",
+      "ocr_text": "好耶",
+      "scenes": [
+        "celebration",
+        "casual"
+      ],
+      "emotions": [
+        "happy",
+        "warm"
+      ],
+      "tones": [
+        "cute",
+        "celebratory"
+      ],
+      "keywords": [
+        "成功",
+        "完成",
+        "通过",
+        "好耶"
+      ],
+      "relationships": [
+        "familiar",
+        "close",
+        "owner"
+      ],
+      "avoid_when": [
+        "用户正在讨论医疗、法律或其他严肃风险问题"
+      ],
+      "content_warnings": [
+        "none"
+      ],
       "weight": 1.0,
       "cooldown_seconds": 1800,
-      "description": "开心地举手庆祝，适合任务完成、收到好消息和轻松感谢。",
-      "source": "manual",
-      "reviewed": true,
-      "content_warning": ["none"]
+      "confidence": 0.94,
+      "classification": {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "prompt_version": "1.0",
+        "classified_at": "2026-08-01T00:00:00+00:00"
+      },
+      "image": {
+        "width": 512,
+        "height": 512,
+        "mime_type": "image/webp",
+        "file_bytes": 65536
+      }
     },
     {
-      "id": "yogurt-comfort-001",
-      "file": "images/yogurt-comfort-001.png",
+      "id": "sticker-222222222222",
+      "file": "images/sticker-222222222222.webp",
+      "thumbnail": "thumbnails/sticker-222222222222.webp",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "status": "approved",
       "enabled": true,
-      "scenes": ["comfort"],
-      "emotions": ["comforting", "gentle", "caring"],
-      "keywords": ["难过", "伤心", "累", "抱抱", "失败", "不开心"],
-      "tone": ["cute", "gentle"],
-      "relationships": ["close", "owner"],
-      "weight": 1.0,
-      "description": "温柔安慰或抱抱的表情，适合用户明确表达难过和疲惫时。",
-      "source": "manual",
-      "reviewed": true,
-      "content_warning": ["none"]
-    },
-    {
-      "id": "yogurt-auto-review-example",
-      "file": "images/yogurt-auto-review-example.webp",
-      "enabled": true,
-      "scenes": ["playful"],
-      "emotions": ["smug"],
-      "keywords": ["哼", "得意"],
-      "tone": ["playful"],
-      "relationships": ["owner"],
-      "weight": 0.8,
-      "description": "自动分类生成的示例，尚未经过人工审核，因此不会进入生产候选。",
-      "source": "auto",
-      "reviewed": false,
-      "content_warning": ["none"]
+      "description": "一只猫露出无语又好笑的表情，适合熟人间轻松吐槽。",
+      "ocr_text": "",
+      "scenes": [
+        "playful",
+        "casual"
+      ],
+      "emotions": [
+        "speechless",
+        "frustrated"
+      ],
+      "tones": [
+        "funny",
+        "sarcastic"
+      ],
+      "keywords": [
+        "无语",
+        "离谱",
+        "没话说"
+      ],
+      "relationships": [
+        "close",
+        "owner"
+      ],
+      "avoid_when": [
+        "用户正在表达严重悲伤或焦虑"
+      ],
+      "content_warnings": [
+        "none"
+      ],
+      "weight": 0.9,
+      "cooldown_seconds": 1800,
+      "confidence": 0.91,
+      "classification": {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "prompt_version": "1.0",
+        "classified_at": "2026-08-01T00:00:00+00:00"
+      },
+      "image": {
+        "width": 512,
+        "height": 512,
+        "mime_type": "image/webp",
+        "file_bytes": 57344
+      }
     }
   ]
 }
