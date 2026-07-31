@@ -1,128 +1,126 @@
 # 酸奶表情包资产目录
 
-本目录保存 V2 的待分类图片、正式图片库和结构化标签。
+本目录是 Yogurt Chat Bot V2 的本地表情资产入口。
 
-自动分类由独立的 `Yogurt Sticker Tagger` 完成；OpenClaw 聊天运行时只读取已经分类完成并允许使用的图片。
+自动分类由独立仓库 `Doman1c/Yogurt_Sticker_Tagger` 完成；Chat Bot 不维护第二套分类 Schema，也不会在聊天时重新调用视觉模型分析图片。
+
+## 唯一 Catalog 契约
+
+权威 Schema 位于：
+
+```text
+Yogurt_Sticker_Tagger/schemas/sticker-catalog-v1.schema.json
+```
+
+Chat Bot 直接消费 Tagger 导出的 `schema_version: "1.0"` Catalog。字段名称必须保持一致，例如：
+
+```text
+tones
+content_warnings
+status
+confidence
+classification
+```
+
+不要在 Chat Bot 中重新引入 `tone`、`content_warning`、`reviewed` 或内嵌运行设置等旧字段。
 
 ## 本地目录结构
 
 ```text
 assets/stickers/
-  inbox/                  # 新上传、尚未处理的图片
-  images/                 # 已归一化的正式图片库
-  thumbnails/             # 管理和审核用缩略图
-  stickers.json           # 本地正式目录，不提交 Git
-  stickers.example.json   # 可提交的示例
-  stickers.schema.json    # 标签格式约束
+├── inbox/                  # 可选：准备交给 Tagger 的原始图片
+├── images/                 # Tagger 导出的正式图片
+├── thumbnails/             # 本地审核缩略图
+├── stickers.json           # Tagger 导出的正式 Catalog，不提交 Git
+├── stickers.example.json   # 脱敏格式示例
+└── README.md
 ```
 
-## 使用流程
+真实图片、缩略图和 `stickers.json` 都由 `.gitignore` 排除。
 
-### 1. 上传图片
+## 推荐工作流
 
-把新的表情包或照片放入：
-
-```text
-assets/stickers/inbox/
-```
-
-### 2. 运行独立分类程序
+### 1. 在 Sticker Tagger 中处理图片
 
 ```bash
-python3 -m yogurt_sticker_tagger scan
+cd ~/Yogurt_Sticker_Tagger
+source .venv/bin/activate
+
+yogurt-sticker-tagger scan
+yogurt-sticker-tagger review list --status pending
+yogurt-sticker-tagger review approve <sticker-id>
+yogurt-sticker-tagger export
 ```
 
-分类程序负责：
+### 2. 将导出结果同步到 Chat Bot
 
-- 文件检查
-- SHA-256 去重
-- 图片归一化
-- 视觉理解
-- OCR
-- 场景、情绪、语气和关键词标签
-- 风险标签
-- 写入 `stickers.json`
-
-成功处理的图片会进入：
+Tagger 默认把 `file` 写成相对路径，例如：
 
 ```text
-assets/stickers/images/
+images/sticker-0123456789ab.webp
 ```
 
-### 3. 聊天运行时读取
+因此需要让 Catalog 和对应的 `images/` 位于同一个资产根目录。同步时复制：
 
-聊天系统不会重新分析图片，只会读取 `stickers.json` 中已经批准的记录，召回少量候选交给主聊天模型选择。
+```text
+Yogurt_Sticker_Tagger/data/stickers.json
+  → Yogurt_Chat_Bot/assets/stickers/stickers.json
 
-## 初始化
+Yogurt_Sticker_Tagger/data/images/
+  → Yogurt_Chat_Bot/assets/stickers/images/
+```
+
+缩略图只用于管理界面，不是聊天运行时必需项。
+
+### 3. 配置 Chat Bot 运行时
+
+复制独立运行配置：
 
 ```bash
-cd ~/Yogurt_Chat_Bot
-mkdir -p \
-  assets/stickers/inbox \
-  assets/stickers/images \
-  assets/stickers/thumbnails
-
-cp \
-  assets/stickers/stickers.example.json \
-  assets/stickers/stickers.json
+cp social_layer/config/stickers.example.json \
+   social_layer/config/stickers.json
 ```
 
-## 文件命名
+运行配置保存候选阈值、候选数量以及未来的冷却参数，不写入 `stickers.json`。
 
-原始上传文件名可以任意。Sticker Tagger 入库时应生成稳定名称，例如：
+初期保持：
 
-```text
-yogurt-happy-001.webp
-yogurt-comfort-001.webp
-yogurt-confused-001.webp
+```json
+{
+  "enabled": false
+}
 ```
 
-不要复用旧 ID 指向另一张图片。正式记录使用 SHA-256 检测重复内容。
+直到候选召回、模型选择工具和微信发送全部完成并通过实机测试。
 
-## 支持格式
+## 当前运行时能力
 
-V2.0 计划支持：
+`social_layer/src/yogurt_social/stickers/` 已提供：
 
-- PNG
-- JPEG / JPG
-- WEBP
-- GIF 可先作为静态首帧分类；是否向微信发送动画需要单独实机验证
+- `StickerCatalogLoader`：读取 Tagger Catalog；
+- 路径逃逸与缺失文件检查；
+- `approved + enabled` 防御性过滤；
+- 场景、情绪、关键词和关系评分；
+- 风险标签过滤；
+- Top-K 候选输出；
+- 独立运行配置加载。
 
-## 审核模式
+当前尚未接入：
 
-分类器支持两种发布策略：
+- OpenClaw `before_prompt_build` 候选注入；
+- `choose_sticker` 工具；
+- SQLite 冷却；
+- 微信本地图片发送；
+- 发送成功后的冷却提交。
 
-- `review_required=true`：分类后先进入 `pending`
-- 高置信度自动批准：满足阈值且无风险标签时进入 `approved`
+## 安全约束
 
-聊天运行时只使用状态为 `approved` 且 `enabled=true` 的记录。
+运行时只接受：
 
-## 标签含义
+- `schema_version = "1.0"`；
+- `images/` 下的相对图片路径；
+- 支持的 PNG、JPEG 或 WEBP 文件；
+- 合法稳定 ID；
+- 已批准、已启用、无风险的候选。
 
-- `scenes`：适用的 V1 聊天场景
-- `emotions`：图片表达的主要情绪
-- `keywords`：与图片语义相关的触发词
-- `tone`：可爱、温柔、调皮、认真等表达气质
-- `relationships`：允许面向的关系等级
-- `description`：供主聊天模型理解图片用途的简短描述
-- `ocr_text`：图片内识别出的文字
-- `content_warning`：敏感或不适用边界
-- `classification`：分类模型、时间和置信度
-
-## 隐私和 Git
-
-以下内容默认由 `.gitignore` 排除：
-
-- `inbox/` 中的真实上传图片
-- `images/` 中的真实表情包
-- `thumbnails/`
-- `stickers.json`
-- 自动分类任务数据库和缓存
-
-仓库只保存 Schema、示例、说明和测试夹具。不要提交私人聊天截图、未授权人物图片、敏感证件或含私人信息的照片。
-
-## 相关文档
-
-- `docs/V2_DESIGN.md`
-- `tools/sticker_tagger/README.md`
-- `stickers.schema.json`
+模型永远不能指定任意本地绝对路径。
