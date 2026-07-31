@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "enabled": false,
+  "catalog_path": "assets/stickers/stickers.json",
+  "minimum_score": 5.0,
+  "max_candidates": 5,
+  "require_files": true,
+  "global_cooldown_seconds": 300,
+  "scene_cooldown_seconds": 900,
+  "default_sticker_cooldown_seconds": 1800,
+  "max_stickers_per_hour": 4,
+  "allowed_channels": [
+    "ilink"
+  ]
+}
