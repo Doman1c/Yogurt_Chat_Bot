@@ -1,98 +1,82 @@
-# Yogurt Sticker Tagger
+# Yogurt Sticker Tagger 集成说明
 
-Yogurt Sticker Tagger 是 V2 的独立表情包/照片自动分类程序。
-
-它不依赖 OpenClaw Gateway，也不参与每轮聊天。它只负责把新图片整理成带有结构化标签的正式图片库，供聊天运行时读取。
-
-## 计划中的工作模式
-
-### 单次扫描
-
-```bash
-python3 -m yogurt_sticker_tagger scan \
-  --input ../../assets/stickers/inbox \
-  --output ../../assets/stickers/images \
-  --catalog ../../assets/stickers/stickers.json
-```
-
-### 预览但不写入
-
-```bash
-python3 -m yogurt_sticker_tagger scan --dry-run
-```
-
-### 监听目录
-
-```bash
-python3 -m yogurt_sticker_tagger watch
-```
-
-## 处理流程
+V2 的离线图片分类器已经拆分为独立仓库：
 
 ```text
-扫描新图片
-→ 格式检查
-→ SHA-256 去重
-→ 图片归一化
-→ VLM 分类与 OCR
-→ Schema 校验
-→ 写入 pending/approved 记录
-→ 更新 catalog
+Doman1c/Yogurt_Sticker_Tagger
 ```
 
-## 设计边界
+本目录不再保存第二套分类器源码或配置，避免 Chat Bot 和 Tagger 的处理逻辑、Schema 与模型参数发生漂移。
 
-Sticker Tagger：
+## 职责边界
 
-- 可以使用独立的本地或远程视觉模型
-- 可以批量处理图片
-- 可以在聊天机器人离线时运行
-- 不发送微信消息
-- 不读取用户聊天记录
-- 不决定某轮聊天最终发送哪张图
+### Yogurt Sticker Tagger
 
-聊天运行时：
+负责：
 
-- 不临时调用视觉模型
-- 只读取已分类、已批准图片
-- 把少量候选交给主聊天模型选择
-- 强制执行冷却和安全检查
+- 扫描原始图片；
+- SHA-256 去重；
+- 图片归一化与缩略图；
+- Ollama 视觉分类与 OCR；
+- 严格 Schema 校验；
+- 人工审核；
+- 导出 `schema_version: "1.0"` 的 `stickers.json`。
 
-## 目录
+不负责：
+
+- 读取微信消息；
+- 判断某轮是否发送表情；
+- 冷却；
+- 微信图片上传与发送。
+
+### Yogurt Chat Bot
+
+负责：
+
+- 读取 Tagger 导出的 Catalog；
+- 根据 V1 场景、情绪、关系和当前消息召回候选；
+- 后续由主模型在本轮候选中决定是否选择；
+- 后端再次校验选择；
+- 强制执行冷却；
+- 通过 OpenClaw 微信链路发送。
+
+## Tagger 当前使用方式
+
+```bash
+cd ~/Yogurt_Sticker_Tagger
+source .venv/bin/activate
+
+yogurt-sticker-tagger scan
+yogurt-sticker-tagger review list --status pending
+yogurt-sticker-tagger review approve <sticker-id>
+yogurt-sticker-tagger export
+```
+
+Tagger 的配置格式、Provider 参数和故障排查说明以独立仓库为准。
+
+## 稳定接口
+
+两个项目之间唯一必须稳定的接口是：
 
 ```text
-assets/stickers/inbox/      新上传图片
-assets/stickers/images/     正式归一化图片
-assets/stickers/stickers.json
-runtime/sticker_tagger/     任务、缓存与失败记录
+Yogurt_Sticker_Tagger/data/stickers.json
 ```
 
-## 分类输出
+权威 Schema：
 
-分类结果至少包含：
+```text
+Yogurt_Sticker_Tagger/schemas/sticker-catalog-v1.schema.json
+```
 
-- 画面描述
-- OCR 文本
-- 场景标签
-- 情绪标签
-- 语气标签
-- 关键词
-- 关系适用范围
-- 内容风险
-- 模型和置信度
-- 审核状态
+Chat Bot 不再维护重复的 `stickers.schema.json`。
 
-完整字段见：
+## 本地同步
 
-- `assets/stickers/stickers.schema.json`
-- `docs/V2_DESIGN.md`
+将 Tagger 导出的 Catalog 和正式图片同步到：
 
-## Provider 设计
+```text
+Yogurt_Chat_Bot/assets/stickers/stickers.json
+Yogurt_Chat_Bot/assets/stickers/images/
+```
 
-分类模型通过独立 Provider 接口配置，不和聊天模型绑定：
-
-- `ollama_vlm`
-- `openai_compatible_vision`
-- `filename_rules`
-
-初版会先实现统一接口和一个本地 Provider，再补充其他后端。
+这些真实运行资产默认不会提交 Git。
