@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PLUGIN_ID="yogurt-social-injector"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PLUGIN_DIR="$REPO_ROOT/integrations/openclaw"
+DB_PATH="${YOGURT_SOCIAL_DB:-$HOME/.openclaw/yogurt-social/memory.sqlite3}"
+RESTART=1
+
+if [[ "${1:-}" == "--no-restart" ]]; then
+  RESTART=0
+fi
+
+command -v openclaw >/dev/null 2>&1 || {
+  echo "openclaw CLI not found" >&2
+  exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+  echo "python3 not found" >&2
+  exit 1
+}
+
+PYTHON_PATH="$(command -v python3)"
+mkdir -p "$(dirname "$DB_PATH")"
+chmod 700 "$(dirname "$DB_PATH")" 2>/dev/null || true
+
+bash "$REPO_ROOT/scripts/test-openclaw-adapter"
+openclaw plugins validate --entry "$PLUGIN_DIR/index.ts"
+
+CONFIG_FILE="$(openclaw config file 2>/dev/null || true)"
+if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+  BACKUP_PATH="$CONFIG_FILE.pre-yogurt-adapter.$(date +%Y%m%d%H%M%S).backup"
+  cp "$CONFIG_FILE" "$BACKUP_PATH"
+  chmod 600 "$BACKUP_PATH" 2>/dev/null || true
+  echo "Local OpenClaw config backup created: $BACKUP_PATH"
+fi
+
+if openclaw plugins inspect "$PLUGIN_ID" >/dev/null 2>&1; then
+  openclaw plugins disable "$PLUGIN_ID" >/dev/null 2>&1 || true
+  openclaw plugins uninstall "$PLUGIN_ID" --force --keep-files >/dev/null 2>&1 || true
+fi
+
+openclaw plugins install "$PLUGIN_DIR" --link --force
+
+PATCH_FILE="$(mktemp)"
+trap 'rm -f "$PATCH_FILE"' EXIT
+python3 - "$PATCH_FILE" "$REPO_ROOT" "$DB_PATH" "$PYTHON_PATH" <<'PY'
+import json
+import sys
+
+path, repo_root, db_path, python_path = sys.argv[1:]
+patch = {
+    "plugins": {
+        "entries": {
+            "yogurt-social-injector": {
+                "enabled": True,
+                "hooks": {
+                    "allowConversationAccess": True,
+                    "allowPromptInjection": True,
+                    "timeouts": {"before_prompt_build": 12000},
+                },
+                "config": {
+                    "enabled": True,
+                    "pythonPath": python_path,
+                    "repoPath": repo_root,
+                    "dbPath": db_path,
+                    "defaultUserId": "owner",
+                    "senderMap": {},
+                    "ownerSenderIds": [],
+                    "unknownSenderPolicy": "default",
+                    "allowedChannels": [],
+                    "onlyUserTurns": True,
+                    "timeoutMs": 2500,
+                    "maxMemories": 3,
+                },
+            }
+        }
+    }
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(patch, handle, ensure_ascii=False, indent=2)
+PY
+
+openclaw config patch --file "$PATCH_FILE" --dry-run
+openclaw config patch --file "$PATCH_FILE"
+openclaw plugins enable "$PLUGIN_ID"
+openclaw config validate
+
+YOGURT_SOCIAL_DB="$DB_PATH" bash "$REPO_ROOT/scripts/yogurt-social" \
+  upsert-user --user-id owner --display-name Domanic --relationship owner
+
+if [[ "$RESTART" -eq 1 ]]; then
+  openclaw gateway restart
+  openclaw plugins inspect "$PLUGIN_ID" --runtime --json || true
+else
+  echo "Gateway restart skipped. Run: openclaw gateway restart"
+fi
+
+echo "Yogurt OpenClaw adapter installed and enabled."
