@@ -97,13 +97,13 @@ const repoPath = process.env.YOGURT_TEST_REPO;
 const dbPath = process.env.YOGURT_TEST_DB;
 const pythonPath = process.env.YOGURT_TEST_PYTHON;
 
-function registerWith(pluginConfig) {
+function registerWith(pluginConfig, { resolvePathReturnsUndefined = false } = {}) {
   let hook;
   const warnings = [];
   plugin.register({
     pluginConfig,
     resolvePath(value) {
-      return value;
+      return resolvePathReturnsUndefined ? undefined : value;
     },
     logger: {
       info() {},
@@ -120,9 +120,7 @@ function registerWith(pluginConfig) {
   return { hook, warnings };
 }
 
-const message = "  GitHub 仓库的 OpenClaw 配置报错了，怎么修复？\n";
-const event = { prompt: message, messages: [] };
-const working = registerWith({
+const pluginConfig = {
   enabled: true,
   pythonPath,
   repoPath,
@@ -135,32 +133,38 @@ const working = registerWith({
   onlyUserTurns: true,
   timeoutMs: 2500,
   maxMemories: 3,
+};
+
+const message = "  GitHub 仓库的 OpenClaw 配置报错了，怎么修复？\n";
+const event = {
+  prompt: message,
+  messages: [],
+  context: { pluginConfig },
+};
+const working = registerWith(pluginConfig, {
+  resolvePathReturnsUndefined: true,
 });
 const result = await working.hook(event, {
   senderId: "wx-owner",
   channel: "ilink",
 });
 assert.equal(event.prompt, message);
-assert.equal(typeof result?.prependSystemContext, "string");
-assert.match(result.prependSystemContext, /\[Yogurt Social State\]/);
-assert.match(result.prependSystemContext, /GitHub 私有仓库/);
+assert.equal(typeof result?.prependContext, "string");
+assert.match(result.prependContext, /\[Yogurt Social State\]/);
+assert.match(result.prependContext, /GitHub 私有仓库/);
 
-const broken = registerWith({
-  enabled: true,
+const brokenConfig = {
+  ...pluginConfig,
   pythonPath: "/nonexistent/yogurt-python",
-  repoPath,
-  dbPath,
-  defaultUserId: "owner",
-  senderMap: { "wx-owner": "owner" },
-  ownerSenderIds: [],
-  unknownSenderPolicy: "skip",
-  allowedChannels: ["ilink"],
-  onlyUserTurns: true,
   timeoutMs: 500,
-  maxMemories: 3,
-});
+};
+const broken = registerWith(brokenConfig);
 const failOpenResult = await broken.hook(
-  { prompt: "社交层坏了也必须继续回复", messages: [] },
+  {
+    prompt: "社交层坏了也必须继续回复",
+    messages: [],
+    context: { pluginConfig: brokenConfig },
+  },
   { senderId: "wx-owner", channel: "ilink" },
 );
 assert.equal(failOpenResult, undefined);
