@@ -5,6 +5,8 @@ PLUGIN_ID="yogurt-social-injector"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGIN_DIR="$REPO_ROOT/integrations/openclaw"
 DB_PATH="${YOGURT_SOCIAL_DB:-$HOME/.openclaw/yogurt-social/memory.sqlite3}"
+STICKER_CONFIG_PATH="$REPO_ROOT/social_layer/config/stickers.json"
+STICKER_CONFIG_EXAMPLE="$REPO_ROOT/social_layer/config/stickers.example.json"
 RESTART=1
 
 if [[ "${1:-}" == "--no-restart" ]]; then
@@ -24,14 +26,14 @@ PYTHON_PATH="$(command -v python3)"
 mkdir -p "$(dirname "$DB_PATH")"
 chmod 700 "$(dirname "$DB_PATH")" 2>/dev/null || true
 
-# This runs the Python unit tests plus a real TypeScript hook -> Python bridge
-# -> SQLite simulation. Do not use `openclaw plugins validate --entry` here:
-# that command validates defineToolPlugin metadata and rejects hook-only
-# definePluginEntry plugins by design.
+if [[ ! -f "$STICKER_CONFIG_PATH" ]]; then
+  cp "$STICKER_CONFIG_EXAMPLE" "$STICKER_CONFIG_PATH"
+  chmod 600 "$STICKER_CONFIG_PATH" 2>/dev/null || true
+  echo "Created disabled V2 sticker config: $STICKER_CONFIG_PATH"
+fi
+
 bash "$REPO_ROOT/scripts/test-openclaw-adapter"
 
-# Perform lightweight package checks without invoking the tool-plugin metadata
-# generator/validator.
 python3 - "$PLUGIN_DIR" <<'PY'
 import json
 import sys
@@ -41,8 +43,9 @@ plugin_dir = Path(sys.argv[1])
 manifest_path = plugin_dir / "openclaw.plugin.json"
 package_path = plugin_dir / "package.json"
 entry_path = plugin_dir / "index.ts"
+selection_path = plugin_dir / "sticker-selection.ts"
 
-for path in (manifest_path, package_path, entry_path):
+for path in (manifest_path, package_path, entry_path, selection_path):
     if not path.is_file():
         raise SystemExit(f"missing plugin file: {path}")
 
@@ -53,10 +56,14 @@ with package_path.open(encoding="utf-8") as handle:
 
 if manifest.get("id") != "yogurt-social-injector":
     raise SystemExit("plugin manifest id mismatch")
+if "choose_sticker" not in manifest.get("contracts", {}).get("tools", []):
+    raise SystemExit("plugin manifest does not declare choose_sticker")
 extensions = package.get("openclaw", {}).get("extensions", [])
 if "./index.ts" not in extensions:
     raise SystemExit("package.json does not expose ./index.ts")
-print("hook plugin package check: ok")
+if "sticker-selection.ts" not in package.get("files", []):
+    raise SystemExit("package.json does not include sticker-selection.ts")
+print("mixed hook/tool plugin package check: ok")
 PY
 
 CONFIG_FILE="$(openclaw config file 2>/dev/null || true)"
@@ -72,18 +79,16 @@ if openclaw plugins inspect "$PLUGIN_ID" >/dev/null 2>&1; then
   openclaw plugins uninstall "$PLUGIN_ID" --force --keep-files >/dev/null 2>&1 || true
 fi
 
-# OpenClaw 2026.7.1-2 rejects combining --link and --force. This is an
-# interactive local install, so use link mode alone and accept the provenance
-# prompt when OpenClaw asks for confirmation.
+# OpenClaw 2026.7.1-2 rejects combining --link and --force.
 openclaw plugins install --link "$PLUGIN_DIR"
 
 PATCH_FILE="$(mktemp)"
 trap 'rm -f "$PATCH_FILE"' EXIT
-python3 - "$PATCH_FILE" "$REPO_ROOT" "$DB_PATH" "$PYTHON_PATH" <<'PY'
+python3 - "$PATCH_FILE" "$REPO_ROOT" "$DB_PATH" "$PYTHON_PATH" "$STICKER_CONFIG_PATH" <<'PY'
 import json
 import sys
 
-path, repo_root, db_path, python_path = sys.argv[1:]
+path, repo_root, db_path, python_path, sticker_config_path = sys.argv[1:]
 patch = {
     "plugins": {
         "entries": {
@@ -107,6 +112,8 @@ patch = {
                     "onlyUserTurns": True,
                     "timeoutMs": 2500,
                     "maxMemories": 3,
+                    "stickerEnabled": False,
+                    "stickerConfigPath": sticker_config_path,
                 },
             }
         }
@@ -132,4 +139,4 @@ else
   echo "Gateway restart skipped. Run: openclaw gateway restart"
 fi
 
-echo "Yogurt OpenClaw adapter installed and enabled."
+echo "Yogurt OpenClaw adapter installed. V2 sticker selection remains disabled until explicitly enabled."
