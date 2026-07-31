@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
+export YOGURT_SOCIAL_DB="${YOGURT_SOCIAL_DB:-$REPO_ROOT/social_layer/data/yogurt_social.sqlite3}"
+
+exec python3 -m yogurt_social.cli "$@"
