@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+command -v node >/dev/null 2>&1 || {
+  echo "sticker selection state: skipped (node not found)"
+  exit 0
+}
+
+node --experimental-strip-types --input-type=module - "$REPO_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const repoRoot = process.argv[2];
+const moduleUrl = pathToFileURL(
+  `${repoRoot}/integrations/openclaw/sticker-selection.ts`,
+).href;
+const { StickerSelectionStore } = await import(moduleUrl);
+
+const store = new StickerSelectionStore({ ttlMs: 10_000, maxSnapshots: 8 });
+const aliases = ["session:test-session", "sender:ilink:test-owner"];
+const candidates = [
+  {
+    id: "sticker-0123456789ab",
+    file: "images/sticker-0123456789ab.webp",
+    description: "庆祝",
+  },
+  {
+    id: "sticker-abcdef012345",
+    file: "images/sticker-abcdef012345.webp",
+    description: "得意",
+  },
+];
+
+store.register(aliases, candidates, 1_000);
+
+const invalid = store.select(aliases, "sticker-not-current", 1_001);
+assert.deepEqual(invalid, { status: "rejected", reason: "not_in_candidates" });
+
+const selected = store.select(aliases, "sticker-0123456789ab", 1_002);
+assert.equal(selected.status, "selected");
+assert.equal(selected.sticker.id, "sticker-0123456789ab");
+assert.equal(selected.idempotent, false);
+
+const repeated = store.select(aliases, "sticker-0123456789ab", 1_003);
+assert.equal(repeated.status, "selected");
+assert.equal(repeated.idempotent, true);
+
+const second = store.select(aliases, "sticker-abcdef012345", 1_004);
+assert.deepEqual(second, { status: "rejected", reason: "already_selected" });
+
+store.register(aliases, [candidates[1]], 2_000);
+const stale = store.select(aliases, "sticker-0123456789ab", 2_001);
+assert.deepEqual(stale, { status: "rejected", reason: "not_in_candidates" });
+const refreshed = store.select(aliases, "sticker-abcdef012345", 2_002);
+assert.equal(refreshed.status, "selected");
+
+const expiredStore = new StickerSelectionStore({ ttlMs: 1_000, maxSnapshots: 8 });
+expiredStore.register(aliases, candidates, 10_000);
+const expired = expiredStore.select(aliases, "sticker-0123456789ab", 12_000);
+assert.equal(expired.status, "rejected");
+assert.equal(expired.reason, "snapshot_missing");
+
+console.log("sticker selection state: ok");
+JS
