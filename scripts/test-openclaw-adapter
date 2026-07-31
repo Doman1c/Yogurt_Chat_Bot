@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
+
+python3 -m unittest discover -s "$REPO_ROOT/social_layer/tests" -v
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+DB_PATH="$TMP_DIR/memory.sqlite3"
+
+python3 - "$DB_PATH" <<'PY'
+import sys
+from yogurt_social.service import SocialLayerService
+
+service = SocialLayerService(sys.argv[1])
+service.memory.upsert_user("owner", "Domanic", "owner")
+service.memory.add_episode(
+    "owner",
+    "我们一起建立了 Yogurt Chat Bot 的 GitHub 私有仓库",
+    importance=0.9,
+)
+PY
+
+NORMAL_JSON="$TMP_DIR/normal.json"
+printf '%s' '{"user_id":"owner","message":"GitHub 仓库的 OpenClaw 配置报错了，怎么修复？"}' \
+  | python3 -m yogurt_social.openclaw_adapter --db "$DB_PATH" \
+  > "$NORMAL_JSON"
+
+python3 - "$NORMAL_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["metadata"]["applied"] is True
+assert payload["metadata"]["original_message_preserved"] is True
+assert payload["final_model_input"]["user_message"] == payload["original_message"]
+assert "[Yogurt Social State]" in payload["social_context"]
+assert "GitHub 私有仓库" in payload["social_context"]
+print("bridge simulation: ok")
+PY
+
+# A directory cannot be opened as a SQLite file. The bridge must still return
+# exit code 0 and preserve the current message with an empty social context.
+BAD_DB="$TMP_DIR/not-a-database.sqlite3"
+mkdir "$BAD_DB"
+FAIL_OPEN_JSON="$TMP_DIR/fail-open.json"
+printf '%s' '{"user_id":"owner","message":"即使社交层坏了也要继续回复"}' \
+  | python3 -m yogurt_social.openclaw_adapter --db "$BAD_DB" \
+  > "$FAIL_OPEN_JSON"
+
+python3 - "$FAIL_OPEN_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload["metadata"]["fail_open"] is True
+assert payload["metadata"]["applied"] is False
+assert payload["social_context"] == ""
+assert payload["final_model_input"]["user_message"] == "即使社交层坏了也要继续回复"
+print("fail-open simulation: ok")
+PY
+
+# Exercise the real TypeScript hook, Python subprocess bridge, and SQLite store
+# without requiring a live Gateway. A tiny temporary SDK shim only replaces
+# definePluginEntry; all adapter logic is the production plugin code.
+if command -v node >/dev/null 2>&1; then
+  NODE_TEST_ROOT="$TMP_DIR/node-plugin-test"
+  mkdir -p "$NODE_TEST_ROOT/node_modules/openclaw/plugin-sdk"
+  cp "$REPO_ROOT/integrations/openclaw/index.ts" "$NODE_TEST_ROOT/index.ts"
+
+  cat > "$NODE_TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
+{
+  "name": "openclaw",
+  "version": "0.0.0-test",
+  "type": "module",
+  "exports": {
+    "./plugin-sdk/plugin-entry": "./plugin-sdk/plugin-entry.js"
+  }
+}
+JSON
+
+  cat > "$NODE_TEST_ROOT/node_modules/openclaw/plugin-sdk/plugin-entry.js" <<'JS'
+export function definePluginEntry(definition) {
+  return definition;
+}
+JS
+
+  cat > "$NODE_TEST_ROOT/e2e.mjs" <<'JS'
+import assert from "node:assert/strict";
+import plugin from "./index.ts";
+
+const repoPath = process.env.YOGURT_TEST_REPO;
+const dbPath = process.env.YOGURT_TEST_DB;
+const pythonPath = process.env.YOGURT_TEST_PYTHON;
+
+function registerWith(pluginConfig) {
+  let hook;
+  const warnings = [];
+  plugin.register({
+    pluginConfig,
+    resolvePath(value) {
+      return value;
+    },
+    logger: {
+      info() {},
+      warn(message) {
+        warnings.push(String(message));
+      },
+    },
+    on(name, handler) {
+      assert.equal(name, "before_prompt_build");
+      hook = handler;
+    },
+  });
+  assert.equal(typeof hook, "function");
+  return { hook, warnings };
+}
+
+const message = "  GitHub 仓库的 OpenClaw 配置报错了，怎么修复？\n";
+const event = { prompt: message, messages: [] };
+const working = registerWith({
+  enabled: true,
+  pythonPath,
+  repoPath,
+  dbPath,
+  defaultUserId: "owner",
+  senderMap: { "wx-owner": "owner" },
+  ownerSenderIds: [],
+  unknownSenderPolicy: "skip",
+  allowedChannels: ["ilink"],
+  onlyUserTurns: true,
+  timeoutMs: 2500,
+  maxMemories: 3,
+});
+const result = await working.hook(event, {
+  senderId: "wx-owner",
+  channel: "ilink",
+});
+assert.equal(event.prompt, message);
+assert.equal(typeof result?.prependSystemContext, "string");
+assert.match(result.prependSystemContext, /\[Yogurt Social State\]/);
+assert.match(result.prependSystemContext, /GitHub 私有仓库/);
+
+const broken = registerWith({
+  enabled: true,
+  pythonPath: "/nonexistent/yogurt-python",
+  repoPath,
+  dbPath,
+  defaultUserId: "owner",
+  senderMap: { "wx-owner": "owner" },
+  ownerSenderIds: [],
+  unknownSenderPolicy: "skip",
+  allowedChannels: ["ilink"],
+  onlyUserTurns: true,
+  timeoutMs: 500,
+  maxMemories: 3,
+});
+const failOpenResult = await broken.hook(
+  { prompt: "社交层坏了也必须继续回复", messages: [] },
+  { senderId: "wx-owner", channel: "ilink" },
+);
+assert.equal(failOpenResult, undefined);
+assert.equal(broken.warnings.length, 1);
+assert.match(broken.warnings[0], /fail-open/);
+console.log("typescript hook e2e: ok");
+JS
+
+  YOGURT_TEST_REPO="$REPO_ROOT" \
+  YOGURT_TEST_DB="$DB_PATH" \
+  YOGURT_TEST_PYTHON="$(command -v python3)" \
+    node --experimental-strip-types "$NODE_TEST_ROOT/e2e.mjs"
+else
+  echo "typescript hook e2e: skipped (node not found)"
+fi
