@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PLUGIN_ID="yogurt-social-injector"
+DB_PATH="${YOGURT_SOCIAL_DB:-$HOME/.openclaw/yogurt-social/memory.sqlite3}"
+PURGE_DATA=0
+RESTART=1
+
+for arg in "$@"; do
+  case "$arg" in
+    --purge-data) PURGE_DATA=1 ;;
+    --no-restart) RESTART=0 ;;
+    *) echo "Unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+
+command -v openclaw >/dev/null 2>&1 || {
+  echo "openclaw CLI not found" >&2
+  exit 1
+}
+
+openclaw plugins disable "$PLUGIN_ID" >/dev/null 2>&1 || true
+openclaw plugins uninstall "$PLUGIN_ID" --force || true
+openclaw config validate
+
+if [[ "$PURGE_DATA" -eq 1 ]]; then
+  rm -f "$DB_PATH" "$DB_PATH-shm" "$DB_PATH-wal"
+  echo "Local Yogurt social database removed."
+else
+  echo "Local Yogurt social database retained."
+fi
+
+if [[ "$RESTART" -eq 1 ]]; then
+  openclaw gateway restart
+else
+  echo "Gateway restart skipped. Run: openclaw gateway restart"
+fi
+
+echo "Yogurt OpenClaw adapter uninstalled."
