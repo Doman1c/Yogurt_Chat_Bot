@@ -123,7 +123,14 @@ class StickerCatalogLoader:
         asset_root_value = payload.get("asset_root", ".")
         if not isinstance(asset_root_value, str) or Path(asset_root_value).is_absolute():
             raise StickerCatalogError("unsafe_asset_root", "asset_root 必须是相对路径")
-        asset_root = (self.catalog_path.parent / asset_root_value).resolve()
+        catalog_root = self.catalog_path.parent.resolve()
+        asset_root = (catalog_root / asset_root_value).resolve()
+        try:
+            asset_root.relative_to(catalog_root)
+        except ValueError as exc:
+            raise StickerCatalogError(
+                "unsafe_asset_root", "asset_root 不能逃逸 Catalog 目录"
+            ) from exc
 
         raw_stickers = payload.get("stickers")
         if not isinstance(raw_stickers, list):
