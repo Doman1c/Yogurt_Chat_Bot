@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
 
 python3 -m unittest discover -s "$REPO_ROOT/social_layer/tests" -v
+bash "$REPO_ROOT/scripts/test-sticker-selection"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -36,6 +37,8 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     payload = json.load(handle)
 assert payload["metadata"]["applied"] is True
 assert payload["metadata"]["original_message_preserved"] is True
+assert payload["metadata"]["sticker_candidate_count"] == 0
+assert payload["sticker_candidates"] == []
 assert payload["final_model_input"]["user_message"] == payload["original_message"]
 assert "[Yogurt Social State]" in payload["social_context"]
 assert "GitHub 私有仓库" in payload["social_context"]
@@ -60,17 +63,19 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 assert payload["metadata"]["fail_open"] is True
 assert payload["metadata"]["applied"] is False
 assert payload["social_context"] == ""
+assert payload["sticker_candidates"] == []
 assert payload["final_model_input"]["user_message"] == "即使社交层坏了也要继续回复"
 print("fail-open simulation: ok")
 PY
 
-# Exercise the real TypeScript hook, Python subprocess bridge, and SQLite store
-# without requiring a live Gateway. A tiny temporary SDK shim only replaces
-# definePluginEntry; all adapter logic is the production plugin code.
+# Exercise the real TypeScript hook, Python subprocess bridge, SQLite store,
+# and required tool registration without requiring a live Gateway.
 if command -v node >/dev/null 2>&1; then
   NODE_TEST_ROOT="$TMP_DIR/node-plugin-test"
   mkdir -p "$NODE_TEST_ROOT/node_modules/openclaw/plugin-sdk"
   cp "$REPO_ROOT/integrations/openclaw/index.ts" "$NODE_TEST_ROOT/index.ts"
+  cp "$REPO_ROOT/integrations/openclaw/sticker-selection.ts" \
+    "$NODE_TEST_ROOT/sticker-selection.ts"
 
   cat > "$NODE_TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
 {
@@ -99,6 +104,7 @@ const pythonPath = process.env.YOGURT_TEST_PYTHON;
 
 function registerWith(pluginConfig, { resolvePathReturnsUndefined = false } = {}) {
   let hook;
+  let toolRegistration;
   const warnings = [];
   plugin.register({
     pluginConfig,
@@ -111,13 +117,25 @@ function registerWith(pluginConfig, { resolvePathReturnsUndefined = false } = {}
         warnings.push(String(message));
       },
     },
+    registerTool(definition) {
+      toolRegistration = definition;
+    },
     on(name, handler) {
       assert.equal(name, "before_prompt_build");
       hook = handler;
     },
   });
   assert.equal(typeof hook, "function");
-  return { hook, warnings };
+  assert.ok(toolRegistration, "choose_sticker must be registered");
+  return {
+    hook,
+    warnings,
+    createTool(context = {}) {
+      return typeof toolRegistration === "function"
+        ? toolRegistration(context)
+        : toolRegistration;
+    },
+  };
 }
 
 const pluginConfig = {
@@ -133,6 +151,8 @@ const pluginConfig = {
   onlyUserTurns: true,
   timeoutMs: 2500,
   maxMemories: 3,
+  stickerEnabled: false,
+  stickerConfigPath: `${repoPath}/social_layer/config/stickers.json`,
 };
 
 const message = "  GitHub 仓库的 OpenClaw 配置报错了，怎么修复？\n";
@@ -147,11 +167,24 @@ const working = registerWith(pluginConfig, {
 const result = await working.hook(event, {
   senderId: "wx-owner",
   channel: "ilink",
+  sessionKey: "test-session",
 });
 assert.equal(event.prompt, message);
 assert.equal(typeof result?.prependContext, "string");
 assert.match(result.prependContext, /\[Yogurt Social State\]/);
 assert.match(result.prependContext, /GitHub 私有仓库/);
+
+const chooseSticker = working.createTool({
+  requesterSenderId: "wx-owner",
+  deliveryContext: { channel: "ilink" },
+  sessionKey: "test-session",
+});
+assert.equal(chooseSticker.name, "choose_sticker");
+const noCandidateResult = await chooseSticker.execute("tool-call-1", {
+  sticker_id: "sticker-0123456789ab",
+});
+assert.equal(noCandidateResult.details.status, "rejected");
+assert.equal(noCandidateResult.details.reason, "snapshot_missing");
 
 const brokenConfig = {
   ...pluginConfig,
@@ -165,12 +198,12 @@ const failOpenResult = await broken.hook(
     messages: [],
     context: { pluginConfig: brokenConfig },
   },
-  { senderId: "wx-owner", channel: "ilink" },
+  { senderId: "wx-owner", channel: "ilink", sessionKey: "broken-session" },
 );
 assert.equal(failOpenResult, undefined);
 assert.equal(broken.warnings.length, 1);
 assert.match(broken.warnings[0], /fail-open/);
-console.log("typescript hook e2e: ok");
+console.log("typescript hook and tool e2e: ok");
 JS
 
   YOGURT_TEST_REPO="$REPO_ROOT" \
@@ -178,5 +211,5 @@ JS
   YOGURT_TEST_PYTHON="$(command -v python3)" \
     node --experimental-strip-types "$NODE_TEST_ROOT/e2e.mjs"
 else
-  echo "typescript hook e2e: skipped (node not found)"
+  echo "typescript hook and tool e2e: skipped (node not found)"
 fi
