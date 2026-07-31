@@ -1,190 +1,305 @@
 # Yogurt Social Layer V2 表情包系统设计
 
-> 状态：设计启动
-> 分支：`feature/sticker-system-v2`
+> 状态：架构确认 / 开发启动  
+> 分支：`feature/sticker-system-v2`  
 > 基线：V1.0（已归档）
 
-## 1. V2 目标
+## 1. 架构结论
 
-V2 在 V1 已稳定运行的社交路由基础上加入本地图片表情包能力：
+V2 采用两个彼此独立的程序：
 
-- 本地表情包图片目录
-- 独立、可审阅的标签文件
-- 根据 V1 场景、消息关键词和用户关系选择表情包
-- 全局、场景和单图冷却机制
-- 每轮最多发送一张图片
-- 微信官方 Bot 图片回复
-- 发送失败时不影响原有文本回复
-- 可选的离线自动分类和标签建议
+1. **Sticker Tagger（离线表情资产处理器）**
+   - 接收上传的表情包或普通照片
+   - 自动识别画面、OCR 文字、情绪和适用场景
+   - 生成结构化标签与描述
+   - 整理到可供聊天机器人使用的正式图片库
+   - 不连接微信，不参与每轮聊天，不直接发送图片
 
-V2 不应为了发图而强行匹配。没有可靠候选、处于冷却、图片无效或渠道不支持时，应正常只发送文本。
+2. **Sticker Runtime（聊天运行时）**
+   - 只读取已经分类完成的图片库
+   - 根据 V1 场景、情绪、当前消息和冷却状态召回少量候选
+   - 把候选 ID 和文字描述提供给当前主聊天模型
+   - 主聊天模型自主决定是否选择一张表情包
+   - 后端验证选择、执行冷却并发送到微信
 
-## 2. 借鉴的开源设计
+自动分类和聊天选择必须解耦。聊天时不临时调用视觉模型看图，也不重新生成标签。
 
-### MaiBot 文本选择器
+## 2. 完整数据流
 
-值得采用：
+### 2.1 离线分类流程
 
-- 两阶段选择：先召回少量候选，再做最终决策
-- 允许明确返回 `no_match`
-- 一轮最多发送一张
-- 选择与发送使用同一份资产快照，避免索引变化后发错图
-- 发送失败后不随机换图补发
+```text
+用户上传图片到 assets/stickers/inbox/
+  ↓
+Sticker Tagger 扫描新文件
+  ├── 文件格式和大小检查
+  ├── SHA-256 去重
+  ├── 图片归一化与缩略图
+  ├── VLM 画面理解
+  ├── OCR 文字提取
+  ├── 场景、情绪、语气和关键词分类
+  └── 安全与适用边界判断
+  ↓
+生成结构化记录
+  ↓
+复制/移动到 assets/stickers/images/
+  ↓
+更新 stickers.json 或 SQLite catalog
+```
 
-V2 初版不额外调用 LLM，因此把“两阶段”实现为：
-
-1. 规则和标签召回
-2. 加权打分、冷却过滤和阈值决策
-
-### MaiBot 风格 AstrBot 表情系统
-
-值得采用：
-
-- 图片文件和元数据分离
-- 元数据可持久化、可编辑、可禁用
-- 自动描述、情绪标签和向量检索作为可选增强
-- 自动生成结果先作为描述文档或标签建议，而不是不可追踪地直接发送
-
-V2 初版使用 JSON 标签清单；运行时冷却状态使用 SQLite。后续图库明显扩大后，再考虑把资产元数据整体迁入 SQLite。
-
-### 腾讯 openclaw-weixin
-
-微信图片发送涉及：
-
-- 原图与缩略图
-- 明文大小和 MD5
-- AES-128-ECB 加密
-- CDN 上传参数
-- 构造图片消息并发送
-
-V2 不直接复制腾讯插件的内部发送流程，优先使用 OpenClaw 已规范化的回复媒体载荷，让 `openclaw-weixin` 继续负责具体 CDN 上传和协议细节。
-
-## 3. 总体架构
+### 2.2 聊天选择流程
 
 ```text
 微信消息
   ↓
-before_prompt_build
-  ↓
 V1 SocialLayerService
   ├── scene
   ├── mood
+  ├── relationship
   └── social_context
   ↓
-V2 StickerSelector
-  ├── 读取资产快照
-  ├── 场景/关键词/关系召回
-  ├── 冷却过滤
-  ├── 加权评分
-  └── 生成 pending sticker decision
+Sticker Runtime
+  ├── 读取已分类目录
+  ├── 按 scene/mood/关键词召回
+  ├── 冷却和安全过滤
+  └── 输出 Top-K 候选快照
   ↓
-Qwen 生成文本回复
+before_prompt_build 注入候选元数据
   ↓
-reply_payload_sending
-  ├── 根据 runId/sessionKey 找到 pending decision
-  └── 给 ReplyPayload 添加媒体引用
+当前 Qwen 主模型生成回复
+  ├── 可以不选择图片
+  └── 可调用 choose_sticker(sticker_id)
   ↓
-openclaw-weixin 上传并发送图片
+后端验证 sticker_id 属于本轮候选
   ↓
-message_sent
-  └── 成功后提交冷却状态；失败则丢弃 pending decision
+reply_payload_sending 附加图片
+  ↓
+openclaw-weixin 发送文本和图片
+  ↓
+message_sent 成功后提交冷却
 ```
 
-## 4. 文件和目录
+## 3. 关键原则
+
+### 3.1 分类程序独立运行
+
+Sticker Tagger 不依赖 OpenClaw Gateway 是否在线，可以：
+
+- 手动执行一次扫描
+- 批量处理一个目录
+- 以 watch 模式监听新图片
+- 未来增加独立管理页面
+
+分类失败只影响该图片入库，不影响聊天机器人。
+
+### 3.2 主模型自主选择，但后端拥有最终决定权
+
+模型可以根据回复语境决定：
+
+- 不发送表情包
+- 从本轮候选中选择一张
+
+模型不能：
+
+- 选择未进入本轮候选快照的 ID
+- 绕过冷却机制
+- 发送被禁用、未审核或存在风险的图片
+- 直接指定任意本地文件路径
+
+后端始终重新验证模型选择。验证失败时只发送文本。
+
+### 3.3 不增加第二次聊天 LLM 调用
+
+主聊天模型在原本生成回复的同一轮中选择表情包。运行时不会再额外调用一个文本模型做选择。
+
+VLM 只在离线 Sticker Tagger 中使用，和实时聊天延迟解耦。
+
+### 3.4 不强制发图
+
+没有可靠候选、处于冷却、模型不想发、图片发送失败时，均正常退化为纯文本回复。
+
+## 4. 目录结构
 
 ```text
 assets/stickers/
   README.md
-  images/
-    .gitkeep
-  stickers.schema.json
-  stickers.example.json
+  inbox/                         # 新上传、待处理图片
+  images/                        # 已归一化的正式图片库
+  thumbnails/                    # 本地管理预览图
+  stickers.schema.json           # 正式标签 Schema
+  stickers.example.json          # 示例记录
+  stickers.json                  # 本地正式目录，默认不提交 Git
+
+runtime/sticker_tagger/
+  jobs.sqlite3                   # 分类任务与失败记录
+  cache/                         # VLM/OCR 缓存
+  rejected/                      # 无效或拒绝图片
+
+tools/sticker_tagger/
+  README.md
+  config.example.json
+  src/yogurt_sticker_tagger/
+    cli.py
+    scanner.py
+    normalizer.py
+    classifier.py
+    providers.py
+    catalog_writer.py
 
 social_layer/src/yogurt_social/stickers/
-  __init__.py
-  models.py
-  catalog.py
-  cooldown.py
-  selector.py
-
-social_layer/tests/
-  test_sticker_catalog.py
-  test_sticker_cooldown.py
-  test_sticker_selector.py
-
-docs/
-  V2_DESIGN.md
+  catalog.py                     # 正式目录加载与快照
+  retriever.py                   # Top-K 候选召回
+  cooldown.py                    # 冷却与发送记录
+  pending.py                     # runId/sessionKey 待发送选择
 ```
 
-真实私人表情包图片默认不提交到 Git 仓库。仓库只保存目录说明、Schema、示例标签和测试夹具。
+真实图片、正式 `stickers.json`、任务数据库、缩略图和模型缓存默认不提交 Git。
 
-## 5. 标签模型
+## 5. Sticker Tagger 输出模型
 
-每张图片至少包含：
+每张图片的正式记录建议包含：
 
 ```json
 {
-  "id": "yogurt-smile-001",
-  "file": "images/yogurt-smile-001.png",
+  "id": "yogurt-celebrate-001",
+  "file": "images/yogurt-celebrate-001.webp",
+  "sha256": "...",
   "enabled": true,
-  "scenes": ["casual", "celebration"],
+  "status": "approved",
+  "scenes": ["celebration", "casual"],
   "emotions": ["happy", "warm"],
-  "keywords": ["开心", "好耶", "成功", "谢谢"],
+  "keywords": ["成功", "完成", "好耶", "太好了"],
   "tone": ["cute", "gentle"],
   "relationships": ["owner", "close"],
+  "description": "角色开心举手庆祝，适合任务完成或收到好消息时使用",
+  "ocr_text": "好耶",
+  "content_warning": ["none"],
   "weight": 1.0,
   "cooldown_seconds": 1800,
-  "description": "开心地举手庆祝，适合成功、感谢和轻松回应",
-  "source": "manual",
-  "reviewed": true
+  "classification": {
+    "provider": "local-vlm",
+    "model": "configured-model",
+    "confidence": 0.91,
+    "classified_at": "2026-07-31T23:00:00+08:00"
+  },
+  "source": "auto",
+  "reviewed": false
 }
 ```
 
-约束：
+### 状态字段
 
-- `id` 全局唯一
-- `file` 必须位于配置的资产根目录中，禁止路径穿越
-- `enabled=false` 的图片永不参与选择
-- `source=auto` 且 `reviewed=false` 的图片默认不参与生产发送
-- 标签文件中的路径、格式和枚举在加载时严格校验
+- `pending`：已分类，尚未批准进入正式运行库
+- `approved`：可参与聊天候选召回
+- `rejected`：不参与运行时选择
+- `disabled`：保留记录但暂时禁用
 
-## 6. 场景选择
+### 审核策略
 
-V1 场景直接作为 V2 的主要召回信号：
+支持两种模式：
 
-- `casual`：轻松、可爱、问候
-- `technical`：疑惑、认真、修复成功；默认降低发图概率
-- `playful`：调侃、得意、坏笑
-- `comfort`：安慰、抱抱、陪伴
-- `celebration`：开心、鼓掌、庆祝
-- `serious`：默认不发，除非标签明确允许且得分很高
+1. `review_required=true`
+   - 自动分类后进入 `pending`
+   - 人工确认后才变为 `approved`
 
-候选分数建议：
+2. `auto_approve_threshold=0.92`
+   - 高置信度、无风险标签的图片可自动批准
+   - 低置信度或检测到风险时仍进入 `pending`
+
+初期默认使用人工审核模式，后续可根据误标率开启高置信度自动批准。
+
+## 6. 自动分类任务
+
+Sticker Tagger 至少生成：
+
+- 一句话画面描述
+- OCR 文本
+- 主情绪与辅助情绪
+- 适用聊天场景
+- 语气标签
+- 关键词
+- 是否适合 owner/close/familiar/new 用户
+- 内容风险标签
+- 分类置信度
+
+### 分类 Provider
+
+程序通过统一 Provider 接口支持：
+
+- 本地 Ollama VLM
+- OpenAI 兼容视觉接口
+- 其他本地或远程 VLM
+- 无 VLM 时的文件名/目录规则降级
+
+分类 Provider 与聊天模型配置完全独立。
+
+### 严格结构化输出
+
+VLM 必须返回满足 Schema 的 JSON。程序负责：
+
+- JSON 解析
+- 枚举校验
+- 标签数量限制
+- OCR 长度限制
+- 危险路径过滤
+- 无效结果重试或进入失败队列
+
+VLM 不能直接写正式目录文件。
+
+## 7. 聊天运行时候选检索
+
+聊天模型不应收到整个图库。运行时先召回 `3–8` 张候选，只注入：
+
+```text
+[Available Stickers]
+- id: yogurt-celebrate-001
+  description: 开心举手庆祝，适合完成任务或收到好消息
+  emotions: happy, warm
+- id: yogurt-proud-003
+  description: 得意但不过分嘲讽，适合轻松展示成功
+  emotions: playful, proud
+
+可以不使用表情包。需要使用时只能调用 choose_sticker，并传入以上 ID。
+```
+
+召回信号：
 
 ```text
 scene_match       +4
-emotion_match     +3
-keyword_match     +2 each, capped
+mood_match        +3
+keyword_match     +2 each（设上限）
 relationship      +1
 manual_weight     × final score
-recent_same_image -∞
-recent_any_sticker penalty or block
-below_threshold   → no_match
+cooldown_block    → 排除
+unsafe_or_pending → 排除
+below_threshold   → no candidates
 ```
 
-同分候选使用加权随机，避免总是发送同一张图；测试时允许注入固定随机种子。
+候选快照与 `runId/sessionKey` 绑定，防止目录热更新后模型 ID 指向错误图片。
 
-## 7. 冷却机制
+## 8. 模型选择接口
 
-冷却状态写入 V1 同一个 SQLite 数据库中的独立表，不修改正式记忆表。
+V2 混合插件注册一个 Agent 工具：
 
-需要三层冷却：
+```text
+choose_sticker(sticker_id)
+```
 
-1. **全局冷却**：任意表情发送后，一段时间内不再发送表情。
-2. **场景冷却**：相同场景短时间不连续发图。
-3. **单图冷却**：同一图片较长时间内不得重复。
+工具行为：
 
-建议默认值：
+1. 获取当前 `runId/sessionKey`
+2. 验证 `sticker_id` 属于本轮候选快照
+3. 再次检查状态、路径和冷却
+4. 记录 pending decision
+5. 返回简短结果，让模型继续完成文本回复
+
+模型不调用工具即代表本轮不发图。
+
+OpenClaw 工具策略必须允许 `choose_sticker`，否则模型不会收到工具 Schema。
+
+## 9. 冷却机制
+
+冷却由后端强制执行，不依赖模型自觉：
 
 ```text
 global_cooldown_seconds = 300
@@ -193,107 +308,118 @@ per_sticker_cooldown_seconds = 1800
 max_stickers_per_hour = 4
 ```
 
-只在 `message_sent` 确认投递成功后提交冷却；模型失败、媒体上传失败或回复被取消时不得消耗冷却。
-
-## 8. 微信图片发送策略
-
-优先方案：在 `reply_payload_sending` 中向规范化 `ReplyPayload` 添加媒体路径或媒体 URL，由 OpenClaw 和 `openclaw-weixin` 负责平台发送。
-
-注意：OpenClaw 的消息 hook 不能自行授予本地媒体信任，因此正式实现前必须通过实机最小验证确认：
-
-- 链接插件目录下的本地图片是否可直接作为媒体引用
-- 是否必须把图片复制到 OpenClaw 允许的媒体目录
-- 微信是否发送为独立图片消息或带文字说明
-- 文本成功但图片失败时的投递结果和 `message_sent` 事件结构
-
-如果规范化载荷无法安全附加本地文件，第二方案是在 Yogurt 插件中注册一个窄权限 `send_sticker` 工具，调用 OpenClaw 公开消息发送能力；不直接依赖腾讯插件内部未承诺稳定的函数。
-
-## 9. 自动分类：建议暂定为 V2.1 可选离线工具
-
-结论：**需要保留设计入口，但不要作为 V2.0 的上线依赖。**
-
-原因：
-
-- 当前图库预计先以人工挑选的小规模资产为主，手工标签成本可控
-- 自动分类需要 VLM；当前主聊天模型不应被迫承担额外图片分析调用
-- 自动标签可能误判语气、文字梗、人物关系和不适合发送的内容
-- 自动分类若直接进入生产发送，会降低可控性和可解释性
-
-推荐方式：
+流程：
 
 ```text
-导入图片
+choose_sticker
   ↓
-离线分类命令
+pending（不消耗冷却）
   ↓
-生成 description / scenes / emotions / keywords 建议
+reply_payload_sending
   ↓
-写入 source=auto, reviewed=false
+message_sent success
   ↓
-人工审核
-  ↓
-reviewed=true 后进入生产候选
+commit cooldown
 ```
 
-自动分类可以分两级：
+任何失败或取消均清理 pending，不消耗冷却。
 
-1. **低成本规则预分类**：文件名、目录名、已有 sidecar 文本。
-2. **可选 VLM 分类**：生成画面描述、OCR 文本、情绪、适用场景和安全标签。
+## 10. 微信图片发送
 
-VLM 不应直接决定最终发送；它只生成可审核的元数据。
+优先通过 OpenClaw 规范化 `ReplyPayload` 和媒体引用交给 `openclaw-weixin`。腾讯插件继续负责缩略图、加密、CDN 上传和图片消息协议。
 
-## 10. V2.0 开发顺序
+正式实现前需要做最小实机验证：
 
-### Milestone A：资产与选择核心
+- 插件能否安全引用 `assets/stickers/images/` 下的本地文件
+- 是否需要复制到 OpenClaw 的可信媒体目录
+- 文本和图片的发送顺序
+- 图片失败时 `message_sent` 的结果结构
 
-- 图片目录和 `.gitignore`
-- JSON Schema 与示例标签
-- Catalog 严格加载
-- 场景、关键词和关系加权选择
-- `no_match`
+由于 `reply_payload_sending` 无法自行授予本地媒体信任，若本地媒体路径无法通过规范化载荷发送，则改用 OpenClaw 公开的发送能力或一个受限的发送服务；不直接依赖腾讯插件未承诺稳定的内部函数。
+
+## 11. 参考项目中采用的思想
+
+### MaiBot 文本选择器
+
+采用：
+
+- 候选召回后再由主模型选择
+- 允许 `no_match`
+- 每轮最多一张
+- 同一候选快照完成选择和发送
+- 发送失败不随机换图
+
+### AstrBot MaiBot 风格表情系统
+
+采用：
+
+- 图片与元数据分离
+- 独立自动识别和描述
+- 可审核的分类结果
+- 图片状态、禁用和风险标签
+- 后续可扩展 Embedding 检索
+
+不采用其“聊天时额外调用选择模型”的部分；酸奶优先让现有主模型在同一轮中完成选择。
+
+## 12. 开发里程碑
+
+### Milestone A：独立 Sticker Tagger
+
+- CLI 和配置
+- inbox 扫描
+- SHA-256 去重
+- 图片归一化
+- Provider 接口
+- VLM 结构化分类
+- catalog 写入
+- 失败队列和 dry-run
 - 单元测试
 
-### Milestone B：冷却
+### Milestone B：运行时目录与候选召回
 
-- SQLite 冷却表
-- 全局、场景、单图和每小时上限
-- pending / commit / rollback 生命周期
-- 并发安全测试
+- Catalog 快照
+- 只加载 approved 记录
+- 场景/情绪/关键词召回
+- Top-K 候选
+- `no candidates`
+- 候选快照绑定 runId/sessionKey
 
-### Milestone C：OpenClaw 集成
+### Milestone C：模型自主选择
 
-- V1 bridge 返回场景与 sticker decision
-- `runId/sessionKey` pending decision 缓存
-- `reply_payload_sending` 添加媒体
-- `message_sent` 提交或回滚冷却
-- 插件开关和 fail-open
+- `before_prompt_build` 候选注入
+- `choose_sticker` Agent 工具
+- 工具白名单配置
+- pending decision
+- 无效 ID 和越权选择测试
 
-### Milestone D：微信实机验收
+### Milestone D：冷却与微信发送
 
-- 文本 + 图片正常发送
-- 图片失败不阻断文本
-- 冷却生效
-- 严肃场景不乱发图
-- 无匹配时只发文本
-- 连续多轮不会重复同一张
+- SQLite 冷却
+- `reply_payload_sending`
+- 本地媒体信任验证
+- `message_sent` commit/rollback
+- 微信实机发送
+- 发送失败保持文本回复
 
-### V2.1 候选
+### Milestone E：管理体验
 
-- 离线 VLM 自动分类
-- OCR 和敏感内容审核
-- 管理页或批量审核 CLI
-- Embedding 召回
-- 从聊天图片中受控采集表情包
+- watch 模式
+- pending 审核命令
+- 批量启用/禁用
+- 重分类
+- 统计与误标记录
+- 可选本地 Web 管理页面
 
-## 11. V2 验收标准
+## 13. V2 验收条件
 
-V2.0 只有在以下条件全部满足时才可合并到 `main`：
-
-- 资产清单加载失败时 fail-open
-- 每轮最多发送一张表情包
-- 无可靠匹配时不发送
-- 冷却仅在成功投递后提交
-- 图片路径无法越出资产目录
-- 私人图片和运行时数据库不进入 Git
-- 微信连续实机测试中，文本与图片均成功送达
-- 禁用 V2 后 V1 文本社交层完全不受影响
+- 新图片可通过独立程序自动生成结构化标签
+- 分类程序关闭或故障不影响微信聊天
+- 运行时只读取 approved 图片
+- 主模型可以不选图，也能从本轮候选中选择一张
+- 模型不能选择候选以外的图片
+- 冷却机制后端强制生效
+- 图片成功发送至微信
+- 图片发送失败时文本仍正常送达
+- 每轮不超过一张图片
+- 不增加第二次实时聊天 LLM 调用
+- V1 的原始消息保持和 fail-open 不变量继续成立
