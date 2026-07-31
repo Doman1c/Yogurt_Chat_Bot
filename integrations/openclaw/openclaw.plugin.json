@@ -1,0 +1,76 @@
+{
+  "id": "yogurt-social-injector",
+  "name": "Yogurt Social Injector",
+  "description": "Injects Yogurt Social Layer V1 context before eligible OpenClaw model turns.",
+  "version": "0.1.0",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "pythonPath": {
+        "type": "string",
+        "default": "python3"
+      },
+      "repoPath": {
+        "type": "string"
+      },
+      "dbPath": {
+        "type": "string",
+        "default": "~/.openclaw/yogurt-social/memory.sqlite3"
+      },
+      "defaultUserId": {
+        "type": "string",
+        "default": "owner"
+      },
+      "senderMap": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": {}
+      },
+      "ownerSenderIds": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "unknownSenderPolicy": {
+        "type": "string",
+        "enum": ["default", "pseudonymous", "skip"],
+        "default": "default"
+      },
+      "allowedChannels": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": []
+      },
+      "onlyUserTurns": {
+        "type": "boolean",
+        "default": true
+      },
+      "timeoutMs": {
+        "type": "integer",
+        "minimum": 250,
+        "maximum": 10000,
+        "default": 2500
+      },
+      "maxMemories": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10,
+        "default": 3
+      }
+    }
+  }
+}
