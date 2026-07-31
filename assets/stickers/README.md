@@ -1,44 +1,83 @@
 # 酸奶表情包资产目录
 
-本目录用于 V2 本地图片表情包系统。
+本目录保存 V2 的待分类图片、正式图片库和结构化标签。
+
+自动分类由独立的 `Yogurt Sticker Tagger` 完成；OpenClaw 聊天运行时只读取已经分类完成并允许使用的图片。
 
 ## 本地目录结构
 
 ```text
 assets/stickers/
-  images/                 # 本地图片，不提交到 Git
-  stickers.json           # 本地正式标签，不提交到 Git
+  inbox/                  # 新上传、尚未处理的图片
+  images/                 # 已归一化的正式图片库
+  thumbnails/             # 管理和审核用缩略图
+  stickers.json           # 本地正式目录，不提交 Git
   stickers.example.json   # 可提交的示例
   stickers.schema.json    # 标签格式约束
 ```
 
-## 初始化
+## 使用流程
 
-```bash
-cd ~/Yogurt_Chat_Bot
-mkdir -p assets/stickers/images
-cp assets/stickers/stickers.example.json assets/stickers/stickers.json
+### 1. 上传图片
+
+把新的表情包或照片放入：
+
+```text
+assets/stickers/inbox/
 ```
 
-把图片复制到：
+### 2. 运行独立分类程序
+
+```bash
+python3 -m yogurt_sticker_tagger scan
+```
+
+分类程序负责：
+
+- 文件检查
+- SHA-256 去重
+- 图片归一化
+- 视觉理解
+- OCR
+- 场景、情绪、语气和关键词标签
+- 风险标签
+- 写入 `stickers.json`
+
+成功处理的图片会进入：
 
 ```text
 assets/stickers/images/
 ```
 
-然后在 `stickers.json` 中为每张图填写标签。
+### 3. 聊天运行时读取
 
-## 文件命名建议
+聊天系统不会重新分析图片，只会读取 `stickers.json` 中已经批准的记录，召回少量候选交给主聊天模型选择。
 
-使用稳定、可读且不会随排序变化的文件名：
+## 初始化
+
+```bash
+cd ~/Yogurt_Chat_Bot
+mkdir -p \
+  assets/stickers/inbox \
+  assets/stickers/images \
+  assets/stickers/thumbnails
+
+cp \
+  assets/stickers/stickers.example.json \
+  assets/stickers/stickers.json
+```
+
+## 文件命名
+
+原始上传文件名可以任意。Sticker Tagger 入库时应生成稳定名称，例如：
 
 ```text
-yogurt-happy-001.png
-yogurt-comfort-001.jpg
+yogurt-happy-001.webp
+yogurt-comfort-001.webp
 yogurt-confused-001.webp
 ```
 
-不要使用只有数字的文件名，也不要在后续更新时复用旧 ID 指向另一张图。
+不要复用旧 ID 指向另一张图片。正式记录使用 SHA-256 检测重复内容。
 
 ## 支持格式
 
@@ -47,28 +86,43 @@ V2.0 计划支持：
 - PNG
 - JPEG / JPG
 - WEBP
-- GIF 是否能以预期方式在微信播放，需要单独实机验证；V2.0 不把 GIF 动画作为必需能力
+- GIF 可先作为静态首帧分类；是否向微信发送动画需要单独实机验证
+
+## 审核模式
+
+分类器支持两种发布策略：
+
+- `review_required=true`：分类后先进入 `pending`
+- 高置信度自动批准：满足阈值且无风险标签时进入 `approved`
+
+聊天运行时只使用状态为 `approved` 且 `enabled=true` 的记录。
+
+## 标签含义
+
+- `scenes`：适用的 V1 聊天场景
+- `emotions`：图片表达的主要情绪
+- `keywords`：与图片语义相关的触发词
+- `tone`：可爱、温柔、调皮、认真等表达气质
+- `relationships`：允许面向的关系等级
+- `description`：供主聊天模型理解图片用途的简短描述
+- `ocr_text`：图片内识别出的文字
+- `content_warning`：敏感或不适用边界
+- `classification`：分类模型、时间和置信度
 
 ## 隐私和 Git
 
-以下内容默认被 `.gitignore` 排除：
+以下内容默认由 `.gitignore` 排除：
 
-- `images/` 下的真实表情包
-- `stickers.json` 本地正式标签
-- 自动分类生成的待审核清单
-- 缩略图和运行缓存
+- `inbox/` 中的真实上传图片
+- `images/` 中的真实表情包
+- `thumbnails/`
+- `stickers.json`
+- 自动分类任务数据库和缓存
 
-仓库只保存 Schema、示例和测试夹具。不要提交私人聊天截图、未授权人物图片或含敏感信息的表情包。
+仓库只保存 Schema、示例、说明和测试夹具。不要提交私人聊天截图、未授权人物图片、敏感证件或含私人信息的照片。
 
-## 人工标签原则
+## 相关文档
 
-- `scenes` 表示适用的 V1 场景
-- `emotions` 表示图片表达的主要情绪
-- `keywords` 是当前消息中可能触发该图的词
-- `relationships` 限制可发送给哪些关系等级
-- `source=auto, reviewed=false` 的自动结果不会进入生产候选
-- 不确定是否适用时宁可少标，不要让一张图覆盖所有场景
-
-## 自动分类
-
-V2.0 不依赖自动分类。未来离线分类器会读取 `images/`，生成待审核标签建议，但不会直接启用或发送图片。
+- `docs/V2_DESIGN.md`
+- `tools/sticker_tagger/README.md`
+- `stickers.schema.json`
