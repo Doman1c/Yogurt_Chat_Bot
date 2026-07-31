@@ -25,7 +25,13 @@ mkdir -p "$(dirname "$DB_PATH")"
 chmod 700 "$(dirname "$DB_PATH")" 2>/dev/null || true
 
 bash "$REPO_ROOT/scripts/test-openclaw-adapter"
-openclaw plugins validate --entry "$PLUGIN_DIR/index.ts"
+
+# The validate command resolves package.json from its current package root.
+# Run it inside the plugin directory rather than from the repository root.
+(
+  cd "$PLUGIN_DIR"
+  openclaw plugins validate --entry ./index.ts
+)
 
 CONFIG_FILE="$(openclaw config file 2>/dev/null || true)"
 if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
