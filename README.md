@@ -34,6 +34,7 @@ Ollama / Qwen
 - social_layer/src/：社交人格层代码
 - social_layer/config/：人格与行为配置
 - social_layer/data/：本地运行数据
+- integrations/openclaw/：OpenClaw 原生前置注入插件
 - docs/：架构和开发文档
 - scripts/：同步和部署脚本
 
@@ -60,5 +61,11 @@ Ollama / Qwen
 - 与当前消息相关的记忆检索
 - 可供 OpenClaw 注入的 `Yogurt Social State`
 - 命令行工具与单元测试
+- OpenClaw `before_prompt_build` 前置注入适配器
+- 可配置 senderId → Yogurt user_id 映射
+- fail-open、超时保护、安装与回滚脚本
 
-详见 `docs/V1_DESIGN.md`。
+详见：
+
+- `docs/V1_DESIGN.md`
+- `docs/OPENCLAW_ADAPTER.md`
