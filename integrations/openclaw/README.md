@@ -1,8 +1,12 @@
-# Yogurt Social Injector（OpenClaw 前置注入插件）
+# Yogurt Social Injector（OpenClaw 混合插件）
 
-这是 Yogurt Social Layer V1 的原生 OpenClaw 插件。
+这是 Yogurt Chat Bot 的原生 OpenClaw 插件。目前同时提供：
 
-插件注册 `before_prompt_build` hook，在每一轮符合条件的用户消息进入主模型之前，调用本地 Python bridge，并把生成的 `Yogurt Social State` 作为动态 `prependContext` 注入。
+- V1 `before_prompt_build` 社交上下文注入；
+- V2 表情包候选注入；
+- V2 `choose_sticker(sticker_id)` 受限选择工具。
+
+V2 当前只完成“候选与选择”阶段。工具会记录 pending decision，但不会立即发送图片，也不会消耗冷却。
 
 ## 运行流程
 
@@ -11,57 +15,62 @@ OpenClaw 当前用户消息
   ↓
 before_prompt_build
   ↓
-读取 senderId / channel / pluginConfig
-  ↓
-映射 Yogurt user_id
-  ↓
-stdin JSON 调用 Python bridge
-  ↓
-SocialLayerService.analyze(user_id, message)
-  ↓
-返回 social_context
+Python bridge
+  ├── V1 SocialLayerService
+  └── V2 StickerRuntime 候选召回
   ↓
 prependContext
+  ├── Yogurt Social State
+  └── Yogurt Sticker Candidates（可能为空）
   ↓
-原有 OpenClaw Agent 与 Qwen 流程
+Qwen 生成回复
+  ├── 可以不选择表情包
+  └── 可以调用 choose_sticker(sticker_id)
+  ↓
+插件验证该 ID 是否属于本轮候选快照
+  ↓
+记录 pending decision
 ```
+
+## `choose_sticker` 安全边界
+
+模型只能传入本轮候选列表中的 `sticker_id`。插件会拒绝：
+
+- 任意本地路径；
+- 不属于本轮候选的 ID；
+- 已过期的候选；
+- 旧轮次的候选；
+- 同一轮第二个不同的表情包。
+
+同一个 ID 的重复调用按幂等成功处理。候选快照默认约五分钟过期，并限制内存中的快照数量。
 
 ## 核心保证
 
-- 不修改 `event.prompt`
-- 不重新拼接用户消息
-- 不增加第二次大模型调用
-- 不从普通聊天自动写入长期记忆
-- Python、SQLite 或 bridge 故障时 fail-open
-- 不把消息正文、Token 或数据库内容写入插件日志
-
-## 运行时兼容处理
-
-插件会：
-
-- 合并注册阶段配置与每轮 `event.context.pluginConfig`
-- 对 `api.resolvePath()` 返回空值或抛出异常进行回退
-- 展开 `~/` 本地路径
-- 使用 `spawn` 参数数组，不经过 shell
-- 通过 stdin 传递当前消息
-- 限制 bridge 输出大小
-- 对 Python 子进程设置超时
+- 不修改 `event.prompt`；
+- 不重新拼接用户原始消息；
+- 不增加第二次聊天大模型调用；
+- 不在聊天时调用视觉模型；
+- 不从普通聊天自动写入长期记忆；
+- Python、SQLite、Catalog 或 bridge 故障时 fail-open；
+- V2 关闭时维持 V1 原行为；
+- 不把消息正文、Token、绝对图片路径或数据库内容写入日志。
 
 ## 安装
-
-从仓库根目录运行：
 
 ```bash
 bash scripts/install-openclaw-adapter
 ```
 
-手动链接安装：
+安装脚本默认写入：
 
-```bash
-openclaw plugins install --link "$HOME/Yogurt_Chat_Bot/integrations/openclaw"
+```json
+{
+  "stickerEnabled": false,
+  "stickerConfigPath": "<repo>/social_layer/config/stickers.json"
+}
 ```
 
-当前 OpenClaw 版本中，`--link` 不应与 `--force` 一起使用。
+所以升级插件不会自动开始选图。准备好 `stickers.json` 后再显式开启。
 
 ## 验证
 
@@ -72,14 +81,11 @@ openclaw plugins inspect yogurt-social-injector --runtime --json
 openclaw gateway restart
 ```
 
-成功的运行时信息应包含：
+运行时信息应同时包含：
 
 ```text
-status: loaded
-shape: hook-only
 before_prompt_build
-allowPromptInjection: true
-allowConversationAccess: true
+choose_sticker
 ```
 
 实时日志：
@@ -88,28 +94,22 @@ allowConversationAccess: true
 openclaw logs --follow --local-time
 ```
 
-成功注入时：
+正常注入示例：
 
 ```text
 yogurt-social-injector: injection start ...
-yogurt-social-injector: injection ready bridgeMs=... contextChars=...
+yogurt-social-injector: injection ready bridgeMs=... contextChars=... stickerCandidates=...
 ```
 
-若社交层故障，会记录：
+模型成功选择时只记录：
 
 ```text
-yogurt-social-injector: social layer unavailable (...); fail-open
+yogurt-social-injector: sticker selection pending
 ```
 
-此时 OpenClaw 应继续调用原模型，不应阻断回复。
+不会记录具体 sticker ID 或本地路径。
 
 ## 配置
-
-完整配置示例见：
-
-```text
-integrations/openclaw/config.example.json
-```
 
 主要字段：
 
@@ -125,6 +125,17 @@ integrations/openclaw/config.example.json
 - `onlyUserTurns`
 - `timeoutMs`
 - `maxMemories`
+- `stickerEnabled`
+- `stickerConfigPath`
+
+完整示例见 `integrations/openclaw/config.example.json`。
+
+V2 运行参数与图片 Catalog 分离：
+
+```text
+social_layer/config/stickers.json      # 候选数量、阈值、未来冷却参数
+assets/stickers/stickers.json          # Tagger 导出的图片与标签
+```
 
 ## 测试
 
@@ -132,21 +143,33 @@ integrations/openclaw/config.example.json
 bash scripts/test-openclaw-adapter
 ```
 
-测试覆盖 Python 单元测试、bridge JSON、真实 TypeScript hook → Python → SQLite 调用，以及故障时的 fail-open。
+测试覆盖：
+
+- V1 Python 社交层与 fail-open；
+- Tagger Catalog → bridge 候选输出；
+- TypeScript hook → Python → SQLite；
+- `choose_sticker` 注册；
+- 非候选 ID 拒绝；
+- 同轮最多一张；
+- 旧候选替换与过期清理。
 
 ## 关闭与卸载
+
+只关闭 V2、保留 V1：
+
+```text
+plugins.entries.yogurt-social-injector.config.stickerEnabled = false
+```
+
+关闭整个插件：
 
 ```bash
 openclaw plugins disable yogurt-social-injector
 openclaw gateway restart
 ```
 
+完整卸载：
+
 ```bash
 bash scripts/uninstall-openclaw-adapter
-```
-
-详细设计、安装、用户映射和回滚说明见：
-
-```text
-docs/OPENCLAW_ADAPTER.md
 ```
