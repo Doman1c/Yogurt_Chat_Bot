@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -76,15 +77,37 @@ function stringMap(value: unknown): Record<string, string> {
   );
 }
 
-function expandPath(api: any, value: string): string {
-  return typeof api.resolvePath === "function" ? api.resolvePath(value) : value;
+function expandHome(value: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  return value;
 }
 
-function readConfig(api: any): PluginConfig {
-  const raw = asRecord(api.pluginConfig);
+function expandPath(api: any, value: string): string {
+  const fallback = expandHome(value);
+  if (typeof api.resolvePath !== "function") {
+    return fallback;
+  }
+
+  try {
+    const resolved = api.resolvePath(value);
+    return typeof resolved === "string" && resolved.length > 0
+      ? resolved
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readConfig(api: any, event?: any): PluginConfig {
+  const registrationConfig = asRecord(api.pluginConfig);
+  const eventContext = asRecord(event?.context);
+  const eventConfig = asRecord(eventContext.pluginConfig);
+  const raw = { ...registrationConfig, ...eventConfig };
   const pluginDir = dirname(fileURLToPath(import.meta.url));
   const inferredRepoPath = resolve(pluginDir, "../..");
-  const defaultDbPath = process.env.YOGURT_SOCIAL_DB || "~/.openclaw/yogurt-social/memory.sqlite3";
+  const defaultDbPath =
+    process.env.YOGURT_SOCIAL_DB || "~/.openclaw/yogurt-social/memory.sqlite3";
   const unknownSenderPolicy =
     raw.unknownSenderPolicy === "pseudonymous" || raw.unknownSenderPolicy === "skip"
       ? raw.unknownSenderPolicy
@@ -125,7 +148,11 @@ function channelFromContext(ctx: any): string {
   return "unknown";
 }
 
-function resolveUserId(config: PluginConfig, senderId: string | undefined, channel: string): string | undefined {
+function resolveUserId(
+  config: PluginConfig,
+  senderId: string | undefined,
+  channel: string,
+): string | undefined {
   if (senderId && config.senderMap[senderId]) {
     return config.senderMap[senderId];
   }
@@ -244,12 +271,12 @@ export default definePluginEntry({
   name: "Yogurt Social Injector",
   description: "Injects Yogurt Social Layer V1 context before each eligible model turn.",
   register(api) {
-    const config = readConfig(api);
-
     api.on(
       "before_prompt_build",
       async (event, ctx) => {
+        const config = readConfig(api, event);
         if (!config.enabled) return;
+
         const prompt = typeof event.prompt === "string" ? event.prompt : "";
         if (!prompt) return;
 
@@ -261,6 +288,11 @@ export default definePluginEntry({
         const userId = resolveUserId(config, senderId, channel);
         if (!userId) return;
 
+        const startedAt = Date.now();
+        api.logger.info(
+          `${PLUGIN_ID}: injection start channel=${channel} promptChars=${prompt.length}`,
+        );
+
         try {
           const bridgeResult = await runBridge(config, {
             user_id: userId,
@@ -270,10 +302,20 @@ export default definePluginEntry({
             typeof bridgeResult.social_context === "string"
               ? bridgeResult.social_context.trim()
               : "";
-          if (!socialContext) return;
+          if (!socialContext) {
+            api.logger.info(
+              `${PLUGIN_ID}: bridge returned no context in ${Date.now() - startedAt}ms`,
+            );
+            return;
+          }
 
-          // Add context separately. Never replace or concatenate event.prompt.
-          return { prependSystemContext: socialContext };
+          api.logger.info(
+            `${PLUGIN_ID}: injection ready bridgeMs=${Date.now() - startedAt} contextChars=${socialContext.length}`,
+          );
+
+          // Per-turn social state is dynamic context. Never replace or
+          // concatenate event.prompt.
+          return { prependContext: socialContext };
         } catch (error) {
           const reason = error instanceof Error ? error.message : "unknown_error";
           api.logger.warn(`${PLUGIN_ID}: social layer unavailable (${reason}); fail-open`);
