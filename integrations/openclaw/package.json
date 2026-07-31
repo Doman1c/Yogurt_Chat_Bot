@@ -1,10 +1,11 @@
 {
   "name": "@doman1c/openclaw-yogurt-social-injector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "files": [
     "index.ts",
+    "sticker-selection.ts",
     "openclaw.plugin.json",
     "README.md",
     "config.example.json"
