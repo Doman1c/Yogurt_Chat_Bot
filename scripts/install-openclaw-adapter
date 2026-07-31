@@ -24,14 +24,40 @@ PYTHON_PATH="$(command -v python3)"
 mkdir -p "$(dirname "$DB_PATH")"
 chmod 700 "$(dirname "$DB_PATH")" 2>/dev/null || true
 
+# This runs the Python unit tests plus a real TypeScript hook -> Python bridge
+# -> SQLite simulation. Do not use `openclaw plugins validate --entry` here:
+# that command validates defineToolPlugin metadata and rejects hook-only
+# definePluginEntry plugins by design.
 bash "$REPO_ROOT/scripts/test-openclaw-adapter"
 
-# The validate command resolves package.json from its current package root.
-# Run it inside the plugin directory rather than from the repository root.
-(
-  cd "$PLUGIN_DIR"
-  openclaw plugins validate --entry ./index.ts
-)
+# Perform lightweight package checks without invoking the tool-plugin metadata
+# generator/validator.
+python3 - "$PLUGIN_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+plugin_dir = Path(sys.argv[1])
+manifest_path = plugin_dir / "openclaw.plugin.json"
+package_path = plugin_dir / "package.json"
+entry_path = plugin_dir / "index.ts"
+
+for path in (manifest_path, package_path, entry_path):
+    if not path.is_file():
+        raise SystemExit(f"missing plugin file: {path}")
+
+with manifest_path.open(encoding="utf-8") as handle:
+    manifest = json.load(handle)
+with package_path.open(encoding="utf-8") as handle:
+    package = json.load(handle)
+
+if manifest.get("id") != "yogurt-social-injector":
+    raise SystemExit("plugin manifest id mismatch")
+extensions = package.get("openclaw", {}).get("extensions", [])
+if "./index.ts" not in extensions:
+    raise SystemExit("package.json does not expose ./index.ts")
+print("hook plugin package check: ok")
+PY
 
 CONFIG_FILE="$(openclaw config file 2>/dev/null || true)"
 if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
@@ -91,6 +117,7 @@ openclaw config patch --file "$PATCH_FILE" --dry-run
 openclaw config patch --file "$PATCH_FILE"
 openclaw plugins enable "$PLUGIN_ID"
 openclaw config validate
+openclaw plugins doctor
 
 YOGURT_SOCIAL_DB="$DB_PATH" bash "$REPO_ROOT/scripts/yogurt-social" \
   upsert-user --user-id owner --display-name Domanic --relationship owner
