@@ -134,6 +134,22 @@ class StickerRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(StickerCatalogError, "逃逸"):
             StickerCatalogLoader(self.catalog_path, require_files=False).load()
 
+    def test_loader_rejects_asset_root_escape(self) -> None:
+        sticker = _sticker("sticker-888888888888")
+        self.catalog_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-08-01T00:00:00+00:00",
+                    "asset_root": "../../outside",
+                    "stickers": [sticker],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(StickerCatalogError, "asset_root"):
+            StickerCatalogLoader(self.catalog_path, require_files=False).load()
+
     def test_retriever_filters_and_ranks_candidates(self) -> None:
         approved = _sticker("sticker-333333333333")
         pending = _sticker("sticker-444444444444", status="pending")
