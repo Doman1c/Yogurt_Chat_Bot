@@ -1,0 +1,29 @@
+{
+  "name": "@doman1c/openclaw-yogurt-social-injector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "index.ts",
+    "openclaw.plugin.json",
+    "README.md",
+    "config.example.json"
+  ],
+  "engines": {
+    "node": ">=22.22.3"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    },
+    "install": {
+      "minHostVersion": ">=2026.7.1"
+    }
+  }
+}
