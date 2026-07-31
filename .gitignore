@@ -1,0 +1,47 @@
+# macOS
+.DS_Store
+
+# Secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.token
+*credentials*
+*secret*
+
+# OpenClaw sensitive files
+.openclaw/
+openclaw.json
+auth/
+sessions/
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+logs/
+runtime/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+build/
+
+# Temporary files
+*.bak
+*.backup
+*.tmp
+*.swp
