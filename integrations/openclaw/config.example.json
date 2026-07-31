@@ -1,0 +1,30 @@
+{
+  "plugins": {
+    "entries": {
+      "yogurt-social-injector": {
+        "enabled": true,
+        "hooks": {
+          "allowConversationAccess": true,
+          "allowPromptInjection": true,
+          "timeouts": {
+            "before_prompt_build": 12000
+          }
+        },
+        "config": {
+          "enabled": true,
+          "pythonPath": "/usr/bin/python3",
+          "repoPath": "/Users/your-name/Yogurt_Chat_Bot",
+          "dbPath": "/Users/your-name/.openclaw/yogurt-social/memory.sqlite3",
+          "defaultUserId": "owner",
+          "senderMap": {},
+          "ownerSenderIds": [],
+          "unknownSenderPolicy": "default",
+          "allowedChannels": [],
+          "onlyUserTurns": true,
+          "timeoutMs": 2500,
+          "maxMemories": 3
+        }
+      }
+    }
+  }
+}
