@@ -1,0 +1,10 @@
+{
+  "character_name": "酸奶",
+  "default_language": "zh-CN",
+  "default_relationship": "owner",
+  "max_memories_per_reply": 3,
+  "automatic_memory_write": false,
+  "memory_write_requires_review": true,
+  "default_scene": "casual",
+  "default_reply_length": "short"
+}
