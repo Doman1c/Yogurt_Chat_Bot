@@ -72,7 +72,10 @@ if openclaw plugins inspect "$PLUGIN_ID" >/dev/null 2>&1; then
   openclaw plugins uninstall "$PLUGIN_ID" --force --keep-files >/dev/null 2>&1 || true
 fi
 
-openclaw plugins install "$PLUGIN_DIR" --link --force
+# OpenClaw 2026.7.1-2 rejects combining --link and --force. This is an
+# interactive local install, so use link mode alone and accept the provenance
+# prompt when OpenClaw asks for confirmation.
+openclaw plugins install --link "$PLUGIN_DIR"
 
 PATCH_FILE="$(mktemp)"
 trap 'rm -f "$PATCH_FILE"' EXIT
