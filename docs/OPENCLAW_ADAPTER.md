@@ -1,19 +1,29 @@
 # V1 OpenClaw 前置注入适配器
 
-## 结论
+## 最终结论
 
-V1 使用 OpenClaw 原生插件的 `before_prompt_build` typed hook。
+Yogurt Social Layer V1 使用 OpenClaw 原生插件的 `before_prompt_build` typed hook。
 
-该 hook 在主模型调用前执行，并允许返回：
+该 hook 在主模型调用前执行。插件读取当前消息和渠道身份，调用本地 Python bridge 生成 `Yogurt Social State`，并返回：
 
 ```ts
-{ prependSystemContext: contextBlock }
+{ prependContext: socialContext }
 ```
 
-适配器不会修改 `event.prompt`，因此用户最新消息仍由 OpenClaw 按原样保存、
-传递和交给 Qwen。社交层只作为本轮附加系统上下文出现，主模型仍只生成一次。
+社交状态属于每轮动态上下文，因此最终实现使用 `prependContext`，而不是把内容写入用户消息或长期系统提示词。
 
-没有使用 skill、内部 `HOOK.md`、额外 Planner 模型或 OpenClaw 核心源码补丁。
+插件不会修改 `event.prompt`，不会增加第二次大模型调用，也不会从普通聊天中自动写入长期记忆。
+
+## 最终运行环境
+
+V1 已在以下环境完成微信实机验收：
+
+```text
+OpenClaw：2026.7.1-2
+微信插件：@tencent-weixin/openclaw-weixin 2.4.6
+模型：ollama/qwen3.5:9b
+渠道：微信官方 Bot 私聊
+```
 
 ## 文件结构
 
@@ -40,18 +50,21 @@ OpenClaw 构建本轮 prompt
 before_prompt_build
   ↓
 Yogurt Social Injector
-  ├── 从 hook context 读取稳定 senderId
+  ├── 读取 channel 与 senderId
+  ├── 合并插件注册配置和每轮解析配置
   ├── 映射为 Yogurt user_id
   ├── 通过 stdin 调用本地 Python bridge
   ├── SocialLayerService.analyze(user_id, message)
-  └── 返回 prependSystemContext
+  └── 获取 social_context
+  ↓
+返回 prependContext
   ↓
 OpenClaw 原有 Agent、工具与 Qwen 调用
   ↓
 微信回复
 ```
 
-Python bridge 的输出结构：
+## Python bridge 输出
 
 ```json
 {
@@ -73,40 +86,52 @@ Python bridge 的输出结构：
 }
 ```
 
-`final_model_input` 是可测试的注入计划。实际 OpenClaw hook 只返回
-`prependSystemContext`，不把两段文本重新拼接为新的用户消息。
+说明：Python bridge 中的 `final_model_input` 是用于测试的逻辑计划，其中旧字段名 `prepend_system_context` 仅表示“附加上下文”，不代表 OpenClaw 最终使用的 hook 返回字段。OpenClaw 插件最终返回的是：
 
-## 为什么不是其他入口
+```ts
+{ prependContext: socialContext }
+```
 
-- **skill**：只有模型决定调用时才运行，不保证每条消息都在模型调用前执行。
-- **内部 HOOK.md**：适合命令和 Gateway 生命周期事件，不是每轮动态 prompt 注入面。
-- **message_received**：主要是观察入站消息，发生阶段过早，也不是官方 prompt 修改接口。
-- **before_agent_run**：适合在最终模型输入前检查或阻断，不负责添加 prompt context。
-- **修改 OpenClaw 核心**：升级成本高，回滚困难，当前没有必要。
+实际 hook 只注入 `social_context`，不会把它和用户消息重新拼接。
 
-`before_prompt_build` 是官方为动态上下文和系统提示词贡献提供的稳定入口。
+## 为什么选择 `before_prompt_build`
+
+- **skill**：只有模型决定调用时才运行，不能保证每条消息都在主模型前执行。
+- **内部 HOOK.md**：适合命令或 Gateway 生命周期事件，不适合每轮动态 prompt 注入。
+- **message_received**：发生阶段过早，也不是最终 prompt 修改接口。
+- **修改 OpenClaw 核心**：升级成本高、回滚困难。
+- **第二个 Planner 模型**：增加延迟、资源占用和不可解释性，不符合 V1 范围。
+
+`before_prompt_build` 可以在主模型调用前添加动态上下文，同时保持用户消息不变。
+
+## 插件形态
+
+插件入口使用：
+
+```ts
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+```
+
+这是 hook-only 插件，不是 `defineToolPlugin` 工具插件。
+
+因此不应使用：
+
+```bash
+openclaw plugins validate --entry ./index.ts
+```
+
+该命令会要求 `defineToolPlugin` 元数据，并拒绝 hook-only 入口。
 
 ## 安装
 
-在目标分支和仓库根目录执行：
+在仓库根目录执行：
 
 ```bash
 cd ~/Yogurt_Chat_Bot
-git switch feature/social-layer-v1
-git pull --ff-only origin feature/social-layer-v1
+git switch main
+git pull --ff-only origin main
 bash scripts/install-openclaw-adapter
 ```
-
-安装脚本会：
-
-1. 运行 Python 单元测试和本地端到端模拟；
-2. 校验 OpenClaw 插件入口；
-3. 在本地备份当前 OpenClaw 配置；
-4. 通过 `openclaw plugins install --link` 链接插件；
-5. 仅修改该插件自己的配置项；
-6. 启用 conversation access 与 prompt injection 权限；
-7. 创建或更新本地 `owner` 用户；
-8. 验证配置并重启 Gateway。
 
 跳过自动重启：
 
@@ -114,7 +139,34 @@ bash scripts/install-openclaw-adapter
 bash scripts/install-openclaw-adapter --no-restart
 ```
 
-默认数据库：
+安装脚本会：
+
+1. 运行 Python 单元测试；
+2. 运行 bridge JSON 模拟；
+3. 运行 TypeScript hook → Python → SQLite 跨层测试；
+4. 检查插件包结构；
+5. 备份 OpenClaw 配置；
+6. 使用 `openclaw plugins install --link` 安装本地插件；
+7. 写入插件权限和运行配置；
+8. 创建或更新 `owner` 用户；
+9. 验证配置；
+10. 重启 Gateway 并执行 runtime inspect。
+
+当前 OpenClaw 版本不允许组合：
+
+```text
+--link + --force
+```
+
+正确命令是：
+
+```bash
+openclaw plugins install --link "$HOME/Yogurt_Chat_Bot/integrations/openclaw"
+```
+
+## 默认数据库
+
+OpenClaw 插件和仓库 CLI 统一使用：
 
 ```text
 ~/.openclaw/yogurt-social/memory.sqlite3
@@ -127,9 +179,7 @@ YOGURT_SOCIAL_DB="$HOME/.local/share/yogurt-chat-bot/memory.sqlite3" \
   bash scripts/install-openclaw-adapter
 ```
 
-## 必需的 OpenClaw 权限
-
-非内置插件读取当前 prompt 并修改 prompt 构建时，需要：
+## 必需权限
 
 ```json
 {
@@ -138,7 +188,10 @@ YOGURT_SOCIAL_DB="$HOME/.local/share/yogurt-chat-bot/memory.sqlite3" \
       "yogurt-social-injector": {
         "hooks": {
           "allowConversationAccess": true,
-          "allowPromptInjection": true
+          "allowPromptInjection": true,
+          "timeouts": {
+            "before_prompt_build": 12000
+          }
         }
       }
     }
@@ -146,19 +199,22 @@ YOGURT_SOCIAL_DB="$HOME/.local/share/yogurt-chat-bot/memory.sqlite3" \
 }
 ```
 
-安装脚本会写入这些字段。关闭 `allowPromptInjection` 后，OpenClaw 会忽略
-prompt 修改结果；这是紧急停用注入的第二道开关。
+- `allowConversationAccess`：允许插件读取当前对话输入。
+- `allowPromptInjection`：允许 hook 返回动态上下文。
+- `before_prompt_build` timeout：OpenClaw hook 总预算。
+
+Python bridge 自身默认超时为 `2500 ms`。
 
 ## 用户映射
 
-V1 当前默认：
+默认单用户私聊配置：
 
 ```text
-未知微信 senderId → owner（当前单用户私聊默认值）
+未知 senderId → owner
 owner → Domanic / relationship=owner
 ```
 
-该行为由配置控制，不在代码中永久写死。映射优先级：
+映射优先级：
 
 1. `senderMap[senderId]`
 2. `ownerSenderIds` 中的 senderId → `defaultUserId`
@@ -166,65 +222,111 @@ owner → Domanic / relationship=owner
 
 可选策略：
 
-- `default`：未知发送者使用 `defaultUserId`，适合当前单用户私聊。
-- `pseudonymous`：按 channel + senderId 生成稳定哈希用户 ID。
-- `skip`：未知发送者不运行社交层，直接走 OpenClaw 原流程。
+- `default`：未知发送者使用 `defaultUserId`
+- `pseudonymous`：根据 channel + senderId 生成稳定哈希用户 ID
+- `skip`：未知发送者跳过社交层
 
-配置明确映射：
+明确映射示例：
 
 ```bash
 openclaw config set \
   plugins.entries.yogurt-social-injector.config.senderMap \
-  '{"CHANNEL_SCOPED_SENDER_ID":"owner"}' --strict-json
+  '{"CHANNEL_SCOPED_SENDER_ID":"owner"}' \
+  --strict-json
+
 openclaw gateway restart
 ```
 
 不得把真实微信 Token、登录凭据或完整 OpenClaw 配置提交到仓库。
 
-## 本地测试
+## 路径与配置兼容处理
 
-完整测试：
+最终插件会：
+
+- 读取注册阶段的 `api.pluginConfig`
+- 读取每轮 `event.context.pluginConfig`
+- 合并两者，以每轮解析配置优先
+- 对 `api.resolvePath()` 返回 `undefined` 进行回退
+- 对 `api.resolvePath()` 抛出异常进行回退
+- 手动展开 `~/`
+- 检查 Python source 目录是否存在
+
+该兼容处理修复了实机测试中的：
+
+```text
+The "path" argument must be of type string. Received undefined
+```
+
+## 子进程边界
+
+- 使用 `spawn` 和参数数组，不经过 shell
+- 当前消息通过 stdin JSON 传递
+- Python stderr 会被排空，但不会注入模型或输出消息正文
+- stdout 上限为 1 MiB
+- 默认 bridge 超时为 2500 ms
+- 超时后终止 Python 子进程
+- 非零退出码、非法 JSON、路径错误均触发 fail-open
+
+## 本地测试
 
 ```bash
 cd ~/Yogurt_Chat_Bot
 bash scripts/test-openclaw-adapter
 ```
 
-该脚本包括：
+测试包括：
 
-- 原有 memory/router 测试；
-- 新增 adapter 单元测试；
-- 真实 SQLite + 显式共同经历检索；
-- Python stdin/stdout bridge 模拟；
-- TypeScript hook → Python bridge → SQLite 跨层端到端模拟；
-- SQLite 初始化失败和 Python 启动失败时的 fail-open 模拟；
-- 原始消息逐字保留断言。
+- memory/router 单元测试
+- adapter 单元测试
+- 显式共同经历检索
+- Python stdin/stdout bridge
+- TypeScript hook → Python → SQLite
+- SQLite 初始化失败 fail-open
+- Python 启动失败 fail-open
+- 原始消息逐字保留
+- `prependContext` 返回断言
 
-手动 bridge 测试：
+最终预期：
+
+```text
+Ran 13 tests
+OK
+bridge simulation: ok
+fail-open simulation: ok
+typescript hook e2e: ok
+```
+
+## 手动 bridge 测试
 
 ```bash
 export PYTHONPATH="$PWD/social_layer/src"
+
 printf '%s' \
   '{"user_id":"owner","message":"OpenClaw 配置报错了，怎么修复？"}' \
-  | python3 -m yogurt_social.openclaw_adapter --pretty
+  | python3 -m yogurt_social.openclaw_adapter \
+      --db "$HOME/.openclaw/yogurt-social/memory.sqlite3" \
+      --pretty
 ```
 
 ## 运行时验证
 
 ```bash
 openclaw config validate
+openclaw plugins doctor
 openclaw plugins inspect yogurt-social-injector --runtime --json
+openclaw gateway status --deep --require-rpc
 ```
 
-运行时结果应包含已加载插件和 `before_prompt_build` hook。
+成功结果应包含：
 
-检查开关：
-
-```bash
-openclaw config get \
-  plugins.entries.yogurt-social-injector.config.enabled
-openclaw config get \
-  plugins.entries.yogurt-social-injector.hooks.allowPromptInjection
+```text
+status: loaded
+shape: hook-only
+hookCount: 1
+typedHooks: before_prompt_build
+allowPromptInjection: true
+allowConversationAccess: true
+diagnostics: []
 ```
 
 ## 微信端验证
@@ -235,130 +337,131 @@ openclaw config get \
 酸奶在吗
 ```
 
-预期为 `casual`，回复简短自然。
+预期：日常、简短、自然。
 
 ```text
 OpenClaw 配置报错了，怎么修复？
 ```
 
-预期为 `technical`，回复精确并给出可执行步骤。
+预期：技术场景，步骤清晰。
 
 ```text
 模型又报错了，我真的很难过
 ```
 
-预期情绪优先，进入 `comfort`，先回应难过而不是只讲技术。
+预期：情绪优先，先回应难过。
 
 ```text
-GitHub 仓库的适配器下一步怎么做？
+我们之前一起完成的 OpenClaw 适配器，下一步做什么？
 ```
 
-若已明确写入相关共同经历，回复应自然利用该记忆，但不得忽略当前问题。
+若已经显式写入相关共同经历，回复应自然利用该记忆。
+
+实时日志应出现：
+
+```text
+yogurt-social-injector: injection start ...
+yogurt-social-injector: injection ready bridgeMs=... contextChars=...
+outbound: text sent OK
+```
 
 ## fail-open 验证
 
-### 关闭适配器
-
-```bash
-openclaw config set \
-  plugins.entries.yogurt-social-injector.config.enabled false --strict-json
-openclaw gateway restart
-```
-
-此时微信仍应由原来的 OpenClaw + Qwen 正常回复。
-
-恢复：
-
-```bash
-openclaw config set \
-  plugins.entries.yogurt-social-injector.config.enabled true --strict-json
-openclaw gateway restart
-```
-
-### 模拟 Python bridge 故障
-
-先记录当前 Python 路径：
-
-```bash
-openclaw config get \
-  plugins.entries.yogurt-social-injector.config.pythonPath
-```
-
-临时设为不存在的命令：
+临时破坏 Python 路径：
 
 ```bash
 openclaw config set \
   plugins.entries.yogurt-social-injector.config.pythonPath \
   /nonexistent/yogurt-python
+
 openclaw gateway restart
 ```
 
-发送一条微信消息。预期：日志记录一次插件故障，微信仍由原流程回复。
-插件不会记录消息正文、Token 或数据库内容。
+发送微信消息。预期：
 
-随后恢复真实路径：
+- 日志记录一次 `fail-open`
+- 微信仍由原来的 OpenClaw + Qwen 正常回复
+- 插件不记录消息正文
+
+恢复：
 
 ```bash
 openclaw config set \
   plugins.entries.yogurt-social-injector.config.pythonPath \
   "$(command -v python3)"
+
 openclaw gateway restart
 ```
 
-## 超时与故障边界
-
-- Python 子进程默认超时：2500 ms。
-- OpenClaw hook budget：12000 ms。
-- bridge stdout 上限：1 MiB。
-- 使用 `spawn` + 参数数组，不经过 shell。
-- 当前消息通过 stdin JSON 传递，不放入命令行参数。
-- Python stderr 不注入模型上下文。
-- 任意 spawn、超时、退出码、JSON 或 SQLite 错误都会返回无修改结果。
-
 ## 关闭、卸载与回滚
 
-只关闭注入：
+关闭插件：
 
 ```bash
 openclaw plugins disable yogurt-social-injector
 openclaw gateway restart
 ```
 
-完整卸载，保留 SQLite：
+卸载并保留 SQLite：
 
 ```bash
 bash scripts/uninstall-openclaw-adapter
 ```
 
-卸载并删除本地 SQLite：
+卸载并删除 SQLite：
 
 ```bash
 bash scripts/uninstall-openclaw-adapter --purge-data
 ```
 
-安装脚本会在 OpenClaw 配置旁创建本地备份：
+安装脚本会在 OpenClaw 配置旁创建备份：
 
 ```text
 openclaw.json.pre-yogurt-adapter.<timestamp>.backup
 ```
 
-OpenClaw 自身的 `plugins uninstall` 会移除插件 entry、安装记录、allow/deny
-记录和 linked load path，不会修改本仓库代码。
+## 已知非阻塞日志
+
+### `plugins.allow is empty`
+
+这是非 bundled 插件显式信任提醒，不等于插件加载失败。
+
+### `tools.allow removed ...`
+
+这是 Agent 工具白名单日志，与本插件无关。
+
+### `sendTyping` DNS 错误
+
+只影响“正在输入”状态。正文是否成功以此为准：
+
+```text
+outbound: text sent OK
+```
+
+### hook-only compatibility info
+
+OpenClaw 会把插件标记为 hook-only compatibility path。V1 实机测试证明该形态可以正常加载和运行。
 
 ## V1 边界
 
-本适配器只读取显式写入的：
+V1 只读取显式写入的：
 
 - 用户关系
 - facts
 - preferences
 - episodes
 
-它不会：
+V1 不会：
 
-- 从聊天自动学习或写入正式记忆；
-- 调用额外大模型做分类；
-- 添加 Planner → Replyer 链；
-- 发送表情包；
-- 修改 Ollama context 或 thinking；
-- 修改 OpenClaw 核心源码。
+- 从聊天自动学习或写入长期记忆
+- 调用额外大模型分类
+- 添加 Planner → Replyer 链
+- 发送表情包
+- 修改 Ollama context length 或 thinking
+- 修改 OpenClaw 核心源码
+
+最终验收与归档记录见：
+
+```text
+docs/archive/V1_RELEASE.md
+```
