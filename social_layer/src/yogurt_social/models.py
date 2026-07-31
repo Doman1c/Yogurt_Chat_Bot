@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 
-class Scene(StrEnum):
+class StringEnum(str, Enum):
+    """Python 3.9-compatible equivalent of enum.StrEnum."""
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class Scene(StringEnum):
     TECHNICAL = "technical"
     CASUAL = "casual"
     PLAYFUL = "playful"
@@ -14,7 +21,7 @@ class Scene(StrEnum):
     SERIOUS = "serious"
 
 
-class Mood(StrEnum):
+class Mood(StringEnum):
     NEUTRAL = "neutral"
     CURIOUS = "curious"
     HAPPY = "happy"
@@ -23,20 +30,20 @@ class Mood(StrEnum):
     ANXIOUS = "anxious"
 
 
-class ReplyLength(StrEnum):
+class ReplyLength(StringEnum):
     SHORT = "short"
     MEDIUM = "medium"
     DETAILED = "detailed"
 
 
-class Relationship(StrEnum):
+class Relationship(StringEnum):
     NEW = "new"
     FAMILIAR = "familiar"
     CLOSE = "close"
     OWNER = "owner"
 
 
-@dataclass(slots=True)
+@dataclass
 class DialogueState:
     scene: Scene
     mood: Mood
@@ -53,7 +60,7 @@ class DialogueState:
         return asdict(self)
 
 
-@dataclass(slots=True)
+@dataclass
 class MemorySnippet:
     kind: str
     text: str
