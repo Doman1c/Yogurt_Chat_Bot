@@ -3,6 +3,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
-export YOGURT_SOCIAL_DB="${YOGURT_SOCIAL_DB:-$REPO_ROOT/social_layer/data/yogurt_social.sqlite3}"
+export YOGURT_SOCIAL_DB="${YOGURT_SOCIAL_DB:-$HOME/.openclaw/yogurt-social/memory.sqlite3}"
+
+mkdir -p "$(dirname "$YOGURT_SOCIAL_DB")"
+chmod 700 "$(dirname "$YOGURT_SOCIAL_DB")" 2>/dev/null || true
 
 exec python3 -m yogurt_social.cli "$@"
