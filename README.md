@@ -197,9 +197,12 @@ Yogurt_Chat_Bot/
 │   └── test-sticker-auto-delivery
 └── docs/
     ├── V1_DESIGN.md
-    ├── V2_STICKER_SYSTEM.md
+    ├── V2_DESIGN.md
+    ├── V2_PROGRESS.md
     ├── OPENCLAW_ADAPTER.md
     └── archive/
+        ├── V1_RELEASE.md
+        └── V2_RELEASE.md
 ```
 
 ## 前置条件
@@ -512,5 +515,6 @@ openclaw gateway restart
 
 - `integrations/openclaw/README.md`：插件、Hook、发送链路和排障；
 - `assets/stickers/README.md`：Catalog 同步与资产安全边界；
-- `docs/V2_STICKER_SYSTEM.md`：V2 设计；
-- `docs/archive/V1_RELEASE.md`：V1 验收归档。
+- `docs/V2_DESIGN.md`：V2 最终架构；
+- `docs/archive/V1_RELEASE.md`：V1 验收归档；
+- `docs/archive/V2_RELEASE.md`：V2 微信实机验收归档。
