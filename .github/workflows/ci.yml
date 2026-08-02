@@ -32,4 +32,5 @@ jobs:
       - name: Run adapter and sticker tests
         run: |
           bash scripts/test-openclaw-adapter
+          bash scripts/test-sticker-explicit-fallback
           bash scripts/test-sticker-auto-delivery
