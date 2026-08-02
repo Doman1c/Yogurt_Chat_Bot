@@ -1,8 +1,8 @@
 {
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
-  "description": "Injects Yogurt social context and bounded V2 sticker candidates.",
-  "version": "0.2.0",
+  "description": "Injects Yogurt social context and delivers bounded V2 stickers.",
+  "version": "0.3.0",
   "activation": {
     "onStartup": true
   },
@@ -81,6 +81,11 @@
       "stickerConfigPath": {
         "type": "string",
         "default": "social_layer/config/stickers.json"
+      },
+      "stickerSelectionMode": {
+        "type": "string",
+        "enum": ["auto", "tool"],
+        "default": "auto"
       }
     }
   }
