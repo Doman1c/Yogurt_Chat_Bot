@@ -1,0 +1,114 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-08-01T00:00:00+00:00",
+  "generated_by": "Yogurt Sticker Tagger",
+  "asset_root": ".",
+  "stickers": [
+    {
+      "id": "sticker-111111111111",
+      "file": "images/sticker-111111111111.webp",
+      "thumbnail": "thumbnails/sticker-111111111111.webp",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "status": "approved",
+      "enabled": true,
+      "description": "角色开心举手庆祝，适合任务完成、连接成功或收到好消息时使用。",
+      "ocr_text": "好耶",
+      "scenes": [
+        "celebration",
+        "casual"
+      ],
+      "emotions": [
+        "happy",
+        "warm"
+      ],
+      "tones": [
+        "cute",
+        "celebratory"
+      ],
+      "keywords": [
+        "成功",
+        "完成",
+        "通过",
+        "好耶"
+      ],
+      "relationships": [
+        "familiar",
+        "close",
+        "owner"
+      ],
+      "avoid_when": [
+        "用户正在讨论医疗、法律或其他严肃风险问题"
+      ],
+      "content_warnings": [
+        "none"
+      ],
+      "weight": 1.0,
+      "cooldown_seconds": 1800,
+      "confidence": 0.94,
+      "classification": {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "prompt_version": "1.0",
+        "classified_at": "2026-08-01T00:00:00+00:00"
+      },
+      "image": {
+        "width": 512,
+        "height": 512,
+        "mime_type": "image/webp",
+        "file_bytes": 65536
+      }
+    },
+    {
+      "id": "sticker-222222222222",
+      "file": "images/sticker-222222222222.webp",
+      "thumbnail": "thumbnails/sticker-222222222222.webp",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "status": "approved",
+      "enabled": true,
+      "description": "一只猫露出无语又好笑的表情，适合熟人间轻松吐槽。",
+      "ocr_text": "",
+      "scenes": [
+        "playful",
+        "casual"
+      ],
+      "emotions": [
+        "speechless",
+        "frustrated"
+      ],
+      "tones": [
+        "funny",
+        "sarcastic"
+      ],
+      "keywords": [
+        "无语",
+        "离谱",
+        "没话说"
+      ],
+      "relationships": [
+        "close",
+        "owner"
+      ],
+      "avoid_when": [
+        "用户正在表达严重悲伤或焦虑"
+      ],
+      "content_warnings": [
+        "none"
+      ],
+      "weight": 0.9,
+      "cooldown_seconds": 1800,
+      "confidence": 0.91,
+      "classification": {
+        "provider": "ollama",
+        "model": "qwen3.5:9b",
+        "prompt_version": "1.0",
+        "classified_at": "2026-08-01T00:00:00+00:00"
+      },
+      "image": {
+        "width": 512,
+        "height": 512,
+        "mime_type": "image/webp",
+        "file_bytes": 57344
+      }
+    }
+  ]
+}

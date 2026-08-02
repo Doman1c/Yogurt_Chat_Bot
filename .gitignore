@@ -28,6 +28,19 @@ logs/
 runtime/
 *.log
 
+# Local sticker assets and generated metadata
+assets/stickers/inbox/*
+!assets/stickers/inbox/.gitkeep
+assets/stickers/images/*
+!assets/stickers/images/.gitkeep
+assets/stickers/thumbnails/*
+!assets/stickers/thumbnails/.gitkeep
+assets/stickers/stickers.json
+assets/stickers/stickers.auto.json
+assets/stickers/stickers.review.json
+assets/stickers/cache/
+social_layer/config/stickers.json
+
 # Python
 __pycache__/
 *.py[cod]

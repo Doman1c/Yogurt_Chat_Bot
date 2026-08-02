@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
+
+python3 - <<'PY'
+from pathlib import Path
+
+from yogurt_social.stickers.models import (
+    StickerCatalogSnapshot,
+    StickerRecord,
+)
+from yogurt_social.stickers.retriever import StickerRetriever
+
+
+def record(*, warnings=("none",)):
+    return StickerRecord(
+        id="sticker-low-weight",
+        file="images/sticker-low-weight.webp",
+        asset_path=Path("/tmp/sticker-low-weight.webp"),
+        sha256="0" * 64,
+        status="approved",
+        enabled=True,
+        description="一张安全的可爱卖萌表情",
+        ocr_text="",
+        scenes=("playful",),
+        emotions=("happy",),
+        tones=("cute",),
+        keywords=("可爱",),
+        relationships=("owner",),
+        avoid_when=(),
+        content_warnings=warnings,
+        weight=0.5,
+        cooldown_seconds=0,
+        confidence=0.95,
+    )
+
+
+def snapshot(sticker):
+    return StickerCatalogSnapshot(
+        schema_version="1.0",
+        generated_at="2026-08-02T00:00:00+00:00",
+        generated_by="test",
+        source_path=Path("/tmp/stickers.json"),
+        asset_root=Path("/tmp"),
+        stickers=(sticker,),
+    )
+
+
+retriever = StickerRetriever(snapshot(record()), minimum_score=5.0, max_candidates=5)
+
+ordinary = retriever.retrieve(
+    message="发一个卖萌的表情包",
+    scene="playful",
+    mood="neutral",
+    relationship="owner",
+    allow_sticker=True,
+    explicit_request=False,
+)
+assert ordinary == [], ordinary
+
+explicit = retriever.retrieve(
+    message="发一个卖萌的表情包",
+    scene="playful",
+    mood="neutral",
+    relationship="owner",
+    allow_sticker=False,
+    explicit_request=True,
+)
+assert len(explicit) == 1, explicit
+assert explicit[0].sticker_id == "sticker-low-weight"
+assert explicit[0].score == 5.0
+assert "intent:explicit_fallback" in explicit[0].matched_signals
+
+unsafe_retriever = StickerRetriever(
+    snapshot(record(warnings=("violence",))),
+    minimum_score=5.0,
+    max_candidates=5,
+)
+unsafe = unsafe_retriever.retrieve(
+    message="发一个表情包",
+    scene="playful",
+    mood="neutral",
+    relationship="owner",
+    allow_sticker=True,
+    explicit_request=True,
+)
+assert unsafe == [], unsafe
+
+print("sticker explicit fallback: ok")
+PY

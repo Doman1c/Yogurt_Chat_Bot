@@ -22,7 +22,10 @@
           "allowedChannels": [],
           "onlyUserTurns": true,
           "timeoutMs": 2500,
-          "maxMemories": 3
+          "maxMemories": 3,
+          "stickerEnabled": false,
+          "stickerConfigPath": "/Users/your-name/Yogurt_Chat_Bot/social_layer/config/stickers.json",
+          "stickerSelectionMode": "auto"
         }
       }
     }
