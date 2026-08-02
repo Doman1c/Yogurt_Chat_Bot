@@ -6,9 +6,9 @@
 - V2 表情包候选召回；
 - 默认 `auto` 单次推理选图；
 - 可选 `tool` 双次推理调试模式；
-- 正文发送完成后发送实际表情图片。
+- 通过 OpenClaw 正常回复媒体链路发送实际表情图片。
 
-当前插件版本：`0.3.0`。
+当前插件版本：`0.3.1`。
 
 ## 默认流程：`auto`
 
@@ -27,18 +27,20 @@ TypeScript 自动选择策略
   ├── 全局 / Scene / 单图冷却
   └── 每小时数量限制
   ↓
-只把最终选中的一张表情描述注入 Prompt
+只向 Qwen 注入“简短确认、不要描述画面”的提示
   ↓
 Qwen 只推理一次并生成正文
   ↓
-正文发送完成
+reply_payload_sending
   ↓
-sendSessionAttachment
+将选中表情的绝对路径写入最终 ReplyPayload.mediaUrls
   ↓
-微信收到真实图片
+OpenClaw 正常 outbound dispatcher
+  ↓
+openclaw-weixin 上传微信 CDN 并发送图片消息
 ```
 
-`auto` 模式不会向模型暴露 `choose_sticker`，因此不会因为工具调用触发第二次 Qwen 推理。
+`auto` 模式不会向模型暴露 `choose_sticker`，因此不会因为工具调用触发第二次 Qwen 推理，也不会把具体表情描述暴露给正文生成。
 
 ## 调试流程：`tool`
 
@@ -61,7 +63,7 @@ Qwen 调用 choose_sticker(sticker_id)
   ↓
 Qwen 第二次推理生成最终正文
   ↓
-正文发送完成后发送所选图片
+reply_payload_sending 将所选图片附到最终回复
 ```
 
 这个模式用于验证模型选图能力，不建议作为本地 9B 模型的日常默认模式。
@@ -116,27 +118,31 @@ Top 1 - Top 2 >= proactive_min_margin
 images/sticker-0123456789ab.webp
 ```
 
-发送前会：
+附加到回复前会：
 
 1. 解析到 `assets/stickers/`；
 2. 解析真实文件路径；
 3. 拒绝逃出表情目录的路径；
 4. 确认目标是普通文件；
-5. 通过 OpenClaw `sendSessionAttachment` 发送。
+5. 只在 `kind=final` 的 `reply_payload_sending` Hook 中加入 `mediaUrls`；
+6. 交给当前频道的正常 `sendMedia` 实现，而不是调用 bundled-only 的 `sendSessionAttachment`。
 
-图片发送失败时只记录脱敏错误，已经生成的文字回复不会被撤回或阻断。
+对 `openclaw-weixin`，成功的真实链路应出现：
 
-## 多段正文的发送顺序
-
-微信可能把一条模型回复拆成多个文本 payload。插件在最后一个成功文本发送事件后等待一小段时间，再发送图片：
-
-```json
-{
-  "delivery_delay_ms": 1500
-}
+```text
+outbound: ... mediaUrl=present
+[weixin] sendWeixinMediaFile: uploading image ...
+[weixin] sendWeixinMediaFile: image upload done ...
+sendImageMessageWeixin: success ...
 ```
 
-同一轮后续文本会重置计时器，避免表情插在正文中间。
+插件自己的 `sticker media attached` 只表示图片已进入 OpenClaw 最终回复载荷；是否真正送达以频道上传和发送日志为准。
+
+## 回复载荷行为
+
+表情路径和模型正文进入同一个最终 `ReplyPayload`。OpenClaw 会把正文作为首张媒体的文字部分，并由频道统一执行发送，因此不再需要等待 `agent_end` 后额外创建第二条附件任务，也不会出现第三方插件调用 `sendSessionAttachment` 后返回 `ok=false` 却误报成功的问题。
+
+`delivery_delay_ms` 暂时保留在 Sticker Runtime 配置中用于旧配置兼容，`0.3.1` 的直接回复媒体链路不再依赖该延迟。
 
 ## OpenClaw 插件配置
 
@@ -196,7 +202,7 @@ social_layer/config/stickers.json
 }
 ```
 
-缺少新字段时会使用上述默认值，因此旧的本地 `stickers.json` 不需要立即重建。
+缺少新字段时会使用安全默认值，因此旧的本地 `stickers.json` 不需要立即重建。
 
 ## 隐藏微信工具进度卡片
 
@@ -219,10 +225,10 @@ openclaw config set \
 yogurt-social-injector: injection ready ... stickerMode=auto stickerCandidates=... stickerSelected=... stickerDecision=explicit|proactive
 ```
 
-图片发送成功：
+成功附加到最终回复：
 
 ```text
-yogurt-social-injector: sticker media sent mode=auto sticker=...
+yogurt-social-injector: sticker media attached trigger=reply_payload_sending mode=auto sticker=... mediaCount=1
 ```
 
 未发送的常见原因：
@@ -238,10 +244,10 @@ hourly_limit
 user_forbid
 ```
 
-图片发送失败时：
+路径校验失败时：
 
 ```text
-yogurt-social-injector: sticker media send failed (...); text preserved
+yogurt-social-injector: sticker media attach failed (...); text preserved
 ```
 
 ## 安装与更新
@@ -254,11 +260,12 @@ bash scripts/install-openclaw-adapter
 
 - Python 社交层与 fail-open；
 - Sticker Catalog 与 Retriever；
-- 新的 `index-v2.ts` 插件入口；
+- `index-v2.ts` 插件入口；
 - `sticker-plugin-utils.ts`；
 - `sticker-selection.ts`；
 - `auto` 模式隐藏工具；
-- `tool` 模式候选 ID 校验。
+- `tool` 模式候选 ID 校验；
+- `reply_payload_sending` 最终媒体附加与一次性消费。
 
 ## 验证
 
@@ -275,9 +282,11 @@ openclaw logs --follow --local-time
 - 不修改 `event.prompt`；
 - 用户原始消息逐字保留；
 - `auto` 模式只调用一次聊天模型；
+- 不向模型注入具体表情画面描述；
 - 不在聊天时调用视觉模型；
 - 不从普通聊天自动写入长期记忆；
-- Python、SQLite、Catalog 或图片发送故障时 fail-open；
+- 只允许 Catalog 中通过目录边界校验的本地图片；
+- Python、SQLite、Catalog 或图片附加故障时 fail-open；
 - V2 关闭时维持 V1 原行为；
 - 不把消息正文、Token 或绝对图片路径写入常规日志。
 
