@@ -130,6 +130,8 @@ assert.equal(typeof hooks.before_prompt_build, "function");
 assert.equal(typeof hooks.message_sent, "function");
 assert.equal(toolFactory({ sessionKey: "session-auto" }), null);
 
+// Match the WeChat runtime shape that exposed the production bug: inbound has
+// a sender peer but no usable session key, while message_sent has to + session.
 const result = await hooks.before_prompt_build(
   {
     prompt: "酸奶，发一个卖萌的表情包过来",
@@ -138,25 +140,24 @@ const result = await hooks.before_prompt_build(
   {
     senderId: "wx-owner",
     channel: "ilink",
-    sessionKey: "session-auto",
-    deliveryContext: { to: "wx-owner" },
   },
 );
 
-assert.match(result.prependContext, /\[Yogurt Sticker Plan\]/);
+assert.match(result.prependContext, /\[Yogurt Sticker Delivery\]/);
 assert.doesNotMatch(result.prependContext, /\[Yogurt Sticker Candidates\]/);
+assert.doesNotMatch(result.prependContext, /一只猫咪正在卖萌/);
+assert.match(result.prependContext, /一句很短、自然的确认/);
+assert.match(result.prependContext, /不要描述、解释或复述表情包画面/);
 
 hooks.message_sent(
   {
     success: true,
-    content: "主人收到卖萌表情啦",
+    content: "好的，主人～",
     sessionKey: "session-auto",
     to: "wx-owner",
   },
   {
     channelId: "ilink",
-    sessionKey: "session-auto",
-    conversationId: "wx-owner",
   },
 );
 
@@ -166,6 +167,7 @@ assert.equal(sentAttachments.length, 1);
 assert.equal(sentAttachments[0].sessionKey, "session-auto");
 assert.equal(sentAttachments[0].files.length, 1);
 assert.match(sentAttachments[0].files[0].path, /assets\/stickers\/images\/sticker-test123\.webp$/);
+assert.ok(logs.some((message) => message.includes("sticker media scheduled mode=auto")));
 assert.ok(logs.some((message) => message.includes("sticker media sent mode=auto")));
 
 console.log("sticker auto delivery: ok");
