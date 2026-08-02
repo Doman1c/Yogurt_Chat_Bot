@@ -2,38 +2,17 @@
 
 酸奶是一个运行在 **OpenClaw + Ollama + 微信官方 Bot** 之上的本地 AI 角色项目。
 
-项目目标不是单纯给本地模型套一层聊天界面，而是在不增加第二次大模型调用的前提下，为每一轮消息补充稳定、可解释、可回滚的社交上下文，让酸奶能够根据当前场景、用户关系、明确写入的偏好和共同经历调整回复方式。
+它在不增加第二次聊天模型推理的前提下，为每轮消息补充可解释、可回滚的社交上下文，并根据场景、用户关系和离线审核过的表情包资产，生成自然的文字回复并按需发送真实图片。
 
-## 当前状态
+## 当前稳定状态
 
-**V1 已于 2026-07-31 完成验收并进入稳定归档。**
+- **V1 社交层**：2026-07-31 完成微信实机验收；
+- **V2 表情包系统**：2026-08-02 完成微信实机验收；
+- **OpenClaw 插件版本**：`0.3.3`；
+- **Sticker Tagger 版本**：`0.2.0`；
+- **当前已审核资产基线**：14 张 `approved + enabled` 表情包。
 
-V1 已验证的完整链路：
-
-```text
-微信私聊消息
-  ↓
-@tencent-weixin/openclaw-weixin
-  ↓
-OpenClaw before_prompt_build
-  ↓
-Yogurt Social Injector
-  ↓
-Python SocialLayerService
-  ├── 场景识别
-  ├── 回复风格路由
-  ├── 用户关系读取
-  ├── 偏好与共同经历检索
-  └── 生成 Yogurt Social State
-  ↓
-prependContext 动态注入
-  ↓
-Ollama / Qwen
-  ↓
-微信回复
-```
-
-最终实机验收环境：
+最终实机环境：
 
 - macOS
 - OpenClaw `2026.7.1-2`
@@ -42,166 +21,198 @@ Ollama / Qwen
 - `qwen3.5:9b`
 - 微信官方 Bot 私聊
 
-连续多轮实机日志均完成：
+V2 已验证：
+
+- 用户明确要求时会发送实际图片；
+- 用户明确禁止时只发送文字；
+- 模型正文保持简短，不描述或虚构图片画面；
+- 表情包从本地审核 Catalog 中安全召回；
+- 图片通过 `openclaw-weixin` outbound adapter、微信 CDN 和原生图片消息链路送达；
+- 正文、候选召回或图片发送失败时保持 fail-open，不阻断原聊天。
+
+## 完整架构
 
 ```text
-inbound message
-injection start
-injection ready
-outbound: text sent OK
+微信私聊消息
+  ↓
+@tencent-weixin/openclaw-weixin
+  ↓
+OpenClaw before_prompt_build
+  ↓
+Yogurt Social Injector 0.3.3
+  ↓
+Python bridge
+  ├── V1 SocialLayerService
+  │   ├── 场景识别
+  │   ├── 回复风格路由
+  │   ├── 用户关系
+  │   └── 显式记忆检索
+  └── V2 StickerRuntime
+      ├── Catalog 加载
+      ├── approved / enabled / warning 过滤
+      ├── 场景、情绪、关键词与关系评分
+      └── Top-K 候选
+  ↓
+TypeScript 自动选择策略
+  ├── 明确请求：宽松阈值与安全 fallback
+  ├── 主动发送：高阈值与 Top1/Top2 分差
+  ├── 全局、场景、单图冷却
+  └── 每小时上限
+  ↓
+只注入“简短确认、不要描述图片”的提示
+  ↓
+Ollama / Qwen 单次推理生成正文
+  ↓
+agent_end（message_sent 为兼容回退）
+  ↓
+loadAdapter("openclaw-weixin")
+  ↓
+adapter.sendMedia(...)
+  ↓
+微信 CDN 上传与图片消息发送
 ```
 
-社交层实测耗时约为 `50–87 ms`，单轮注入上下文约为 `275–296` 个字符。
+## 两个独立仓库
 
-## V1 已实现功能
+### Yogurt Chat Bot
 
-### 1. 规则式场景识别
+负责实时聊天：
 
-V1 不额外调用分类模型，使用本地规则识别当前消息场景：
+- 社交上下文注入；
+- 表情候选召回与选择；
+- 冷却、安全和路径校验；
+- 调用微信频道发送图片。
 
-- `casual`：日常交流
-- `technical`：技术排障与配置问题
-- `playful`：玩笑与轻松互动
-- `comfort`：安慰和情绪支持
-- `celebration`：庆祝与积极反馈
-- `serious`：严肃问题
+### Yogurt Sticker Tagger
 
-情绪类场景具有较高优先级，避免用户表达难过时只得到机械的技术回答。
+独立仓库：`Doman1c/Yogurt_Sticker_Tagger`
 
-### 2. 回复风格路由
+负责离线资产管理：
 
-根据场景生成可解释的回复策略，包括：
+- 图片校验、去重和 WebP 归一化；
+- Ollama 视觉模型分类；
+- 人工审核和受约束标签编辑；
+- SQLite 审计；
+- 导出稳定的 `stickers.json`。
 
-- 语气
-- 回复长度
-- 技术细节程度
-- 是否优先安慰
-- 是否使用轻松表达
-- 是否避免机械化建议
+聊天过程中不会调用视觉模型，Chat Bot 也不会直接访问 Tagger 的 SQLite。
 
-### 3. 用户关系与显式记忆
+## V1 社交层能力
 
-使用 SQLite 保存：
+### 场景识别
 
-- 用户基本关系
-- 明确事实
-- 明确偏好与不喜欢的表达
-- 共同经历
+使用本地规则识别：
 
-V1 只读取明确写入的记忆，不会从普通聊天中自动学习或自动写入长期记忆。
+- `casual`
+- `technical`
+- `playful`
+- `comfort`
+- `celebration`
+- `serious`
 
-### 4. OpenClaw 前置注入适配器
+### 回复风格路由
 
-原生 OpenClaw 插件注册：
+根据场景生成可解释的回复策略，包括语气、长度、技术细节、是否优先安慰和是否避免机械化建议。
+
+### 显式关系与记忆
+
+SQLite 保存：
+
+- 用户关系；
+- 明确事实；
+- 明确偏好；
+- 共同经历。
+
+普通聊天不会自动写入长期记忆。
+
+### fail-open
+
+Python、SQLite、bridge、Catalog 或图片发送异常时，原始 OpenClaw + Qwen 文本链路继续运行。
+
+## V2 表情包能力
+
+### 默认 `auto` 模式
+
+- Retriever 本地输出候选；
+- TypeScript 本地选择 Top 1；
+- `choose_sticker` 不暴露给模型；
+- Qwen 只推理一次；
+- 不向模型注入候选描述；
+- 正文之后由微信 outbound adapter 发送图片。
+
+### `tool` 调试模式
+
+保留 `choose_sticker(sticker_id)` 和候选校验，用于验证模型选图能力。该模式可能触发第二次推理，不建议作为 9B 本地模型的日常模式。
+
+### 明确请求 fallback
+
+用户明确要求表情时，即使普通评分因低权重或关键词不完全匹配而低于阈值，也会从仍满足以下条件的资产中选择最相关候选：
 
 ```text
-before_prompt_build
+status = approved
+enabled = true
+content_warnings = ["none"]
+relationship 合法
+文件存在且位于 assets/stickers/
 ```
 
-插件在主模型调用前运行，通过本地 Python bridge 调用：
+安全过滤不会被绕过。
 
-```python
-SocialLayerService.analyze(user_id, message)
-```
+### 禁止描述图片
 
-随后将生成的社交状态作为动态 `prependContext` 注入。
-
-插件不会：
-
-- 修改或覆盖用户原始消息
-- 把上下文伪装成用户消息
-- 增加第二次大模型调用
-- 自动写入聊天记忆
-- 修改 OpenClaw 核心源码
-
-### 5. 用户映射
-
-支持将渠道中的稳定 `senderId` 映射为 Yogurt 用户 ID：
-
-- 明确 `senderMap`
-- `ownerSenderIds`
-- 单用户默认 owner
-- 稳定匿名 ID
-- 未知用户跳过社交层
-
-当前单用户微信私聊默认使用：
-
-```text
-owner → Domanic
-```
-
-### 6. fail-open 故障保护
-
-以下故障都不会阻断原来的 OpenClaw + Qwen 回复链路：
-
-- Python 无法启动
-- SQLite 无法打开
-- bridge 超时
-- bridge 输出不是合法 JSON
-- 输出过大
-- 路径配置异常
-- SocialLayerService 内部异常
-
-发生故障时，插件返回“无修改”，OpenClaw 继续执行原模型流程。
-
-## V1 不包含的功能
-
-下列内容属于后续版本规划，不应视为 V1 已完成能力：
-
-- 从普通对话中自动提取并写入长期记忆
-- Planner → Replyer 双模型结构
-- 额外大模型分类器
-- 自动表情包选择与发送
-- 表达库自动学习
-- 后台主动学习
-- 群聊支持
-- 多微信账号共享同一官方 Bot 实例
+成功选图时，模型只需一句短确认或颜文字；无安全候选时，只能简短说明未能发送。两种情况都禁止描述、解释、复述或虚构图片画面。
 
 ## 项目目录
 
 ```text
 Yogurt_Chat_Bot/
 ├── README.md
-├── workspace/                       # OpenClaw 人格、行为规则与运行说明
+├── workspace/                         # OpenClaw 人格和行为规则
 ├── social_layer/
-│   ├── config/                      # 社交层配置
+│   ├── config/stickers.example.json   # Sticker Runtime 配置模板
 │   ├── src/yogurt_social/
-│   │   ├── memory.py                # SQLite 用户与记忆存储
-│   │   ├── router.py                # 场景识别与风格路由
-│   │   ├── service.py               # SocialLayerService 统一入口
-│   │   ├── openclaw_adapter.py      # stdin/stdout Python bridge
-│   │   └── cli.py                   # 本地管理命令
-│   └── tests/                       # 单元测试与适配器测试
+│   │   ├── memory.py
+│   │   ├── router.py
+│   │   ├── service.py
+│   │   ├── openclaw_adapter.py
+│   │   └── stickers/
+│   └── tests/
+├── assets/stickers/
+│   ├── images/                        # Tagger 导出的正式图片，不提交 Git
+│   ├── stickers.json                  # 正式 Catalog，不提交 Git
+│   └── README.md
 ├── integrations/openclaw/
-│   ├── index.ts                     # before_prompt_build 插件入口
-│   ├── openclaw.plugin.json         # 插件 manifest 与配置 schema
-│   ├── package.json                 # OpenClaw 插件包定义
-│   └── config.example.json          # 配置示例
+│   ├── index-v2.ts                    # 当前插件入口
+│   ├── sticker-selection.ts
+│   ├── sticker-plugin-utils.ts
+│   ├── openclaw.plugin.json
+│   ├── package.json
+│   ├── config.example.json
+│   └── README.md
 ├── scripts/
-│   ├── yogurt-social                # 社交层 CLI 启动脚本
-│   ├── install-openclaw-adapter     # 安装、配置与验证
-│   ├── test-openclaw-adapter        # 完整测试
-│   └── uninstall-openclaw-adapter   # 卸载与数据清理
+│   ├── yogurt-social
+│   ├── install-openclaw-adapter
+│   ├── test-openclaw-adapter
+│   ├── test-sticker-explicit-fallback
+│   └── test-sticker-auto-delivery
 └── docs/
-    ├── V1_DESIGN.md                 # V1 设计说明
-    ├── OPENCLAW_ADAPTER.md          # OpenClaw 适配器详细文档
-    └── archive/V1_RELEASE.md        # V1 最终归档与验收记录
+    ├── V1_DESIGN.md
+    ├── V2_STICKER_SYSTEM.md
+    ├── OPENCLAW_ADAPTER.md
+    └── archive/
 ```
 
-## 快速安装
+## 前置条件
 
-### 前置条件
-
-需要本机已有：
-
-- OpenClaw
-- Python 3.9 或更高版本
-- Node.js
+- OpenClaw `>=2026.7.1-0`
+- Node.js `>=22.22.3`
+- Python `>=3.9`
 - Ollama
-- 可正常工作的 OpenClaw 模型配置
-- 已连接的微信官方 Bot 插件
+- 已配置可用聊天模型
+- 已连接 `openclaw-weixin`
+- 独立安装的 Yogurt Sticker Tagger（需要管理表情资产时）
 
-### 安装 V1 适配器
+## 首次安装
 
 ```bash
 cd ~/Yogurt_Chat_Bot
@@ -210,147 +221,51 @@ git pull --ff-only origin main
 bash scripts/install-openclaw-adapter
 ```
 
-安装脚本会：
+安装脚本会备份 OpenClaw 配置、建立本地插件链接、写入运行路径、创建 owner 用户并运行测试。
 
-1. 运行 Python 单元测试；
-2. 运行 Python bridge 模拟；
-3. 运行 TypeScript hook → Python → SQLite 端到端测试；
-4. 检查插件包结构；
-5. 备份当前 OpenClaw 配置；
-6. 使用 `--link` 安装本地插件；
-7. 写入插件权限与运行路径；
-8. 创建或更新本地 `owner` 用户；
-9. 验证配置并重启 Gateway。
+为了安全，首次安装默认保持：
 
-跳过自动重启：
+```json
+{
+  "stickerEnabled": false
+}
+```
+
+同步并验证表情资产后再开启：
 
 ```bash
-bash scripts/install-openclaw-adapter --no-restart
+openclaw config set \
+  'plugins.entries.yogurt-social-injector.config.stickerEnabled' \
+  'true' \
+  --strict-json
+
+openclaw config set \
+  'plugins.entries.yogurt-social-injector.config.stickerSelectionMode' \
+  '"auto"' \
+  --strict-json
 ```
 
-## 运行时验证
+## 已安装环境的升级
 
-```bash
-openclaw config validate
-openclaw plugins doctor
-openclaw plugins inspect yogurt-social-injector --runtime --json
-openclaw gateway status --deep --require-rpc
-```
-
-成功的 runtime inspect 应包含：
-
-```text
-status: loaded
-shape: hook-only
-before_prompt_build
-allowPromptInjection: true
-allowConversationAccess: true
-```
-
-实时日志：
-
-```bash
-openclaw logs --follow --local-time
-```
-
-每轮正常注入应出现：
-
-```text
-yogurt-social-injector: injection start ...
-yogurt-social-injector: injection ready bridgeMs=... contextChars=...
-outbound: text sent OK
-```
-
-## 社交层命令行工具
-
-默认数据库：
-
-```text
-~/.openclaw/yogurt-social/memory.sqlite3
-```
-
-覆盖数据库路径：
-
-```bash
-export YOGURT_SOCIAL_DB="$HOME/.local/share/yogurt-chat-bot/memory.sqlite3"
-```
-
-创建或更新用户：
-
-```bash
-bash scripts/yogurt-social upsert-user \
-  --user-id owner \
-  --display-name Domanic \
-  --relationship owner
-```
-
-写入共同经历：
-
-```bash
-bash scripts/yogurt-social remember-episode \
-  --user-id owner \
-  --summary "我们一起完成了 Yogurt Social Layer V1" \
-  --importance 0.9
-```
-
-分析消息并查看注入上下文：
-
-```bash
-bash scripts/yogurt-social analyze \
-  --user-id owner \
-  --message "OpenClaw 配置报错了，怎么排查？" \
-  --context-only
-```
-
-## 测试
-
-完整测试：
+插件使用 `--link` 指向仓库目录，普通升级不需要重新运行安装脚本：
 
 ```bash
 cd ~/Yogurt_Chat_Bot
+git switch main
+git pull --ff-only origin main
+
 bash scripts/test-openclaw-adapter
+bash scripts/test-sticker-explicit-fallback
+bash scripts/test-sticker-auto-delivery
+
+openclaw config validate
+openclaw plugins doctor
+openclaw gateway restart
 ```
 
-测试范围包括：
+不要在仅升级代码时重复运行完整安装脚本，因为它会把 V2 恢复为安全默认关闭状态。
 
-- SQLite 用户与记忆读写
-- 事实更新
-- 相关偏好检索
-- 场景识别
-- 情绪优先级
-- 原始消息逐字保留
-- 禁用适配器时不调用社交层
-- Python bridge JSON 输出
-- TypeScript hook → Python → SQLite 跨层调用
-- Python 启动失败时 fail-open
-- SQLite 初始化失败时 fail-open
-
-## 配置说明
-
-插件 ID：
-
-```text
-yogurt-social-injector
-```
-
-主要配置项：
-
-| 配置项 | 作用 | 默认值 |
-|---|---|---|
-| `enabled` | 是否执行社交层 | `true` |
-| `pythonPath` | Python 可执行文件路径 | `python3` |
-| `repoPath` | 本仓库绝对路径 | 自动推断 |
-| `dbPath` | SQLite 数据库路径 | `~/.openclaw/yogurt-social/memory.sqlite3` |
-| `defaultUserId` | 默认用户 ID | `owner` |
-| `senderMap` | senderId 到用户 ID 的显式映射 | `{}` |
-| `ownerSenderIds` | 直接映射为 owner 的 senderId | `[]` |
-| `unknownSenderPolicy` | 未知用户处理方式 | `default` |
-| `allowedChannels` | 允许执行的渠道 | `[]`，即不限制 |
-| `onlyUserTurns` | 跳过无用户身份的后台任务 | `true` |
-| `timeoutMs` | Python bridge 超时 | `2500` |
-| `maxMemories` | 单轮最多检索记忆数量 | `3` |
-
-V1 使用的 OpenClaw 权限：
+## 必需的 OpenClaw Hook 权限
 
 ```json
 {
@@ -362,114 +277,240 @@ V1 使用的 OpenClaw 权限：
 }
 ```
 
-## 关闭与卸载
+其中 `allowConversationAccess=true` 是 `agent_end` 对非 bundled 插件生效的必要条件。缺少时 runtime inspect 会出现：
 
-只关闭插件：
-
-```bash
-openclaw plugins disable yogurt-social-injector
-openclaw gateway restart
+```text
+typed hook "agent_end" blocked because non-bundled plugins must set ...allowConversationAccess=true
 ```
 
-卸载插件并保留 SQLite：
+修复：
 
 ```bash
-bash scripts/uninstall-openclaw-adapter
+openclaw config set \
+  'plugins.entries.yogurt-social-injector.hooks.allowConversationAccess' \
+  'true' \
+  --strict-json
 ```
 
-卸载并删除本地社交层数据：
+## 从 Tagger 同步表情资产
 
 ```bash
-bash scripts/uninstall-openclaw-adapter --purge-data
+cd ~/Yogurt_Sticker_Tagger
+source .venv/bin/activate
+
+yogurt-sticker-tagger --config config.toml export
+
+cp data/stickers.json \
+  ~/Yogurt_Chat_Bot/assets/stickers/stickers.json
+
+rsync -a data/images/ \
+  ~/Yogurt_Chat_Bot/assets/stickers/images/
 ```
 
-## 故障排查
+Catalog 与 `images/` 必须一起同步。当前实机验收使用 14 张 `approved + enabled` 资产。
 
-### 微信没有回复
+## 运行时配置
 
-先关闭社交层确认原链路：
+插件 ID：
 
-```bash
-openclaw plugins disable yogurt-social-injector
-openclaw gateway restart
+```text
+yogurt-social-injector
 ```
 
-如果微信恢复回复，检查：
+关键配置：
+
+| 配置项 | 作用 | 默认值 |
+|---|---|---|
+| `enabled` | 是否启用社交层 | `true` |
+| `pythonPath` | Python 可执行文件 | `python3` |
+| `repoPath` | Chat Bot 仓库绝对路径 | 必填/安装时写入 |
+| `dbPath` | SQLite 路径 | `~/.openclaw/yogurt-social/memory.sqlite3` |
+| `defaultUserId` | 默认用户 ID | `owner` |
+| `allowedChannels` | 允许渠道 | `[]`，不限制 |
+| `timeoutMs` | Python bridge 超时 | `2500` |
+| `maxMemories` | 单轮最多记忆数 | `3` |
+| `stickerEnabled` | 是否启用 V2 | `false` |
+| `stickerConfigPath` | Sticker Runtime 配置路径 | 仓库内配置文件 |
+| `stickerSelectionMode` | `auto` 或 `tool` | `auto` |
+
+Sticker Runtime 配置见：
+
+```text
+social_layer/config/stickers.example.json
+```
+
+## 测试
 
 ```bash
+cd ~/Yogurt_Chat_Bot
+
+bash scripts/test-openclaw-adapter
+bash scripts/test-sticker-explicit-fallback
+bash scripts/test-sticker-auto-delivery
+```
+
+测试覆盖：
+
+- V1 SQLite、场景、记忆和 bridge；
+- fail-open；
+- Catalog Schema 和文件路径；
+- 明确请求安全 fallback；
+- 禁止描述图片；
+- auto 模式隐藏工具；
+- agent_end / message_sent 去重；
+- `loadAdapter("openclaw-weixin")`；
+- `sendMedia` 调用和发送后冷却提交。
+
+CI 覆盖 Python 3.9、3.10、3.11、3.12 和 Node.js 22。
+
+## 运行时验证
+
+```bash
+openclaw config validate
+openclaw plugins doctor
 openclaw plugins inspect yogurt-social-injector --runtime --json
+openclaw gateway status --deep --require-rpc
+```
+
+正确的 runtime inspect 应包含：
+
+```text
+version: 0.3.3
+status: loaded
+before_prompt_build
+agent_end
+message_sent
+reply_payload_sending
+```
+
+实时日志：
+
+```bash
 openclaw logs --follow --local-time
 ```
 
-### 插件存在但社交层未生效
-
-日志应至少包含：
+成功链路：
 
 ```text
-injection start
+yogurt-social-injector: injection ready ... stickerSelected=... stickerDecision=explicit|proactive
+yogurt-social-injector: sticker outbound scheduled trigger=agent_end ...
+outbound: ... textLen=... mediaUrl=none
+outbound: text sent OK ...
+yogurt-social-injector: sticker media sent trigger=channel_outbound_adapter ...
 ```
 
-若随后出现 `fail-open`，检查：
+正文日志中的 `mediaUrl=none` 在 V2 `0.3.3` 是正常的：正文和图片通过两次独立发送完成。
 
-- `repoPath`
-- `pythonPath`
-- `dbPath`
-- SQLite 目录权限
-- Python bridge 是否能单独运行
+## 微信工具进度卡片
 
-### `sendTyping` 失败
+```bash
+openclaw config set \
+  'channels.openclaw-weixin.replyProgressMessages' \
+  'false' \
+  --strict-json
+```
 
-微信“正在输入”状态的 DNS 或网络错误不会必然影响正文；以是否出现下面日志作为正文发送结果：
+新会话默认关闭 verbose：
+
+```bash
+openclaw config set \
+  'agents.defaults.verboseDefault' \
+  '"off"' \
+  --strict-json
+```
+
+## 常见故障
+
+### 已选中候选但没有图片
+
+先检查注册日志是否包含 `agent_end`。若 runtime inspect 显示 Hook 被阻止，开启 `allowConversationAccess=true`。
+
+### `stickerCandidates=0`
+
+检查：
+
+- `stickers.json` 是否已同步；
+- 图片文件是否存在；
+- `status=approved`；
+- `enabled=true`；
+- `content_warnings=["none"]`；
+- 当前 relationship 是否在资产允许范围内。
+
+明确请求会启用安全 fallback，但不会绕过以上过滤。
+
+### 插件版本与 install.version 不一致
+
+以 `plugin.version` 和 `source` 为当前运行真值。`install.version` 是历史安装记录；重新链接后会更新。
+
+### 文字正常但图片发送失败
+
+查找：
 
 ```text
-outbound: text sent OK
+sticker media send failed trigger=channel_outbound_adapter (...)
 ```
 
-## 安全说明
+图片发送失败不会删除已经发送的正文。
 
-禁止提交到仓库：
+## 安全边界
 
-- API Key、Token、密码
-- 微信登录凭据
-- OpenClaw 完整主配置
-- SQLite 数据库
-- 会话记录
-- 本地日志
-- 未脱敏的用户数据
-- 代理认证信息
+- 模型不能指定任意本地路径；
+- 只接受 Catalog 中的稳定 Sticker ID 和相对路径；
+- 使用 `realpath` 限制在 `assets/stickers/`；
+- 必须是普通文件；
+- 超出大小限制的文件拒绝发送；
+- 只发送 `approved + enabled + warnings=["none"]` 资产；
+- 不向模型暴露候选描述或绝对路径；
+- 不记录消息正文、Token、图片内容或数据库内容；
+- Token、凭据、SQLite、真实图片、Catalog 和日志不得提交 Git。
 
-插件日志只记录必要的运行状态、耗时和字符数量，不应输出消息正文、Token 或数据库内容。
+## 关闭与回滚
 
-## 文档
+只关闭 V2、保留 V1：
 
-- `docs/V1_DESIGN.md`：V1 社交层设计与边界
-- `docs/OPENCLAW_ADAPTER.md`：安装、配置、映射、测试和回滚
-- `docs/archive/V1_RELEASE.md`：V1 最终归档、实机验收和已知非阻塞问题
-- `integrations/openclaw/README.md`：OpenClaw 插件说明
+```bash
+openclaw config set \
+  'plugins.entries.yogurt-social-injector.config.stickerEnabled' \
+  'false' \
+  --strict-json
+openclaw gateway restart
+```
 
-## 版本规划
+关闭整个插件：
 
-### V1.0（已完成）
+```bash
+openclaw plugins disable yogurt-social-injector
+openclaw gateway restart
+```
 
-- 社交场景识别
-- 回复风格路由
-- 显式关系与记忆存储
-- OpenClaw 前置注入
-- senderId 用户映射
-- fail-open
-- 测试、安装和回滚
+## 版本记录
 
-### 后续版本候选
+### V2.0（稳定）
 
-- 更完善的可观测性与运行统计
-- 记忆审核和管理界面
-- 可控的记忆候选提取流程
-- 表情包与表达库
-- 多用户隔离策略
-- 记忆迁移、备份与导出
+- V1 社交层全部能力；
+- 独立 Sticker Tagger；
+- 本地安全候选召回；
+- auto 单次推理选图；
+- tool 调试模式；
+- 明确请求安全 fallback；
+- 不描述图片；
+- 冷却与数量限制；
+- 微信真实图片发送；
+- Python 3.9～3.12 CI；
+- 微信实机验收。
 
-后续版本不得破坏 V1 的三个核心保证：
+### V1.0（归档）
 
-1. 用户当前消息保持原样；
-2. 社交层故障不能阻断正常回复；
-3. 未经明确设计和审核，不自动写入长期记忆。
+- 社交场景识别；
+- 回复风格路由；
+- 显式关系与记忆；
+- OpenClaw 前置注入；
+- senderId 映射；
+- fail-open。
+
+## 相关文档
+
+- `integrations/openclaw/README.md`：插件、Hook、发送链路和排障；
+- `assets/stickers/README.md`：Catalog 同步与资产安全边界；
+- `docs/V2_STICKER_SYSTEM.md`：V2 设计；
+- `docs/archive/V1_RELEASE.md`：V1 验收归档。
