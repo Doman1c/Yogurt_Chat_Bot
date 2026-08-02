@@ -25,6 +25,13 @@ import {
 
 const PLUGIN_ID = "yogurt-social-injector";
 const STICKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$/;
+const AGENT_END_DELIVERY_DELAY_MS = (() => {
+  const value = Number.parseInt(
+    process.env.YOGURT_STICKER_AGENT_END_DELAY_MS || "",
+    10,
+  );
+  return Number.isFinite(value) ? Math.min(10_000, Math.max(0, value)) : 2500;
+})();
 
 const selectionStore = new StickerSelectionStore();
 const autoPolicyStore = new StickerAutoPolicyStore();
@@ -273,40 +280,35 @@ export default definePluginEntry({
     );
 
     if (typeof api.session?.workflow?.sendSessionAttachment === "function") {
-      api.on("message_sent", (event: any, ctx: any) => {
-        if (event?.success !== true || !optionalString(event?.content)) return;
+      const schedulePendingStickerDelivery = (params: {
+        trigger: "agent_end" | "message_sent";
+        aliases: string[];
+        hookSessionKey?: string;
+        minimumDelayMs?: number;
+      }) => {
         const config = readConfig(api);
         if (!config.enabled || !config.stickerEnabled) return;
 
-        const channel = channelFromContext(ctx);
-        const senderId = senderIdFromContext(ctx);
-        const outboundPeerId =
-          optionalString(event?.to) ||
-          optionalString(ctx?.to) ||
-          optionalString(ctx?.conversationId);
-        const aliases = addPeerAlias(
-          contextAliases(ctx, channel, senderId, event),
-          channel,
-          outboundPeerId,
-        );
-        const pending = selectionStore.getPending(aliases);
+        const pending = selectionStore.getPending(params.aliases);
         if (!pending) return;
 
-        const hookSessionKey =
-          sessionKeyFromContext(ctx) || optionalString(event?.sessionKey);
         const existingTimer = deliveryTimers.get(pending.snapshotId);
         if (existingTimer) clearTimeout(existingTimer);
         const deliveryConfig = readStickerDeliveryConfig(config.stickerConfigPath);
+        const delayMs = Math.max(
+          deliveryConfig.deliveryDelayMs,
+          params.minimumDelayMs || 0,
+        );
         api.logger.info(
-          `${PLUGIN_ID}: sticker media scheduled mode=${pending.mode} hasSession=${Boolean(
-            pending.sessionKey || hookSessionKey,
-          )}`,
+          `${PLUGIN_ID}: sticker media scheduled trigger=${params.trigger} mode=${pending.mode} hasSession=${Boolean(
+            pending.sessionKey || params.hookSessionKey,
+          )} delayMs=${delayMs}`,
         );
         const timer = setTimeout(async () => {
           deliveryTimers.delete(pending.snapshotId);
           const selected = selectionStore.consumePendingBySnapshot(pending.snapshotId);
           if (!selected) return;
-          const deliverySessionKey = selected.sessionKey || hookSessionKey;
+          const deliverySessionKey = selected.sessionKey || params.hookSessionKey;
           if (!deliverySessionKey) {
             api.logger.warn(`${PLUGIN_ID}: sticker delivery skipped (session_key_missing)`);
             return;
@@ -321,16 +323,56 @@ export default definePluginEntry({
             });
             autoPolicyStore.recordSent(selected.policyKey, selected.sticker);
             api.logger.info(
-              `${PLUGIN_ID}: sticker media sent mode=${selected.mode} sticker=${selected.sticker.id}`,
+              `${PLUGIN_ID}: sticker media sent trigger=${params.trigger} mode=${selected.mode} sticker=${selected.sticker.id}`,
             );
           } catch (error) {
             const reason = error instanceof Error ? error.message : "unknown_error";
             api.logger.warn(
-              `${PLUGIN_ID}: sticker media send failed (${reason}); text preserved`,
+              `${PLUGIN_ID}: sticker media send failed trigger=${params.trigger} (${reason}); text preserved`,
             );
           }
-        }, deliveryConfig.deliveryDelayMs);
+        }, delayMs);
         deliveryTimers.set(pending.snapshotId, timer);
+      };
+
+      api.on("agent_end", (event: any, ctx: any) => {
+        if (event?.success !== true) return;
+        const channel = channelFromContext(ctx);
+        const senderId = senderIdFromContext(ctx);
+        const peerId =
+          senderId || optionalString(ctx?.chatId) || optionalString(ctx?.channelId);
+        const aliases = addPeerAlias(
+          contextAliases(ctx, channel, senderId, event),
+          channel,
+          peerId,
+        );
+        schedulePendingStickerDelivery({
+          trigger: "agent_end",
+          aliases,
+          hookSessionKey: sessionKeyFromContext(ctx),
+          minimumDelayMs: AGENT_END_DELIVERY_DELAY_MS,
+        });
+      });
+
+      api.on("message_sent", (event: any, ctx: any) => {
+        if (event?.success !== true || !optionalString(event?.content)) return;
+        const channel = channelFromContext(ctx);
+        const senderId = senderIdFromContext(ctx);
+        const outboundPeerId =
+          optionalString(event?.to) ||
+          optionalString(ctx?.to) ||
+          optionalString(ctx?.conversationId);
+        const aliases = addPeerAlias(
+          contextAliases(ctx, channel, senderId, event),
+          channel,
+          outboundPeerId,
+        );
+        schedulePendingStickerDelivery({
+          trigger: "message_sent",
+          aliases,
+          hookSessionKey:
+            sessionKeyFromContext(ctx) || optionalString(event?.sessionKey),
+        });
       });
     } else {
       api.logger.warn(
@@ -339,7 +381,7 @@ export default definePluginEntry({
     }
 
     api.logger.info(
-      `${PLUGIN_ID}: registered before_prompt_build, message_sent, and optional choose_sticker`,
+      `${PLUGIN_ID}: registered before_prompt_build, agent_end, message_sent, and optional choose_sticker`,
     );
   },
 });
