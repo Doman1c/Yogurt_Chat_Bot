@@ -58,13 +58,39 @@ cat > "$FAKE_REPO/social_layer/config/stickers.json" <<'JSON'
 }
 JSON
 
-cat > "$TMP_DIR/fake-python" <<'SH'
-#!/usr/bin/env bash
-cat >/dev/null
-cat <<'JSON'
-{"social_context":"[Yogurt Social State]\nscene: playful\n\n[Yogurt Sticker Candidates]\n- sticker_id: sticker-test123","sticker_candidates":[{"id":"sticker-test123","file":"images/sticker-test123.webp","description":"一只猫咪正在卖萌","score":9,"scenes":["playful"]}]}
-JSON
-SH
+cat > "$TMP_DIR/fake-python" <<'PY'
+#!/usr/bin/env python3
+import json
+import sys
+
+request = json.load(sys.stdin)
+if request.get("explicit_sticker_request") is not True:
+    raise SystemExit("explicit_sticker_request was not forwarded")
+
+message = request.get("message", "")
+if "模拟无候选" in message:
+    payload = {
+        "social_context": "[Yogurt Social State]\nscene: playful",
+        "sticker_candidates": [],
+    }
+else:
+    payload = {
+        "social_context": (
+            "[Yogurt Social State]\nscene: playful\n\n"
+            "[Yogurt Sticker Candidates]\n- sticker_id: sticker-test123"
+        ),
+        "sticker_candidates": [
+            {
+                "id": "sticker-test123",
+                "file": "images/sticker-test123.webp",
+                "description": "一只猫咪正在卖萌",
+                "score": 9,
+                "scenes": ["playful"],
+            }
+        ],
+    }
+json.dump(payload, sys.stdout, ensure_ascii=False)
+PY
 chmod +x "$TMP_DIR/fake-python"
 
 node --experimental-strip-types --input-type=module - \
@@ -196,6 +222,39 @@ const duplicateResult = await hooks.reply_payload_sending(
   },
 );
 assert.equal(duplicateResult, undefined, "pending sticker must be consumed once");
+
+const unavailableResult = await hooks.before_prompt_build(
+  {
+    prompt: "酸奶，发一个表情包，模拟无候选",
+    context: { pluginConfig },
+  },
+  {
+    senderId: "wx-owner",
+    channel: "openclaw-weixin",
+    sessionKey: "session-unavailable",
+  },
+);
+
+assert.match(unavailableResult.prependContext, /\[Yogurt Sticker Request\]/);
+assert.match(unavailableResult.prependContext, /没有找到可安全发送的候选/);
+assert.match(unavailableResult.prependContext, /绝对不要描述、解释、复述或虚构/);
+assert.doesNotMatch(unavailableResult.prependContext, /表情描述：/);
+assert.doesNotMatch(unavailableResult.prependContext, /一只猫咪正在卖萌/);
+
+const unavailablePayload = await hooks.reply_payload_sending(
+  {
+    payload: { text: "这次没发出来，主人。" },
+    kind: "final",
+    channel: "openclaw-weixin",
+    sessionKey: "session-unavailable",
+  },
+  {
+    channelId: "openclaw-weixin",
+    conversationId: "wx-owner",
+    sessionKey: "session-unavailable",
+  },
+);
+assert.equal(unavailablePayload, undefined, "no candidate must not attach media");
 
 console.log("sticker reply media: ok");
 JS
