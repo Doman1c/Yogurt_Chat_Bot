@@ -2,7 +2,7 @@
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
   "description": "Injects Yogurt social context and delivers bounded V2 stickers.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "activation": {
     "onStartup": true
   },
