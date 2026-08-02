@@ -42,10 +42,11 @@ from pathlib import Path
 plugin_dir = Path(sys.argv[1])
 manifest_path = plugin_dir / "openclaw.plugin.json"
 package_path = plugin_dir / "package.json"
-entry_path = plugin_dir / "index.ts"
+entry_path = plugin_dir / "index-v2.ts"
+utils_path = plugin_dir / "sticker-plugin-utils.ts"
 selection_path = plugin_dir / "sticker-selection.ts"
 
-for path in (manifest_path, package_path, entry_path, selection_path):
+for path in (manifest_path, package_path, entry_path, utils_path, selection_path):
     if not path.is_file():
         raise SystemExit(f"missing plugin file: {path}")
 
@@ -59,11 +60,12 @@ if manifest.get("id") != "yogurt-social-injector":
 if "choose_sticker" not in manifest.get("contracts", {}).get("tools", []):
     raise SystemExit("plugin manifest does not declare choose_sticker")
 extensions = package.get("openclaw", {}).get("extensions", [])
-if "./index.ts" not in extensions:
-    raise SystemExit("package.json does not expose ./index.ts")
-if "sticker-selection.ts" not in package.get("files", []):
-    raise SystemExit("package.json does not include sticker-selection.ts")
-print("mixed hook/tool plugin package check: ok")
+if "./index-v2.ts" not in extensions:
+    raise SystemExit("package.json does not expose ./index-v2.ts")
+for filename in ("index-v2.ts", "sticker-plugin-utils.ts", "sticker-selection.ts"):
+    if filename not in package.get("files", []):
+        raise SystemExit(f"package.json does not include {filename}")
+print("single-pass hook/tool plugin package check: ok")
 PY
 
 CONFIG_FILE="$(openclaw config file 2>/dev/null || true)"
@@ -114,6 +116,7 @@ patch = {
                     "maxMemories": 3,
                     "stickerEnabled": False,
                     "stickerConfigPath": sticker_config_path,
+                    "stickerSelectionMode": "auto",
                 },
             }
         }
@@ -139,4 +142,4 @@ else
   echo "Gateway restart skipped. Run: openclaw gateway restart"
 fi
 
-echo "Yogurt OpenClaw adapter installed. V2 sticker selection remains disabled until explicitly enabled."
+echo "Yogurt OpenClaw adapter installed. V2 remains disabled until explicitly enabled; once enabled, auto single-pass selection is the default."
