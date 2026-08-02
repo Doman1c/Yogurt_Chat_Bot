@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 command -v node >/dev/null 2>&1 || {
-  echo "sticker auto delivery: skipped (node not found)"
+  echo "sticker reply media: skipped (node not found)"
   exit 0
 }
 
@@ -67,7 +67,6 @@ JSON
 SH
 chmod +x "$TMP_DIR/fake-python"
 
-YOGURT_STICKER_AGENT_END_DELAY_MS=10 \
 node --experimental-strip-types --input-type=module - \
   "$TEST_ROOT" "$FAKE_REPO" "$TMP_DIR/fake-python" <<'JS'
 import assert from "node:assert/strict";
@@ -76,7 +75,6 @@ import { pathToFileURL } from "node:url";
 const [testRoot, fakeRepo, fakePython] = process.argv.slice(2);
 const plugin = (await import(pathToFileURL(`${testRoot}/index-v2.ts`))).default;
 const hooks = {};
-const sentAttachments = [];
 const logs = [];
 let toolFactory;
 
@@ -117,22 +115,15 @@ plugin.register({
   on(name, handler) {
     hooks[name] = handler;
   },
-  session: {
-    workflow: {
-      async sendSessionAttachment(params) {
-        sentAttachments.push(params);
-        return { ok: true };
-      },
-    },
-  },
 });
 
 assert.equal(typeof hooks.before_prompt_build, "function");
-assert.equal(typeof hooks.agent_end, "function");
-assert.equal(typeof hooks.message_sent, "function");
+assert.equal(typeof hooks.reply_payload_sending, "function");
+assert.equal(hooks.agent_end, undefined);
+assert.equal(hooks.message_sent, undefined);
 assert.equal(toolFactory({ sessionKey: "session-auto" }), null);
 
-const result = await hooks.before_prompt_build(
+const promptResult = await hooks.before_prompt_build(
   {
     prompt: "酸奶，发一个卖萌的表情包过来",
     context: { pluginConfig },
@@ -140,42 +131,71 @@ const result = await hooks.before_prompt_build(
   {
     senderId: "wx-owner",
     channel: "openclaw-weixin",
-  },
-);
-
-assert.match(result.prependContext, /\[Yogurt Sticker Delivery\]/);
-assert.doesNotMatch(result.prependContext, /\[Yogurt Sticker Candidates\]/);
-assert.doesNotMatch(result.prependContext, /一只猫咪正在卖萌/);
-assert.match(result.prependContext, /不要描述、解释或复述表情包画面/);
-
-hooks.agent_end(
-  {
-    success: true,
-    messages: [{ role: "assistant", content: "来啦～" }],
-  },
-  {
-    channel: "openclaw-weixin",
-    chatId: "wx-owner",
     sessionKey: "session-auto",
   },
 );
 
-await new Promise((resolve) => setTimeout(resolve, 80));
+assert.match(promptResult.prependContext, /\[Yogurt Sticker Delivery\]/);
+assert.doesNotMatch(promptResult.prependContext, /\[Yogurt Sticker Candidates\]/);
+assert.doesNotMatch(promptResult.prependContext, /一只猫咪正在卖萌/);
+assert.match(promptResult.prependContext, /不要描述、解释或复述表情包画面/);
 
-assert.equal(sentAttachments.length, 1);
-assert.equal(sentAttachments[0].sessionKey, "session-auto");
-assert.equal(sentAttachments[0].files.length, 1);
-assert.match(sentAttachments[0].files[0].path, /assets\/stickers\/images\/sticker-test123\.webp$/);
-assert.ok(
-  logs.some((message) =>
-    message.includes("sticker media scheduled trigger=agent_end"),
-  ),
+const blockResult = await hooks.reply_payload_sending(
+  {
+    payload: { text: "处理中" },
+    kind: "block",
+    channel: "openclaw-weixin",
+    sessionKey: "session-auto",
+  },
+  {
+    channelId: "openclaw-weixin",
+    conversationId: "wx-owner",
+    sessionKey: "session-auto",
+  },
+);
+assert.equal(blockResult, undefined);
+
+const finalResult = await hooks.reply_payload_sending(
+  {
+    payload: { text: "来啦～" },
+    kind: "final",
+    channel: "openclaw-weixin",
+    sessionKey: "session-auto",
+  },
+  {
+    channelId: "openclaw-weixin",
+    conversationId: "wx-owner",
+    sessionKey: "session-auto",
+  },
+);
+
+assert.equal(finalResult.payload.text, "来啦～");
+assert.equal(finalResult.payload.mediaUrl, undefined);
+assert.equal(finalResult.payload.mediaUrls.length, 1);
+assert.match(
+  finalResult.payload.mediaUrls[0],
+  /assets\/stickers\/images\/sticker-test123\.webp$/,
 );
 assert.ok(
   logs.some((message) =>
-    message.includes("sticker media sent trigger=agent_end mode=auto"),
+    message.includes("sticker media attached trigger=reply_payload_sending mode=auto"),
   ),
 );
 
-console.log("sticker auto delivery: ok");
+const duplicateResult = await hooks.reply_payload_sending(
+  {
+    payload: { text: "重复发送检查" },
+    kind: "final",
+    channel: "openclaw-weixin",
+    sessionKey: "session-auto",
+  },
+  {
+    channelId: "openclaw-weixin",
+    conversationId: "wx-owner",
+    sessionKey: "session-auto",
+  },
+);
+assert.equal(duplicateResult, undefined, "pending sticker must be consumed once");
+
+console.log("sticker reply media: ok");
 JS
