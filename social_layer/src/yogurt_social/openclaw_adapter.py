@@ -105,7 +105,12 @@ class OpenClawAdapter:
             )
         return "\n".join(lines)
 
-    def prepare(self, user_id: str, message: str) -> AdapterResult:
+    def prepare(
+        self,
+        user_id: str,
+        message: str,
+        explicit_sticker_request: bool = False,
+    ) -> AdapterResult:
         """Return a fail-open, one-turn injection plan."""
 
         original_message = message
@@ -127,6 +132,7 @@ class OpenClawAdapter:
                     "reason": "disabled",
                     "original_message_preserved": True,
                     "sticker_candidate_count": 0,
+                    "explicit_sticker_request": explicit_sticker_request,
                 },
             )
 
@@ -152,7 +158,11 @@ class OpenClawAdapter:
                             scene=str(state.get("scene") or "casual"),
                             mood=str(state.get("mood") or "neutral"),
                             relationship=str(state.get("relationship") or "owner"),
-                            allow_sticker=bool(state.get("use_sticker", False)),
+                            allow_sticker=(
+                                bool(state.get("use_sticker", False))
+                                or explicit_sticker_request
+                            ),
+                            explicit_request=explicit_sticker_request,
                         )
                     ]
                 except Exception as exc:
@@ -178,6 +188,7 @@ class OpenClawAdapter:
                 "mood": state.get("mood"),
                 "memory_count": len(memories),
                 "sticker_candidate_count": len(candidates),
+                "explicit_sticker_request": explicit_sticker_request,
                 "original_message_preserved": (
                     final_model_input["user_message"] == original_message
                 ),
@@ -208,6 +219,7 @@ class OpenClawAdapter:
                     "error_type": type(exc).__name__,
                     "original_message_preserved": True,
                     "sticker_candidate_count": 0,
+                    "explicit_sticker_request": explicit_sticker_request,
                 },
             )
 
@@ -255,6 +267,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         request = _read_request(sys.stdin)
         user_id = request.get("user_id")
         message = request.get("message")
+        explicit_sticker_request = request.get("explicit_sticker_request") is True
         if not isinstance(user_id, str):
             raise ValueError("request.user_id must be a string")
         if not isinstance(message, str):
@@ -279,7 +292,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             sticker_config_path=args.sticker_config,
             project_root=args.project_root,
         )
-        result = adapter.prepare(user_id=user_id, message=message).to_dict()
+        result = adapter.prepare(
+            user_id=user_id,
+            message=message,
+            explicit_sticker_request=explicit_sticker_request,
+        ).to_dict()
     except Exception as exc:
         LOGGER.exception(
             "Yogurt social layer initialization failed; continuing without injection"
@@ -300,6 +317,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "error_type": type(exc).__name__,
                 "original_message_preserved": True,
                 "sticker_candidate_count": 0,
+                "explicit_sticker_request": explicit_sticker_request,
             },
         ).to_dict()
     print(
