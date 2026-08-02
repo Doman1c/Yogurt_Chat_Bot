@@ -30,4 +30,6 @@ jobs:
           node-version: "22"
 
       - name: Run adapter and sticker tests
-        run: bash scripts/test-openclaw-adapter
+        run: |
+          bash scripts/test-openclaw-adapter
+          bash scripts/test-sticker-auto-delivery
