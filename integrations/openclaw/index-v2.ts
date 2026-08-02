@@ -5,7 +5,6 @@ import {
   StickerSelectionStore,
 } from "./sticker-selection.ts";
 import {
-  buildAutoStickerContext,
   channelFromContext,
   channelIsAllowed,
   contextAliases,
@@ -30,6 +29,26 @@ const STICKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{2,79}$/;
 const selectionStore = new StickerSelectionStore();
 const autoPolicyStore = new StickerAutoPolicyStore();
 const deliveryTimers = new Map<string, NodeJS.Timeout>();
+
+function addPeerAlias(
+  aliases: string[],
+  channel: string,
+  peerId: unknown,
+): string[] {
+  const resolvedPeerId = optionalString(peerId);
+  if (!resolvedPeerId) return aliases;
+  return [...new Set([...aliases, `peer:${channel}:${resolvedPeerId}`])];
+}
+
+function buildConciseAutoStickerContext(): string {
+  return [
+    "[Yogurt Sticker Delivery]",
+    "系统会在本轮文字回复发送完成后自动发送一张合适的表情包。",
+    "正文只需要一句很短、自然的确认（建议不超过 20 个汉字）或一个可爱颜文字。",
+    "不要描述、解释或复述表情包画面，也不要提及表情包 ID、文件名、本地路径、候选或系统流程。",
+    "不要调用 choose_sticker。",
+  ].join("\n");
+}
 
 const chooseStickerParameters = {
   type: "object",
@@ -78,7 +97,11 @@ export default definePluginEntry({
           async execute(_toolCallId: string, params: Record<string, unknown>) {
             const channel = channelFromContext(toolContext);
             const senderId = senderIdFromContext(toolContext);
-            const aliases = contextAliases(toolContext, channel, senderId);
+            const aliases = addPeerAlias(
+              contextAliases(toolContext, channel, senderId),
+              channel,
+              senderId,
+            );
             const stickerId = optionalString(params.sticker_id);
             if (!stickerId || !STICKER_ID_PATTERN.test(stickerId)) {
               return {
@@ -147,7 +170,11 @@ export default definePluginEntry({
         const userId = resolveUserId(config, senderId, channel);
         if (!userId) return;
 
-        const aliases = contextAliases(ctx, channel, senderId);
+        const aliases = addPeerAlias(
+          contextAliases(ctx, channel, senderId),
+          channel,
+          senderId,
+        );
         const policyKey = preferredPolicyKey(aliases);
         const startedAt = Date.now();
         api.logger.info(
@@ -211,7 +238,7 @@ export default definePluginEntry({
                 );
                 if (selected.status === "selected") {
                   selectedId = selected.sticker.id;
-                  socialContext = [socialContext, buildAutoStickerContext(selected.sticker)]
+                  socialContext = [socialContext, buildConciseAutoStickerContext()]
                     .filter(Boolean)
                     .join("\n\n");
                 } else {
@@ -253,18 +280,34 @@ export default definePluginEntry({
 
         const channel = channelFromContext(ctx);
         const senderId = senderIdFromContext(ctx);
-        const aliases = contextAliases(ctx, channel, senderId, event);
+        const outboundPeerId =
+          optionalString(event?.to) ||
+          optionalString(ctx?.to) ||
+          optionalString(ctx?.conversationId);
+        const aliases = addPeerAlias(
+          contextAliases(ctx, channel, senderId, event),
+          channel,
+          outboundPeerId,
+        );
         const pending = selectionStore.getPending(aliases);
         if (!pending) return;
 
+        const hookSessionKey =
+          sessionKeyFromContext(ctx) || optionalString(event?.sessionKey);
         const existingTimer = deliveryTimers.get(pending.snapshotId);
         if (existingTimer) clearTimeout(existingTimer);
         const deliveryConfig = readStickerDeliveryConfig(config.stickerConfigPath);
+        api.logger.info(
+          `${PLUGIN_ID}: sticker media scheduled mode=${pending.mode} hasSession=${Boolean(
+            pending.sessionKey || hookSessionKey,
+          )}`,
+        );
         const timer = setTimeout(async () => {
           deliveryTimers.delete(pending.snapshotId);
           const selected = selectionStore.consumePendingBySnapshot(pending.snapshotId);
           if (!selected) return;
-          if (!selected.sessionKey) {
+          const deliverySessionKey = selected.sessionKey || hookSessionKey;
+          if (!deliverySessionKey) {
             api.logger.warn(`${PLUGIN_ID}: sticker delivery skipped (session_key_missing)`);
             return;
           }
@@ -272,7 +315,7 @@ export default definePluginEntry({
           try {
             const filePath = resolveStickerFile(config, selected.sticker);
             await api.session.workflow.sendSessionAttachment({
-              sessionKey: selected.sessionKey,
+              sessionKey: deliverySessionKey,
               files: [{ path: filePath }],
               maxBytes: deliveryConfig.maxBytes,
             });
