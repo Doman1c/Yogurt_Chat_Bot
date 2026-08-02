@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-type StickerCandidate = {
+export type StickerCandidate = {
   id: string;
   file: string;
   description: string;
+  score?: number;
+  scenes?: string[];
 };
 
 type CandidateSnapshot = {
@@ -14,10 +16,23 @@ type CandidateSnapshot = {
   candidates: Map<string, StickerCandidate>;
 };
 
-type PendingSelection = {
+export type StickerSelectionMode = "auto" | "tool";
+
+export type PendingStickerSelection = {
   snapshotId: string;
   sticker: StickerCandidate;
   selectedAt: number;
+  sessionKey?: string;
+  policyKey: string;
+  mode: StickerSelectionMode;
+  explicit: boolean;
+};
+
+type SelectionContext = {
+  sessionKey?: string;
+  policyKey?: string;
+  mode?: StickerSelectionMode;
+  explicit?: boolean;
 };
 
 export type StickerSelectionResult =
@@ -25,6 +40,7 @@ export type StickerSelectionResult =
       status: "selected";
       sticker: StickerCandidate;
       idempotent: boolean;
+      pending: PendingStickerSelection;
     }
   | {
       status: "rejected";
@@ -41,7 +57,7 @@ export class StickerSelectionStore {
   private readonly maxSnapshots: number;
   private readonly aliases = new Map<string, string>();
   private readonly snapshots = new Map<string, CandidateSnapshot>();
-  private readonly pending = new Map<string, PendingSelection>();
+  private readonly pending = new Map<string, PendingStickerSelection>();
 
   constructor({ ttlMs = 5 * 60_000, maxSnapshots = 256 } = {}) {
     this.ttlMs = Math.max(1_000, ttlMs);
@@ -90,6 +106,7 @@ export class StickerSelectionStore {
     aliases: string[],
     stickerId: string,
     now = Date.now(),
+    context: SelectionContext = {},
   ): StickerSelectionResult {
     const normalizedAliases = uniqueNonEmpty(aliases);
     if (normalizedAliases.length === 0) {
@@ -114,23 +131,58 @@ export class StickerSelectionStore {
     const existing = this.pending.get(snapshot.id);
     if (existing) {
       if (existing.sticker.id === stickerId) {
-        return { status: "selected", sticker: existing.sticker, idempotent: true };
+        return {
+          status: "selected",
+          sticker: existing.sticker,
+          idempotent: true,
+          pending: existing,
+        };
       }
       return { status: "rejected", reason: "already_selected" };
     }
 
-    this.pending.set(snapshot.id, {
+    const pending: PendingStickerSelection = {
       snapshotId: snapshot.id,
       sticker: candidate,
       selectedAt: now,
-    });
-    return { status: "selected", sticker: candidate, idempotent: false };
+      sessionKey: context.sessionKey,
+      policyKey: context.policyKey || preferredPolicyKey(normalizedAliases),
+      mode: context.mode || "tool",
+      explicit: context.explicit === true,
+    };
+    this.pending.set(snapshot.id, pending);
+    return {
+      status: "selected",
+      sticker: candidate,
+      idempotent: false,
+      pending,
+    };
   }
 
-  getPending(aliases: string[], now = Date.now()): PendingSelection | undefined {
+  getPending(aliases: string[], now = Date.now()): PendingStickerSelection | undefined {
     this.prune(now);
     const snapshot = this.findSnapshot(uniqueNonEmpty(aliases));
     return snapshot ? this.pending.get(snapshot.id) : undefined;
+  }
+
+  consumePendingBySnapshot(
+    snapshotId: string,
+    now = Date.now(),
+  ): PendingStickerSelection | undefined {
+    this.prune(now);
+    const pending = this.pending.get(snapshotId);
+    if (!pending) return undefined;
+    this.deleteSnapshot(snapshotId);
+    return pending;
+  }
+
+  consumePending(
+    aliases: string[],
+    now = Date.now(),
+  ): PendingStickerSelection | undefined {
+    this.prune(now);
+    const snapshot = this.findSnapshot(uniqueNonEmpty(aliases));
+    return snapshot ? this.consumePendingBySnapshot(snapshot.id, now) : undefined;
   }
 
   private findSnapshot(aliases: string[]): CandidateSnapshot | undefined {
@@ -175,6 +227,152 @@ export class StickerSelectionStore {
     }
     this.deleteSnapshot(snapshotId);
   }
+}
+
+export type StickerAutoPolicyConfig = {
+  explicitMinScore: number;
+  proactiveMinScore: number;
+  proactiveMinMargin: number;
+  globalCooldownSeconds: number;
+  sceneCooldownSeconds: number;
+  stickerCooldownSeconds: number;
+  maxStickersPerHour: number;
+};
+
+export type StickerAutoDecision =
+  | { selected: StickerCandidate; reason: "explicit" | "proactive" }
+  | {
+      selected?: undefined;
+      reason:
+        | "no_candidates"
+        | "explicit_threshold"
+        | "hourly_limit"
+        | "global_cooldown"
+        | "candidate_cooldown"
+        | "proactive_threshold"
+        | "score_margin";
+    };
+
+type ConversationHistory = {
+  sentAt: number[];
+  lastGlobalAt?: number;
+  lastBySticker: Map<string, number>;
+  lastByScene: Map<string, number>;
+};
+
+export class StickerAutoPolicyStore {
+  private readonly histories = new Map<string, ConversationHistory>();
+
+  choose(
+    policyKey: string,
+    candidates: StickerCandidate[],
+    explicit: boolean,
+    config: StickerAutoPolicyConfig,
+    now = Date.now(),
+  ): StickerAutoDecision {
+    const sorted = [...candidates]
+      .filter((candidate) => Number.isFinite(candidate.score))
+      .sort(
+        (left, right) =>
+          (right.score || 0) - (left.score || 0) || left.id.localeCompare(right.id),
+      );
+    if (sorted.length === 0) return { reason: "no_candidates" };
+
+    if (explicit) {
+      const selected = sorted[0];
+      return (selected.score || 0) >= config.explicitMinScore
+        ? { selected, reason: "explicit" }
+        : { reason: "explicit_threshold" };
+    }
+
+    const history = this.history(policyKey, now);
+    if (config.maxStickersPerHour <= 0 || history.sentAt.length >= config.maxStickersPerHour) {
+      return { reason: "hourly_limit" };
+    }
+    if (
+      history.lastGlobalAt !== undefined &&
+      now - history.lastGlobalAt < config.globalCooldownSeconds * 1000
+    ) {
+      return { reason: "global_cooldown" };
+    }
+
+    const eligible = sorted.filter((candidate) =>
+      this.candidateIsEligible(candidate, history, config, now),
+    );
+    if (eligible.length === 0) return { reason: "candidate_cooldown" };
+
+    const selected = eligible[0];
+    if ((selected.score || 0) < config.proactiveMinScore) {
+      return { reason: "proactive_threshold" };
+    }
+    const runnerUp = eligible[1];
+    if (
+      runnerUp &&
+      (selected.score || 0) - (runnerUp.score || 0) < config.proactiveMinMargin
+    ) {
+      return { reason: "score_margin" };
+    }
+    return { selected, reason: "proactive" };
+  }
+
+  recordSent(policyKey: string, candidate: StickerCandidate, now = Date.now()): void {
+    const history = this.history(policyKey, now);
+    history.sentAt.push(now);
+    history.lastGlobalAt = now;
+    history.lastBySticker.set(candidate.id, now);
+    for (const scene of candidate.scenes || []) {
+      history.lastByScene.set(scene, now);
+    }
+  }
+
+  private history(policyKey: string, now: number): ConversationHistory {
+    let history = this.histories.get(policyKey);
+    if (!history) {
+      history = {
+        sentAt: [],
+        lastBySticker: new Map(),
+        lastByScene: new Map(),
+      };
+      this.histories.set(policyKey, history);
+    }
+    history.sentAt = history.sentAt.filter((sentAt) => now - sentAt < 60 * 60_000);
+    return history;
+  }
+
+  private candidateIsEligible(
+    candidate: StickerCandidate,
+    history: ConversationHistory,
+    config: StickerAutoPolicyConfig,
+    now: number,
+  ): boolean {
+    const lastStickerAt = history.lastBySticker.get(candidate.id);
+    if (
+      lastStickerAt !== undefined &&
+      now - lastStickerAt < config.stickerCooldownSeconds * 1000
+    ) {
+      return false;
+    }
+    for (const scene of candidate.scenes || []) {
+      const lastSceneAt = history.lastByScene.get(scene);
+      if (
+        lastSceneAt !== undefined &&
+        now - lastSceneAt < config.sceneCooldownSeconds * 1000
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+}
+
+function preferredPolicyKey(aliases: string[]): string {
+  return (
+    aliases.find((alias) => alias.startsWith("session:")) ||
+    aliases.find((alias) => alias.startsWith("sender:")) ||
+    aliases.find((alias) => alias.startsWith("conversation:")) ||
+    aliases[0] ||
+    "unknown"
+  );
 }
 
 function uniqueNonEmpty(values: string[]): string[] {
