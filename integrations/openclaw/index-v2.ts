@@ -49,6 +49,16 @@ function buildConciseAutoStickerContext(): string {
   ].join("\n");
 }
 
+function buildExplicitStickerUnavailableContext(): string {
+  return [
+    "[Yogurt Sticker Request]",
+    "用户明确要求发送表情包，但本轮没有找到可安全发送的候选。",
+    "只回复一句很短、自然的话说明这次没有发出来，建议不超过 15 个汉字。",
+    "绝对不要描述、解释、复述或虚构任何表情包画面，也不要假装已经发送图片。",
+    "不要提及表情包 ID、文件名、本地路径、候选、评分或系统流程。",
+  ].join("\n");
+}
+
 function normalizePayloadMediaUrls(payload: any): string[] {
   const urls: string[] = [];
   if (Array.isArray(payload?.mediaUrls)) {
@@ -188,16 +198,21 @@ export default definePluginEntry({
           senderId,
         );
         const policyKey = preferredPolicyKey(aliases);
+        const explicit = messageExplicitlyRequestsSticker(prompt);
         const startedAt = Date.now();
         api.logger.info(
           `${PLUGIN_ID}: injection start channel=${channel} promptChars=${prompt.length}`,
         );
 
         try {
-          const bridgeResult = await runBridge(config, {
-            user_id: userId,
-            message: prompt,
-          });
+          const bridgeResult = await runBridge(
+            config,
+            {
+              user_id: userId,
+              message: prompt,
+              explicit_sticker_request: explicit,
+            } as any,
+          );
           const rawSocialContext =
             typeof bridgeResult.social_context === "string"
               ? bridgeResult.social_context.trim()
@@ -222,7 +237,6 @@ export default definePluginEntry({
             }
           } else {
             socialContext = stripStickerCandidateContext(rawSocialContext);
-            const explicit = messageExplicitlyRequestsSticker(prompt);
             if (messageForbidsSticker(prompt)) {
               selectionStore.clear(aliases);
               decisionReason = "user_forbid";
@@ -256,9 +270,25 @@ export default definePluginEntry({
                 } else {
                   selectionStore.clear(aliases);
                   decisionReason = selected.reason;
+                  if (explicit) {
+                    socialContext = [
+                      socialContext,
+                      buildExplicitStickerUnavailableContext(),
+                    ]
+                      .filter(Boolean)
+                      .join("\n\n");
+                  }
                 }
               } else {
                 selectionStore.clear(aliases);
+                if (explicit) {
+                  socialContext = [
+                    socialContext,
+                    buildExplicitStickerUnavailableContext(),
+                  ]
+                    .filter(Boolean)
+                    .join("\n\n");
+                }
               }
             }
           }
@@ -271,7 +301,7 @@ export default definePluginEntry({
           }
 
           api.logger.info(
-            `${PLUGIN_ID}: injection ready bridgeMs=${Date.now() - startedAt} contextChars=${socialContext.length} stickerMode=${config.stickerSelectionMode} stickerCandidates=${candidates.length} stickerSelected=${selectedId} stickerDecision=${decisionReason}`,
+            `${PLUGIN_ID}: injection ready bridgeMs=${Date.now() - startedAt} contextChars=${socialContext.length} stickerMode=${config.stickerSelectionMode} stickerCandidates=${candidates.length} stickerSelected=${selectedId} stickerDecision=${decisionReason} stickerExplicit=${explicit}`,
           );
           return { prependContext: socialContext };
         } catch (error) {
