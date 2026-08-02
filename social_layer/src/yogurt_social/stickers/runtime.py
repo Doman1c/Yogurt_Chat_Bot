@@ -50,6 +50,7 @@ class StickerRuntime:
         mood: str,
         relationship: str,
         allow_sticker: bool,
+        explicit_request: bool = False,
     ) -> list[StickerCandidate]:
         if not self.config.enabled or self.retriever is None:
             return []
@@ -59,4 +60,5 @@ class StickerRuntime:
             mood=mood,
             relationship=relationship,
             allow_sticker=allow_sticker,
+            explicit_request=explicit_request,
         )
