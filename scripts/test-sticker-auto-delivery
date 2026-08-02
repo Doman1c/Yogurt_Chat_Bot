@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 command -v node >/dev/null 2>&1 || {
-  echo "sticker reply media: skipped (node not found)"
+  echo "sticker outbound adapter: skipped (node not found)"
   exit 0
 }
 
@@ -93,6 +93,7 @@ json.dump(payload, sys.stdout, ensure_ascii=False)
 PY
 chmod +x "$TMP_DIR/fake-python"
 
+YOGURT_STICKER_AGENT_END_DELAY_MS=10 \
 node --experimental-strip-types --input-type=module - \
   "$TEST_ROOT" "$FAKE_REPO" "$TMP_DIR/fake-python" <<'JS'
 import assert from "node:assert/strict";
@@ -102,7 +103,10 @@ const [testRoot, fakeRepo, fakePython] = process.argv.slice(2);
 const plugin = (await import(pathToFileURL(`${testRoot}/index-v2.ts`))).default;
 const hooks = {};
 const logs = [];
+const sentMedia = [];
+const openclawConfig = { channels: { "openclaw-weixin": {} } };
 let toolFactory;
+let loadedChannel;
 
 const pluginConfig = {
   enabled: true,
@@ -123,6 +127,7 @@ const pluginConfig = {
 };
 
 plugin.register({
+  config: openclawConfig,
   pluginConfig,
   resolvePath(value) {
     return value;
@@ -141,12 +146,27 @@ plugin.register({
   on(name, handler) {
     hooks[name] = handler;
   },
+  runtime: {
+    channel: {
+      outbound: {
+        async loadAdapter(channel) {
+          loadedChannel = channel;
+          return {
+            async sendMedia(params) {
+              sentMedia.push(params);
+              return { channel, messageId: "media-message-1" };
+            },
+          };
+        },
+      },
+    },
+  },
 });
 
 assert.equal(typeof hooks.before_prompt_build, "function");
+assert.equal(typeof hooks.agent_end, "function");
+assert.equal(typeof hooks.message_sent, "function");
 assert.equal(typeof hooks.reply_payload_sending, "function");
-assert.equal(hooks.agent_end, undefined);
-assert.equal(hooks.message_sent, undefined);
 assert.equal(toolFactory({ sessionKey: "session-auto" }), null);
 
 const promptResult = await hooks.before_prompt_build(
@@ -158,6 +178,7 @@ const promptResult = await hooks.before_prompt_build(
     senderId: "wx-owner",
     channel: "openclaw-weixin",
     sessionKey: "session-auto",
+    accountId: "weixin-account",
   },
 );
 
@@ -166,22 +187,7 @@ assert.doesNotMatch(promptResult.prependContext, /\[Yogurt Sticker Candidates\]/
 assert.doesNotMatch(promptResult.prependContext, /一只猫咪正在卖萌/);
 assert.match(promptResult.prependContext, /不要描述、解释或复述表情包画面/);
 
-const blockResult = await hooks.reply_payload_sending(
-  {
-    payload: { text: "处理中" },
-    kind: "block",
-    channel: "openclaw-weixin",
-    sessionKey: "session-auto",
-  },
-  {
-    channelId: "openclaw-weixin",
-    conversationId: "wx-owner",
-    sessionKey: "session-auto",
-  },
-);
-assert.equal(blockResult, undefined);
-
-const finalResult = await hooks.reply_payload_sending(
+const weixinPayloadResult = await hooks.reply_payload_sending(
   {
     payload: { text: "来啦～" },
     kind: "final",
@@ -192,36 +198,65 @@ const finalResult = await hooks.reply_payload_sending(
     channelId: "openclaw-weixin",
     conversationId: "wx-owner",
     sessionKey: "session-auto",
+    accountId: "weixin-account",
+  },
+);
+assert.equal(
+  weixinPayloadResult,
+  undefined,
+  "WeChat must not depend on reply_payload_sending",
+);
+
+hooks.agent_end(
+  {
+    success: true,
+    messages: [{ role: "assistant", content: "来啦～" }],
+  },
+  {
+    channel: "openclaw-weixin",
+    chatId: "wx-owner",
+    sessionKey: "session-auto",
+    accountId: "weixin-account",
   },
 );
 
-assert.equal(finalResult.payload.text, "来啦～");
-assert.equal(finalResult.payload.mediaUrl, undefined);
-assert.equal(finalResult.payload.mediaUrls.length, 1);
-assert.match(
-  finalResult.payload.mediaUrls[0],
-  /assets\/stickers\/images\/sticker-test123\.webp$/,
-);
-assert.ok(
-  logs.some((message) =>
-    message.includes("sticker media attached trigger=reply_payload_sending mode=auto"),
-  ),
-);
-
-const duplicateResult = await hooks.reply_payload_sending(
+hooks.message_sent(
   {
-    payload: { text: "重复发送检查" },
-    kind: "final",
-    channel: "openclaw-weixin",
-    sessionKey: "session-auto",
+    success: true,
+    content: "来啦～",
+    to: "wx-owner",
+    accountId: "weixin-account",
   },
   {
     channelId: "openclaw-weixin",
     conversationId: "wx-owner",
     sessionKey: "session-auto",
+    accountId: "weixin-account",
   },
 );
-assert.equal(duplicateResult, undefined, "pending sticker must be consumed once");
+
+await new Promise((resolve) => setTimeout(resolve, 100));
+
+assert.equal(loadedChannel, "openclaw-weixin");
+assert.equal(sentMedia.length, 1);
+assert.equal(sentMedia[0].cfg, openclawConfig);
+assert.equal(sentMedia[0].to, "wx-owner");
+assert.equal(sentMedia[0].text, "");
+assert.equal(sentMedia[0].accountId, "weixin-account");
+assert.match(
+  sentMedia[0].mediaUrl,
+  /assets\/stickers\/images\/sticker-test123\.webp$/,
+);
+assert.ok(
+  logs.some((message) =>
+    message.includes("sticker outbound scheduled trigger=message_sent mode=auto"),
+  ),
+);
+assert.ok(
+  logs.some((message) =>
+    message.includes("sticker media sent trigger=channel_outbound_adapter mode=auto"),
+  ),
+);
 
 const unavailableResult = await hooks.before_prompt_build(
   {
@@ -241,20 +276,16 @@ assert.match(unavailableResult.prependContext, /绝对不要描述、解释、�
 assert.doesNotMatch(unavailableResult.prependContext, /表情描述：/);
 assert.doesNotMatch(unavailableResult.prependContext, /一只猫咪正在卖萌/);
 
-const unavailablePayload = await hooks.reply_payload_sending(
+hooks.agent_end(
+  { success: true, messages: [{ role: "assistant", content: "这次没发出来。" }] },
   {
-    payload: { text: "这次没发出来，主人。" },
-    kind: "final",
     channel: "openclaw-weixin",
-    sessionKey: "session-unavailable",
-  },
-  {
-    channelId: "openclaw-weixin",
-    conversationId: "wx-owner",
+    chatId: "wx-owner",
     sessionKey: "session-unavailable",
   },
 );
-assert.equal(unavailablePayload, undefined, "no candidate must not attach media");
+await new Promise((resolve) => setTimeout(resolve, 40));
+assert.equal(sentMedia.length, 1, "no candidate must not send media");
 
-console.log("sticker reply media: ok");
+console.log("sticker outbound adapter: ok");
 JS
