@@ -67,6 +67,7 @@ JSON
 SH
 chmod +x "$TMP_DIR/fake-python"
 
+YOGURT_STICKER_AGENT_END_DELAY_MS=10 \
 node --experimental-strip-types --input-type=module - \
   "$TEST_ROOT" "$FAKE_REPO" "$TMP_DIR/fake-python" <<'JS'
 import assert from "node:assert/strict";
@@ -88,7 +89,7 @@ const pluginConfig = {
   senderMap: { "wx-owner": "owner" },
   ownerSenderIds: [],
   unknownSenderPolicy: "skip",
-  allowedChannels: ["ilink"],
+  allowedChannels: ["openclaw-weixin"],
   onlyUserTurns: true,
   timeoutMs: 2500,
   maxMemories: 3,
@@ -127,11 +128,10 @@ plugin.register({
 });
 
 assert.equal(typeof hooks.before_prompt_build, "function");
+assert.equal(typeof hooks.agent_end, "function");
 assert.equal(typeof hooks.message_sent, "function");
 assert.equal(toolFactory({ sessionKey: "session-auto" }), null);
 
-// Match the WeChat runtime shape that exposed the production bug: inbound has
-// a sender peer but no usable session key, while message_sent has to + session.
 const result = await hooks.before_prompt_build(
   {
     prompt: "酸奶，发一个卖萌的表情包过来",
@@ -139,25 +139,24 @@ const result = await hooks.before_prompt_build(
   },
   {
     senderId: "wx-owner",
-    channel: "ilink",
+    channel: "openclaw-weixin",
   },
 );
 
 assert.match(result.prependContext, /\[Yogurt Sticker Delivery\]/);
 assert.doesNotMatch(result.prependContext, /\[Yogurt Sticker Candidates\]/);
 assert.doesNotMatch(result.prependContext, /一只猫咪正在卖萌/);
-assert.match(result.prependContext, /一句很短、自然的确认/);
 assert.match(result.prependContext, /不要描述、解释或复述表情包画面/);
 
-hooks.message_sent(
+hooks.agent_end(
   {
     success: true,
-    content: "好的，主人～",
-    sessionKey: "session-auto",
-    to: "wx-owner",
+    messages: [{ role: "assistant", content: "来啦～" }],
   },
   {
-    channelId: "ilink",
+    channel: "openclaw-weixin",
+    chatId: "wx-owner",
+    sessionKey: "session-auto",
   },
 );
 
@@ -167,8 +166,16 @@ assert.equal(sentAttachments.length, 1);
 assert.equal(sentAttachments[0].sessionKey, "session-auto");
 assert.equal(sentAttachments[0].files.length, 1);
 assert.match(sentAttachments[0].files[0].path, /assets\/stickers\/images\/sticker-test123\.webp$/);
-assert.ok(logs.some((message) => message.includes("sticker media scheduled mode=auto")));
-assert.ok(logs.some((message) => message.includes("sticker media sent mode=auto")));
+assert.ok(
+  logs.some((message) =>
+    message.includes("sticker media scheduled trigger=agent_end"),
+  ),
+);
+assert.ok(
+  logs.some((message) =>
+    message.includes("sticker media sent trigger=agent_end mode=auto"),
+  ),
+);
 
 console.log("sticker auto delivery: ok");
 JS
