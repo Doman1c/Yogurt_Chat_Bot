@@ -1,13 +1,15 @@
 {
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
-  "description": "Injects Yogurt social context and delivers bounded V2 stickers.",
-  "version": "0.3.3",
+  "description": "Injects Yogurt social context and delivers bounded V2.1 stickers.",
+  "version": "0.4.0-rc.1",
   "activation": {
     "onStartup": true
   },
   "contracts": {
-    "tools": ["choose_sticker"]
+    "tools": [
+      "choose_sticker"
+    ]
   },
   "configSchema": {
     "type": "object",
@@ -48,7 +50,11 @@
       },
       "unknownSenderPolicy": {
         "type": "string",
-        "enum": ["default", "pseudonymous", "skip"],
+        "enum": [
+          "default",
+          "pseudonymous",
+          "skip"
+        ],
         "default": "default"
       },
       "allowedChannels": {
@@ -84,7 +90,10 @@
       },
       "stickerSelectionMode": {
         "type": "string",
-        "enum": ["auto", "tool"],
+        "enum": [
+          "auto",
+          "tool"
+        ],
         "default": "auto"
       }
     }
