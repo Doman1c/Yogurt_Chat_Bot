@@ -39,3 +39,4 @@ jobs:
           bash scripts/test-sticker-auto-delivery
           bash scripts/test-sticker-v21
           bash scripts/test-v3
+          bash scripts/test-v3-runtime
