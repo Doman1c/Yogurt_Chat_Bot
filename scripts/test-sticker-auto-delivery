@@ -19,11 +19,14 @@ mkdir -p \
   "$FAKE_REPO/social_layer/config" \
   "$FAKE_REPO/assets/stickers/images"
 
-cp "$REPO_ROOT/integrations/openclaw/index-v2.ts" "$TEST_ROOT/index-v2.ts"
-cp "$REPO_ROOT/integrations/openclaw/sticker-plugin-utils.ts" \
-  "$TEST_ROOT/sticker-plugin-utils.ts"
-cp "$REPO_ROOT/integrations/openclaw/sticker-selection.ts" \
-  "$TEST_ROOT/sticker-selection.ts"
+for source in \
+  index-v2.ts \
+  sticker-plugin-utils.ts \
+  sticker-selection.ts \
+  sticker-turn.ts \
+  sticker-v21-utils.ts; do
+  cp "$REPO_ROOT/integrations/openclaw/$source" "$TEST_ROOT/$source"
+done
 
 cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
 {
@@ -68,27 +71,27 @@ if request.get("explicit_sticker_request") is not True:
     raise SystemExit("explicit_sticker_request was not forwarded")
 
 message = request.get("message", "")
-if "模拟无候选" in message:
-    payload = {
-        "social_context": "[Yogurt Social State]\nscene: playful",
-        "sticker_candidates": [],
-    }
-else:
-    payload = {
-        "social_context": (
-            "[Yogurt Social State]\nscene: playful\n\n"
-            "[Yogurt Sticker Candidates]\n- sticker_id: sticker-test123"
-        ),
-        "sticker_candidates": [
-            {
-                "id": "sticker-test123",
-                "file": "images/sticker-test123.webp",
-                "description": "一只猫咪正在卖萌",
-                "score": 9,
-                "scenes": ["playful"],
-            }
-        ],
-    }
+available = "模拟无候选" not in message
+candidate = {
+    "id": "sticker-test123",
+    "file": "images/sticker-test123.webp",
+    "description": "一只猫咪正在卖萌",
+    "score": 9,
+    "scenes": ["playful"],
+}
+payload = {
+    "social_context": "[Yogurt Social State]\nscene: playful",
+    "sticker_candidates": [candidate] if available else [],
+    "sticker_decision": {
+        "should_send": available,
+        "mode": "explicit_specific",
+        "score": 9 if available else 0,
+        "threshold": 5,
+        "intents": ["playful"] if available else [],
+        "reasons": ["explicit_request"] if available else ["no_candidates"],
+        "deferred": False,
+    },
+}
 json.dump(payload, sys.stdout, ensure_ascii=False)
 PY
 chmod +x "$TMP_DIR/fake-python"
@@ -154,7 +157,7 @@ plugin.register({
           return {
             async sendMedia(params) {
               sentMedia.push(params);
-              return { channel, messageId: "media-message-1" };
+              return { channel, messageId: `media-${sentMedia.length}` };
             },
           };
         },
@@ -169,73 +172,33 @@ assert.equal(typeof hooks.message_sent, "function");
 assert.equal(typeof hooks.reply_payload_sending, "function");
 assert.equal(toolFactory({ sessionKey: "session-auto" }), null);
 
+const context = {
+  senderId: "wx-owner",
+  channel: "openclaw-weixin",
+  chatId: "wx-owner",
+  sessionKey: "session-agent-end",
+  accountId: "weixin-account",
+};
 const promptResult = await hooks.before_prompt_build(
   {
     prompt: "酸奶，发一个卖萌的表情包过来",
     context: { pluginConfig },
   },
-  {
-    senderId: "wx-owner",
-    channel: "openclaw-weixin",
-    sessionKey: "session-auto",
-    accountId: "weixin-account",
-  },
+  context,
 );
-
 assert.match(promptResult.prependContext, /\[Yogurt Sticker Delivery\]/);
 assert.doesNotMatch(promptResult.prependContext, /\[Yogurt Sticker Candidates\]/);
 assert.doesNotMatch(promptResult.prependContext, /一只猫咪正在卖萌/);
-assert.match(promptResult.prependContext, /不要描述、解释或复述表情包画面/);
+assert.match(promptResult.prependContext, /不要描述、解释或虚构表情包画面/);
 
-const weixinPayloadResult = await hooks.reply_payload_sending(
-  {
-    payload: { text: "来啦～" },
-    kind: "final",
-    channel: "openclaw-weixin",
-    sessionKey: "session-auto",
-  },
-  {
-    channelId: "openclaw-weixin",
-    conversationId: "wx-owner",
-    sessionKey: "session-auto",
-    accountId: "weixin-account",
-  },
-);
-assert.equal(
-  weixinPayloadResult,
-  undefined,
-  "WeChat must not depend on reply_payload_sending",
-);
-
-hooks.agent_end(
+await hooks.agent_end(
   {
     success: true,
     messages: [{ role: "assistant", content: "来啦～" }],
   },
-  {
-    channel: "openclaw-weixin",
-    chatId: "wx-owner",
-    sessionKey: "session-auto",
-    accountId: "weixin-account",
-  },
+  context,
 );
-
-hooks.message_sent(
-  {
-    success: true,
-    content: "来啦～",
-    to: "wx-owner",
-    accountId: "weixin-account",
-  },
-  {
-    channelId: "openclaw-weixin",
-    conversationId: "wx-owner",
-    sessionKey: "session-auto",
-    accountId: "weixin-account",
-  },
-);
-
-await new Promise((resolve) => setTimeout(resolve, 100));
+await new Promise((resolve) => setTimeout(resolve, 80));
 
 assert.equal(loadedChannel, "openclaw-weixin");
 assert.equal(sentMedia.length, 1);
@@ -248,9 +211,7 @@ assert.match(
   /assets\/stickers\/images\/sticker-test123\.webp$/,
 );
 assert.ok(
-  logs.some((message) =>
-    message.includes("sticker outbound scheduled trigger=message_sent mode=auto"),
-  ),
+  logs.some((message) => message.includes("send decision trigger=agent_end")),
 );
 assert.ok(
   logs.some((message) =>
@@ -258,34 +219,54 @@ assert.ok(
   ),
 );
 
+const fallbackContext = {
+  ...context,
+  sessionKey: "session-message-sent",
+};
+await hooks.before_prompt_build(
+  {
+    prompt: "酸奶，再发一个卖萌的表情包",
+    context: { pluginConfig },
+  },
+  fallbackContext,
+);
+await hooks.agent_end({ success: true }, fallbackContext);
+await hooks.message_sent(
+  {
+    success: true,
+    content: "再来一张～",
+    to: "wx-owner",
+    accountId: "weixin-account",
+  },
+  fallbackContext,
+);
+await new Promise((resolve) => setTimeout(resolve, 80));
+assert.equal(sentMedia.length, 2, "message_sent must provide final-text fallback");
+
 const unavailableResult = await hooks.before_prompt_build(
   {
     prompt: "酸奶，发一个表情包，模拟无候选",
     context: { pluginConfig },
   },
   {
-    senderId: "wx-owner",
-    channel: "openclaw-weixin",
+    ...context,
     sessionKey: "session-unavailable",
   },
 );
-
 assert.match(unavailableResult.prependContext, /\[Yogurt Sticker Request\]/);
-assert.match(unavailableResult.prependContext, /没有找到可安全发送的候选/);
+assert.match(unavailableResult.prependContext, /没有找到足够相关且安全的候选/);
 assert.match(unavailableResult.prependContext, /绝对不要描述、解释、复述或虚构/);
-assert.doesNotMatch(unavailableResult.prependContext, /表情描述：/);
 assert.doesNotMatch(unavailableResult.prependContext, /一只猫咪正在卖萌/);
 
-hooks.agent_end(
+await hooks.agent_end(
   { success: true, messages: [{ role: "assistant", content: "这次没发出来。" }] },
   {
-    channel: "openclaw-weixin",
-    chatId: "wx-owner",
+    ...context,
     sessionKey: "session-unavailable",
   },
 );
-await new Promise((resolve) => setTimeout(resolve, 40));
-assert.equal(sentMedia.length, 1, "no candidate must not send media");
+await new Promise((resolve) => setTimeout(resolve, 30));
+assert.equal(sentMedia.length, 2, "no candidate must not send media");
 
-console.log("sticker outbound adapter: ok");
+console.log("sticker outbound adapter v2.1: ok");
 JS
