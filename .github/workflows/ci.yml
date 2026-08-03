@@ -32,9 +32,10 @@ jobs:
       - name: Install test dependency
         run: python -m pip install pytest
 
-      - name: Run adapter and sticker tests
+      - name: Run adapter, sticker, and V3 tests
         run: |
           bash scripts/test-openclaw-adapter
           bash scripts/test-sticker-explicit-fallback
           bash scripts/test-sticker-auto-delivery
           bash scripts/test-sticker-v21
+          bash scripts/test-v3
