@@ -9,7 +9,6 @@ import {
   channelIsAllowed,
   contextAliases,
   optionalString,
-  preferredPolicyKey,
   readConfig,
   resolveUserId,
   senderIdFromContext,
@@ -45,7 +44,6 @@ type AutoMemoryResult = {
   promoted_count?: number;
   pending_count?: number;
   conflict_count?: number;
-  error?: string;
 };
 
 function booleanValue(value: unknown, fallback: boolean): boolean {
@@ -96,6 +94,18 @@ function readV3Config(api: any, event?: any): V3Config {
   };
 }
 
+function eventMetadata(event?: any): Record<string, unknown> {
+  return asRecord(event?.metadata);
+}
+
+function eventChannel(event: any, ctx: any): string {
+  return (
+    optionalString(event?.channel) ||
+    optionalString(eventMetadata(event).channel) ||
+    channelFromContext(ctx)
+  );
+}
+
 function targetFromContext(ctx: any, event?: any): string | undefined {
   return (
     optionalString(event?.to) ||
@@ -110,14 +120,25 @@ function targetFromContext(ctx: any, event?: any): string | undefined {
 function accountIdFromContext(ctx: any, event?: any): string | undefined {
   return (
     optionalString(event?.accountId) ||
+    optionalString(eventMetadata(event).accountId) ||
     optionalString(ctx?.accountId) ||
     optionalString(ctx?.channelContext?.accountId) ||
     optionalString(ctx?.deliveryContext?.accountId)
   );
 }
 
+function eventHasMedia(event: any): boolean {
+  const metadata = eventMetadata(event);
+  return Boolean(
+    optionalString(event?.mediaUrl) ||
+      (Array.isArray(event?.mediaUrls) && event.mediaUrls.length > 0) ||
+      optionalString(metadata.mediaUrl) ||
+      (Array.isArray(metadata.mediaUrls) && metadata.mediaUrls.length > 0),
+  );
+}
+
 function aliasesFor(ctx: any, event?: any): string[] {
-  const channel = optionalString(event?.channel) || channelFromContext(ctx);
+  const channel = eventChannel(event, ctx);
   const senderId = senderIdFromContext(ctx);
   const target = targetFromContext(ctx, event);
   const aliases = contextAliases(ctx, channel, senderId, event);
@@ -161,8 +182,7 @@ class PendingTurnStore {
 
   private prune(force = false): void {
     const cutoff = Date.now() - TURN_TTL_MS;
-    const seen = new Set<PendingTurn>();
-    for (const turn of this.byAlias.values()) seen.add(turn);
+    const seen = new Set<PendingTurn>(this.byAlias.values());
     const ordered = [...seen].sort((left, right) => left.createdAt - right.createdAt);
     for (const turn of ordered) {
       if (!force && turn.createdAt >= cutoff) continue;
@@ -176,22 +196,34 @@ class PendingTurnStore {
 
 const memoryTurns = new PendingTurnStore();
 const bubbleTurns = new PendingTurnStore();
-const bubblePassThrough = new Map<string, number>();
+const bubblePassThrough = new Map<string, Set<symbol>>();
 
 function bubbleFingerprint(to: string, accountId: string | undefined, text: string): string {
   return `${accountId || "default"}\0${to}\0${text}`;
 }
 
-function allowBubblePassThrough(fingerprint: string): boolean {
-  const count = bubblePassThrough.get(fingerprint) || 0;
-  if (count <= 0) return false;
-  if (count === 1) bubblePassThrough.delete(fingerprint);
-  else bubblePassThrough.set(fingerprint, count - 1);
+function addBubblePassThrough(fingerprint: string): symbol {
+  const token = Symbol(fingerprint);
+  const tokens = bubblePassThrough.get(fingerprint) || new Set<symbol>();
+  tokens.add(token);
+  bubblePassThrough.set(fingerprint, tokens);
+  return token;
+}
+
+function consumeBubblePassThrough(fingerprint: string): boolean {
+  const tokens = bubblePassThrough.get(fingerprint);
+  const token = tokens?.values().next().value as symbol | undefined;
+  if (!tokens || !token) return false;
+  tokens.delete(token);
+  if (tokens.size === 0) bubblePassThrough.delete(fingerprint);
   return true;
 }
 
-function addBubblePassThrough(fingerprint: string): void {
-  bubblePassThrough.set(fingerprint, (bubblePassThrough.get(fingerprint) || 0) + 1);
+function releaseBubblePassThrough(fingerprint: string, token: symbol): void {
+  const tokens = bubblePassThrough.get(fingerprint);
+  if (!tokens) return;
+  tokens.delete(token);
+  if (tokens.size === 0) bubblePassThrough.delete(fingerprint);
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -232,7 +264,7 @@ function runAutoMemory(
 
     let stdout = "";
     let settled = false;
-    const finishError = (reason: string) => {
+    const rejectOnce = (reason: string) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -240,7 +272,7 @@ function runAutoMemory(
     };
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      finishError("auto_memory_timeout");
+      rejectOnce("auto_memory_timeout");
     }, config.autoMemoryTimeoutMs);
 
     child.stdout.setEncoding("utf8");
@@ -248,20 +280,20 @@ function runAutoMemory(
       stdout += chunk;
       if (Buffer.byteLength(stdout, "utf8") > MAX_AUTO_MEMORY_OUTPUT_BYTES) {
         child.kill("SIGKILL");
-        finishError("auto_memory_output_too_large");
+        rejectOnce("auto_memory_output_too_large");
       }
     });
     child.stderr.on("data", () => {});
-    child.on("error", () => finishError("auto_memory_spawn_failed"));
+    child.on("error", () => rejectOnce("auto_memory_spawn_failed"));
     child.on("close", (code) => {
       clearTimeout(timer);
       if (settled) return;
-      if (code !== 0) return finishError(`auto_memory_exit_${String(code)}`);
+      if (code !== 0) return rejectOnce(`auto_memory_exit_${String(code)}`);
       try {
         settled = true;
         resolvePromise(JSON.parse(stdout) as AutoMemoryResult);
       } catch {
-        finishError("auto_memory_invalid_json");
+        rejectOnce("auto_memory_invalid_json");
       }
     });
     child.stdin.end(
@@ -349,12 +381,12 @@ export function registerV3Runtime(api: any): void {
       if (!config.multiBubbleEnabled) return;
       const text = optionalString(event?.content) || optionalString(event?.text);
       const to = targetFromContext(ctx, event);
-      if (!text || !to || event?.mediaUrl || event?.mediaUrls?.length) return;
-      const channel = optionalString(event?.channel) || channelFromContext(ctx);
+      if (!text || !to || eventHasMedia(event)) return;
+      const channel = eventChannel(event, ctx);
       if (channel !== WEIXIN_CHANNEL && !to.endsWith("@im.wechat")) return;
       const accountId = accountIdFromContext(ctx, event);
       const fingerprint = bubbleFingerprint(to, accountId, text);
-      if (allowBubblePassThrough(fingerprint)) return;
+      if (consumeBubblePassThrough(fingerprint)) return;
 
       const aliases = aliasesFor(ctx, event);
       const turn = bubbleTurns.consume(aliases);
@@ -367,7 +399,6 @@ export function registerV3Runtime(api: any): void {
       if (bubbles.length < 2) return;
 
       await commitMemory("message_sending", aliases, text, event);
-
       const loadAdapter = api.runtime?.channel?.outbound?.loadAdapter;
       if (typeof loadAdapter !== "function") return;
       const adapter = await loadAdapter(WEIXIN_CHANNEL);
@@ -377,13 +408,18 @@ export function registerV3Runtime(api: any): void {
       try {
         for (let index = 0; index < bubbles.length; index += 1) {
           const bubble = bubbles[index];
-          addBubblePassThrough(bubbleFingerprint(to, accountId, bubble));
-          await adapter.sendText({
-            cfg: api.config,
-            to,
-            text: bubble,
-            ...(accountId ? { accountId } : {}),
-          } as any);
+          const childFingerprint = bubbleFingerprint(to, accountId, bubble);
+          const token = addBubblePassThrough(childFingerprint);
+          try {
+            await adapter.sendText({
+              cfg: api.config,
+              to,
+              text: bubble,
+              ...(accountId ? { accountId } : {}),
+            } as any);
+          } finally {
+            releaseBubblePassThrough(childFingerprint, token);
+          }
           sentCount += 1;
           if (index < bubbles.length - 1 && config.multiBubbleDelayMs > 0) {
             await sleep(config.multiBubbleDelayMs);
