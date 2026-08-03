@@ -35,16 +35,14 @@ _CURRENT_LOCATION_PATTERN = re.compile(
 
 
 class ExtendedDeterministicMemoryExtractor(DeterministicMemoryExtractor):
-    """V3 device-feedback extensions layered on the conservative base extractor.
+    """Extract only the patterns added after real-device V3 feedback.
 
-    The extensions remain deterministic and first-person-only. Stable academic
-    facts may promote immediately, while temporary location is deliberately
-    kept below the normal promotion threshold so it cannot silently replace a
-    long-term residence fact.
+    The base automatic-memory runtime continues to handle its established
+    patterns. This incremental extractor therefore must not return base
+    candidates, otherwise one chat turn would be counted twice.
     """
 
     def extract(self, user_message: str) -> list[MemoryCandidate]:
-        base = list(super().extract(user_message))
         extra: list[MemoryCandidate] = []
         extra.extend(self._assistant_behavior(user_message))
         extra.extend(self._academic_facts(user_message))
@@ -52,7 +50,7 @@ class ExtendedDeterministicMemoryExtractor(DeterministicMemoryExtractor):
 
         result: list[MemoryCandidate] = []
         seen: set[tuple[str, str, str, int | None]] = set()
-        for raw in [*base, *extra]:
+        for raw in extra:
             candidate = raw.normalized()
             signature = (
                 candidate.kind,
@@ -64,7 +62,7 @@ class ExtendedDeterministicMemoryExtractor(DeterministicMemoryExtractor):
                 continue
             seen.add(signature)
             result.append(candidate)
-        return result[:12]
+        return result[:8]
 
     @staticmethod
     def _assistant_behavior(text: str) -> Iterable[MemoryCandidate]:
@@ -99,8 +97,7 @@ class ExtendedDeterministicMemoryExtractor(DeterministicMemoryExtractor):
         )
         if bubble:
             count = bubble.group("count").strip()
-            value = f"适合时将回复分成{count}个短气泡"
-            value = value.replace("个个", "个")
+            value = f"适合时将回复分成{count}个短气泡".replace("个个", "个")
             yield MemoryCandidate(
                 kind="preference",
                 key="assistant_behavior",
