@@ -7,20 +7,21 @@ from .models import DialogueState, Mood, Relationship, ReplyLength, Scene
 
 
 class StyleRouter:
-    """Rule-based V1 router.
+    """Deterministic V1 social router.
 
-    It intentionally avoids an extra model call. The goal is deterministic,
-    fast scene selection that can later be replaced or augmented by a model.
+    V2.1 keeps this router lightweight, but ``use_sticker`` now means
+    "this scene may enter the independent sticker send decision" rather than
+    "a sticker should be sent". Technical and serious turns remain closed.
     """
 
     _SIGNALS: dict[Scene, tuple[str, ...]] = {
         Scene.COMFORT: (
             "难过", "伤心", "委屈", "孤独", "崩溃", "想哭", "不开心",
-            "分手", "不理我", "不搭理我", "很累", "撑不住", "焦虑",
+            "分手", "不理我", "不搭理我", "很累", "好累", "累死", "撑不住", "焦虑",
         ),
         Scene.CELEBRATION: (
             "成功了", "搞定了", "通过了", "完成了", "解决了", "录取了",
-            "赢了", "太好了", "终于好了", "连接成功", "运行成功",
+            "赢了", "太好了", "终于好了", "终于成功", "连接成功", "运行成功",
         ),
         Scene.TECHNICAL: (
             "报错", "错误", "代码", "脚本", "终端", "命令", "配置", "接口",
@@ -33,13 +34,24 @@ class StyleRouter:
         ),
         Scene.PLAYFUL: (
             "哈哈", "嘿嘿", "笑死", "逗你", "开玩笑", "好可爱", "卖萌",
-            "表情包", "喵", "哼", "笨蛋",
+            "喵", "哼", "笨蛋", "离谱", "无语", "绷不住",
         ),
     }
 
     _QUESTION_PATTERNS = ("?", "？", "怎么", "为什么", "如何", "能不能", "可以吗", "是什么")
     _FRUSTRATION_SIGNALS = ("不行", "还是不行", "失败", "卡住", "卡在", "没反应", "连不上", "找不到")
     _ANXIETY_SIGNALS = ("担心", "害怕", "紧张", "会不会", "怎么办")
+    _MOOD_SIGNALS: tuple[tuple[Mood, tuple[str, ...]], ...] = (
+        (Mood.TIRED, ("好累", "很累", "累死", "困死", "好困", "困了", "没精神")),
+        (Mood.ANGRY, ("生气", "气死", "火大", "愤怒", "烦死", "讨厌")),
+        (Mood.SPEECHLESS, ("无语", "离谱", "不知道说什么", "说不出话", "人傻了")),
+        (Mood.EMBARRASSED, ("尴尬", "社死", "不好意思", "丢人", "强颜欢笑")),
+        (Mood.AFFECTIONATE, ("想你", "喜欢你", "爱你", "抱抱", "贴贴", "亲亲")),
+        (Mood.SURPRISED, ("震惊", "惊了", "居然", "竟然", "没想到", "真的假的")),
+        (Mood.CONFUSED, ("看不懂", "不明白", "懵了", "迷惑", "什么意思")),
+        (Mood.PROUD, ("厉害吧", "我真厉害", "骄傲", "做到了", "我赢了")),
+        (Mood.WARM, ("谢谢你", "辛苦了", "真好", "好温柔", "暖心")),
+    )
 
     def __init__(self, default_relationship: Relationship = Relationship.OWNER) -> None:
         self.default_relationship = default_relationship
@@ -49,7 +61,6 @@ class StyleRouter:
         scene, matched = self._detect_scene(normalized)
         mood = self._detect_mood(normalized, scene)
         resolved_relationship = self._relationship(relationship)
-
         style, length, humor, use_memory, sticker, rules = self._policy(scene, mood, normalized)
         return DialogueState(
             scene=scene,
@@ -73,8 +84,6 @@ class StyleRouter:
         return [signal for signal in signals if signal in text]
 
     def _detect_scene(self, text: str) -> tuple[Scene, list[str]]:
-        # Emotional distress takes priority over technical keywords. This keeps
-        # the latest emotional intent from being buried by incidental details.
         priority = (
             Scene.COMFORT,
             Scene.CELEBRATION,
@@ -86,12 +95,14 @@ class StyleRouter:
             matched = self._contains_any(text, self._SIGNALS[scene])
             if matched:
                 return scene, matched
-
         if re.search(r"```|traceback|\b(error|exception|config|curl|git)\b", text):
             return Scene.TECHNICAL, ["technical_pattern"]
         return Scene.CASUAL, []
 
     def _detect_mood(self, text: str, scene: Scene) -> Mood:
+        for mood, signals in self._MOOD_SIGNALS:
+            if self._contains_any(text, signals):
+                return mood
         if scene is Scene.COMFORT:
             return Mood.SAD
         if scene is Scene.CELEBRATION:
@@ -126,12 +137,13 @@ class StyleRouter:
                 ReplyLength.SHORT,
                 0.0,
                 True,
-                False,
+                True,
                 [
                     "先回应用户具体说的事情和情绪",
                     "不要立即分析、说教或给解决方案",
                     "除非用户主动询问，否则不要把话题转向睡觉、工作或旧记忆",
                     "语气自然、真诚，避免模板化安慰",
+                    "表情包由独立发送决策判断；不要在正文中描述图片",
                 ],
             )
         if scene is Scene.TECHNICAL:
@@ -193,10 +205,11 @@ class StyleRouter:
             ReplyLength.SHORT,
             0.15,
             True,
-            False,
+            True,
             [
                 "直接回应用户最新一句话",
                 "日常聊天保持简短自然",
                 "不要未经询问主动给出一串建议",
+                "日常表情包只能由独立发送决策低频触发",
             ],
         )
