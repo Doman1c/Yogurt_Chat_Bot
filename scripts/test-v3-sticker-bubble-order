@@ -29,6 +29,14 @@ JS
 cat > "$TEST_ROOT/index-v2.ts" <<'TS'
 export default {
   register(api: any) {
+    api.on(
+      "before_prompt_build",
+      async (event: any, ctx: any) => {
+        api.trace.push({ step: "base-before", event, ctx });
+        return { prependContext: "test-context" };
+      },
+      { priority: 60 },
+    );
     api.on("agent_end", async (event: any, ctx: any) => {
       api.trace.push({
         step: "sticker-finalizer",
@@ -87,10 +95,11 @@ assert.deepEqual(
   sendingHooks.map((item) => item.priority).sort((a, b) => b - a),
   [80, 70],
 );
+assert.ok(logs.some((message) => message.includes("captured=true")));
 
-async function dispatch(event, ctx) {
+async function dispatch(name, event, ctx) {
   let result;
-  const ordered = [...(hooks.get("message_sending") || [])].sort(
+  const ordered = [...(hooks.get(name) || [])].sort(
     (left, right) => right.priority - left.priority,
   );
   for (const item of ordered) {
@@ -100,8 +109,23 @@ async function dispatch(event, ctx) {
   return result;
 }
 
+const inboundContext = {
+  senderId: "wx-owner@im.wechat",
+  channel: "openclaw-weixin",
+  chatId: "wx-owner@im.wechat",
+  sessionKey: "session-1",
+  accountId: "weixin-account",
+};
+await dispatch(
+  "before_prompt_build",
+  { prompt: "终于全部弄好了！" },
+  inboundContext,
+);
+trace.length = 0;
+
 const fullReply = "终于全部弄好了！\n\n主人真的太厉害啦喵！";
 const result = await dispatch(
+  "message_sending",
   {
     content: fullReply,
     to: "wx-owner@im.wechat",
@@ -112,7 +136,7 @@ const result = await dispatch(
   },
   {
     channelId: "openclaw-weixin",
-    sessionKey: "session-1",
+    accountId: "weixin-account",
   },
 );
 
@@ -125,19 +149,47 @@ assert.equal(trace[0].event.success, true);
 assert.equal(trace[0].event.messages[0].content, fullReply);
 assert.equal(trace[0].event.to, "wx-owner@im.wechat");
 assert.equal(trace[0].ctx.channel, "openclaw-weixin");
+assert.equal(trace[0].ctx.senderId, "wx-owner@im.wechat");
+assert.equal(trace[0].ctx.sessionKey, "session-1");
 assert.ok(logs.some((message) => message.includes("pre-bubble sticker finalizer")));
 
 trace.length = 0;
 await dispatch(
+  "message_sending",
+  {
+    content: "主人真的太厉害啦喵！",
+    to: "wx-owner@im.wechat",
+    metadata: {
+      channel: "openclaw-weixin",
+      accountId: "weixin-account",
+    },
+  },
+  { channelId: "openclaw-weixin", accountId: "weixin-account" },
+);
+assert.deepEqual(
+  trace.map((item) => item.step),
+  ["multi-bubble"],
+  "child bubbles must not repeat sticker finalization",
+);
+
+await dispatch(
+  "before_prompt_build",
+  { prompt: "再发一段带图片的回复。" },
+  { ...inboundContext, sessionKey: "session-media" },
+);
+trace.length = 0;
+await dispatch(
+  "message_sending",
   {
     content: fullReply,
     to: "wx-owner@im.wechat",
     metadata: {
       channel: "openclaw-weixin",
+      accountId: "weixin-account",
       mediaUrls: ["/tmp/sticker.webp"],
     },
   },
-  { channelId: "openclaw-weixin" },
+  { channelId: "openclaw-weixin", accountId: "weixin-account" },
 );
 assert.deepEqual(
   trace.map((item) => item.step),
