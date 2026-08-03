@@ -186,6 +186,17 @@ const promptResult = await hooks.before_prompt_build(
   },
   context,
 );
+if (!promptResult?.prependContext) {
+  console.error("========== sticker adapter diagnostic ==========");
+  console.error(`node=${process.version}`);
+  console.error(`fakePython=${fakePython}`);
+  console.error(logs.length > 0 ? logs.join("\n") : "(no plugin logs captured)");
+  console.error("===============================================");
+}
+assert.ok(
+  promptResult?.prependContext,
+  "before_prompt_build returned no context; see diagnostic logs above",
+);
 assert.match(promptResult.prependContext, /\[Yogurt Sticker Delivery\]/);
 assert.doesNotMatch(promptResult.prependContext, /\[Yogurt Sticker Candidates\]/);
 assert.doesNotMatch(promptResult.prependContext, /一只猫咪正在卖萌/);
