@@ -1,8 +1,8 @@
 {
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
-  "description": "Injects Yogurt social context and delivers bounded V2.1 stickers.",
-  "version": "0.4.0",
+  "description": "Injects Yogurt social context, delivers bounded V2.1 stickers, and provides opt-in V3 memory and multi-bubble experiments.",
+  "version": "0.5.0-alpha.1",
   "activation": {
     "onStartup": true
   },
@@ -95,6 +95,50 @@
           "tool"
         ],
         "default": "auto"
+      },
+      "autoMemoryEnabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "autoMemoryPromotionThreshold": {
+        "type": "number",
+        "minimum": 0.5,
+        "maximum": 1.0,
+        "default": 0.78
+      },
+      "autoMemoryTimeoutMs": {
+        "type": "integer",
+        "minimum": 500,
+        "maximum": 10000,
+        "default": 2500
+      },
+      "multiBubbleEnabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "multiBubbleMinChars": {
+        "type": "integer",
+        "minimum": 8,
+        "maximum": 200,
+        "default": 24
+      },
+      "multiBubbleMaxChars": {
+        "type": "integer",
+        "minimum": 80,
+        "maximum": 2000,
+        "default": 360
+      },
+      "multiBubbleMaxBubbles": {
+        "type": "integer",
+        "minimum": 2,
+        "maximum": 4,
+        "default": 3
+      },
+      "multiBubbleDelayMs": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 3000,
+        "default": 420
       }
     }
   }
