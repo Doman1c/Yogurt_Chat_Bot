@@ -29,7 +29,7 @@ chmod 700 "$(dirname "$DB_PATH")" 2>/dev/null || true
 if [[ ! -f "$STICKER_CONFIG_PATH" ]]; then
   cp "$STICKER_CONFIG_EXAMPLE" "$STICKER_CONFIG_PATH"
   chmod 600 "$STICKER_CONFIG_PATH" 2>/dev/null || true
-  echo "Created disabled V2 sticker config: $STICKER_CONFIG_PATH"
+  echo "Created disabled sticker config: $STICKER_CONFIG_PATH"
 fi
 
 bash "$REPO_ROOT/scripts/test-openclaw-adapter"
@@ -42,11 +42,8 @@ from pathlib import Path
 plugin_dir = Path(sys.argv[1])
 manifest_path = plugin_dir / "openclaw.plugin.json"
 package_path = plugin_dir / "package.json"
-entry_path = plugin_dir / "index-v2.ts"
-utils_path = plugin_dir / "sticker-plugin-utils.ts"
-selection_path = plugin_dir / "sticker-selection.ts"
 
-for path in (manifest_path, package_path, entry_path, utils_path, selection_path):
+for path in (manifest_path, package_path):
     if not path.is_file():
         raise SystemExit(f"missing plugin file: {path}")
 
@@ -59,13 +56,30 @@ if manifest.get("id") != "yogurt-social-injector":
     raise SystemExit("plugin manifest id mismatch")
 if "choose_sticker" not in manifest.get("contracts", {}).get("tools", []):
     raise SystemExit("plugin manifest does not declare choose_sticker")
+
 extensions = package.get("openclaw", {}).get("extensions", [])
-if "./index-v2.ts" not in extensions:
-    raise SystemExit("package.json does not expose ./index-v2.ts")
-for filename in ("index-v2.ts", "sticker-plugin-utils.ts", "sticker-selection.ts"):
-    if filename not in package.get("files", []):
+if len(extensions) != 1 or extensions[0] not in {"./index-v2.ts", "./index-v3.ts"}:
+    raise SystemExit("package.json must expose exactly one supported Yogurt entry")
+entry_filename = extensions[0].removeprefix("./")
+required = {
+    entry_filename,
+    "index-v2.ts",
+    "sticker-plugin-utils.ts",
+    "sticker-selection.ts",
+    "sticker-turn.ts",
+    "sticker-v21-utils.ts",
+}
+if entry_filename == "index-v3.ts":
+    required.update({"v3-runtime.ts", "multi-bubble.ts"})
+
+package_files = set(package.get("files", []))
+for filename in sorted(required):
+    path = plugin_dir / filename
+    if not path.is_file():
+        raise SystemExit(f"missing plugin file: {path}")
+    if filename not in package_files:
         raise SystemExit(f"package.json does not include {filename}")
-print("single-pass hook/tool plugin package check: ok")
+print(f"Yogurt plugin package check: ok ({entry_filename})")
 PY
 
 CONFIG_FILE="$(openclaw config file 2>/dev/null || true)"
@@ -117,6 +131,14 @@ patch = {
                     "stickerEnabled": False,
                     "stickerConfigPath": sticker_config_path,
                     "stickerSelectionMode": "auto",
+                    "autoMemoryEnabled": False,
+                    "autoMemoryPromotionThreshold": 0.78,
+                    "autoMemoryTimeoutMs": 2500,
+                    "multiBubbleEnabled": False,
+                    "multiBubbleMinChars": 24,
+                    "multiBubbleMaxChars": 360,
+                    "multiBubbleMaxBubbles": 3,
+                    "multiBubbleDelayMs": 420,
                 },
             }
         }
@@ -142,4 +164,4 @@ else
   echo "Gateway restart skipped. Run: openclaw gateway restart"
 fi
 
-echo "Yogurt OpenClaw adapter installed. V2 remains disabled until explicitly enabled; once enabled, auto single-pass selection is the default."
+echo "Yogurt OpenClaw adapter installed. Stickers and all V3 alpha features remain disabled until explicitly enabled."
