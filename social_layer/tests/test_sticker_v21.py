@@ -7,6 +7,7 @@ from yogurt_social.stickers import (
     StickerRetriever,
     StickerSendDecider,
 )
+from yogurt_social.stickers.models import StickerCandidate
 
 
 def record(
@@ -185,6 +186,43 @@ def test_casual_is_eligible_but_neutral_small_talk_stays_quiet():
         phase="post_reply",
     )
     assert decision.should_send is False
+
+
+def test_expanded_celebration_phrases_trigger_in_casual_scene():
+    candidates = [
+        StickerCandidate(
+            sticker_id="celebrate-top",
+            file="images/celebrate-top.webp",
+            description="开心庆祝",
+            score=13.1,
+            scenes=("casual", "celebration"),
+            emotions=("happy",),
+            tones=("cute",),
+            matched_signals=("keyword_user",),
+        ),
+        StickerCandidate(
+            sticker_id="celebrate-runner-up",
+            file="images/celebrate-runner-up.webp",
+            description="鼓掌夸奖",
+            score=10.6,
+            scenes=("casual", "celebration"),
+            emotions=("happy",),
+            tones=("cute",),
+            matched_signals=("semantic",),
+        ),
+    ]
+    decision = StickerSendDecider().decide(
+        user_message="终于把这些功能都弄好了，我真的太开心了，快夸夸我！",
+        assistant_reply="主人真的太厉害啦喵！",
+        scene="casual",
+        mood="neutral",
+        explicit_request=False,
+        candidates=candidates,
+        phase="post_reply",
+    )
+    assert decision.should_send is True
+    assert "celebration" in decision.intents
+    assert "intent:celebration:3.0" in decision.reasons
 
 
 def test_technical_is_hard_blocked():
