@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+node --experimental-strip-types --input-type=module - "$REPO_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const repoRoot = process.argv[2];
+const { registerV3Runtime } = await import(
+  pathToFileURL(`${repoRoot}/integrations/openclaw/v3-runtime.ts`)
+);
+
+const hooks = {};
+const logs = [];
+const sentTexts = [];
+const pluginConfig = {
+  enabled: true,
+  pythonPath: "python3",
+  repoPath: repoRoot,
+  dbPath: `${repoRoot}/.test-memory.sqlite3`,
+  defaultUserId: "owner",
+  senderMap: { "wx-owner": "owner" },
+  ownerSenderIds: [],
+  unknownSenderPolicy: "default",
+  allowedChannels: [],
+  onlyUserTurns: true,
+  timeoutMs: 2500,
+  maxMemories: 3,
+  stickerEnabled: false,
+  stickerConfigPath: `${repoRoot}/social_layer/config/stickers.json`,
+  stickerSelectionMode: "auto",
+  autoMemoryEnabled: false,
+  multiBubbleEnabled: true,
+  multiBubbleMinChars: 20,
+  multiBubbleMaxChars: 360,
+  multiBubbleMaxBubbles: 3,
+  multiBubbleDelayMs: 0,
+};
+
+const api = {
+  config: { channels: { "openclaw-weixin": {} } },
+  pluginConfig,
+  resolvePath(value) {
+    return value;
+  },
+  logger: {
+    info(message) {
+      logs.push(String(message));
+    },
+    warn(message) {
+      logs.push(String(message));
+    },
+  },
+  on(name, handler) {
+    hooks[name] = handler;
+  },
+  runtime: {
+    channel: {
+      outbound: {
+        async loadAdapter(channel) {
+          assert.equal(channel, "openclaw-weixin");
+          return {
+            async sendText(params) {
+              const recursiveResult = await hooks.message_sending(
+                {
+                  to: params.to,
+                  content: params.text,
+                  metadata: {
+                    channel: "openclaw-weixin",
+                    accountId: params.accountId,
+                  },
+                },
+                {
+                  channelId: "openclaw-weixin",
+                  accountId: params.accountId,
+                },
+              );
+              assert.equal(
+                recursiveResult,
+                undefined,
+                "split bubbles must pass through the recursive message_sending hook",
+              );
+              sentTexts.push(params.text);
+              return { channel, messageId: `text-${sentTexts.length}` };
+            },
+          };
+        },
+      },
+    },
+  },
+};
+
+registerV3Runtime(api);
+assert.equal(typeof hooks.before_prompt_build, "function");
+assert.equal(typeof hooks.message_sending, "function");
+assert.equal(typeof hooks.agent_end, "function");
+assert.equal(typeof hooks.message_sent, "function");
+
+const turnContext = {
+  senderId: "wx-owner",
+  channel: "openclaw-weixin",
+  chatId: "wx-owner",
+  sessionKey: "session-bubble-1",
+  accountId: "weixin-account",
+};
+await hooks.before_prompt_build(
+  {
+    prompt: "终于弄好了！",
+    context: { pluginConfig },
+  },
+  turnContext,
+);
+
+const originalText =
+  "主人最厉害啦喵！🥰✨（星星眼）\n\n不过比起称赞，酸奶更爱崇拜主人的成就喵～💗🌟";
+const splitResult = await hooks.message_sending(
+  {
+    to: "wx-owner",
+    content: originalText,
+    metadata: {
+      channel: "openclaw-weixin",
+      accountId: "weixin-account",
+    },
+  },
+  {
+    channelId: "openclaw-weixin",
+    accountId: "weixin-account",
+  },
+);
+
+assert.equal(splitResult.cancel, true);
+assert.equal(splitResult.cancelReason, "yogurt_multi_bubble");
+assert.equal(splitResult.metadata.bubbleCount, 2);
+assert.deepEqual(sentTexts, [
+  "主人最厉害啦喵！🥰✨（星星眼）",
+  "不过比起称赞，酸奶更爱崇拜主人的成就喵～💗🌟",
+]);
+assert.ok(logs.some((message) => message.includes("multi bubble sent count=2")));
+
+await hooks.before_prompt_build(
+  {
+    prompt: "再发一段带图片的回复。",
+    context: { pluginConfig },
+  },
+  {
+    ...turnContext,
+    sessionKey: "session-media-1",
+  },
+);
+const mediaResult = await hooks.message_sending(
+  {
+    to: "wx-owner",
+    content: originalText,
+    metadata: {
+      channel: "openclaw-weixin",
+      accountId: "weixin-account",
+      mediaUrls: ["/tmp/example.webp"],
+    },
+  },
+  {
+    channelId: "openclaw-weixin",
+    accountId: "weixin-account",
+  },
+);
+assert.equal(mediaResult, undefined, "media messages must never be split");
+assert.equal(sentTexts.length, 2);
+
+console.log("v3 recursive multi-bubble runtime: ok");
+JS
