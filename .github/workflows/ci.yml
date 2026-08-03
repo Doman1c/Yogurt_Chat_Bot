@@ -40,3 +40,4 @@ jobs:
           bash scripts/test-sticker-v21
           bash scripts/test-v3
           bash scripts/test-v3-runtime
+          bash scripts/test-v3-sticker-bubble-order
