@@ -74,17 +74,25 @@ export default definePluginEntry({
   register(api: any) {
     let stickerAgentEnd: HookHandler | undefined;
 
-    const baseApi = new Proxy(api, {
-      get(target, property, receiver) {
-        if (property !== "on") return Reflect.get(target, property, receiver);
-        return (name: string, handler: HookHandler, options?: unknown) => {
-          if (name === "agent_end") stickerAgentEnd = handler;
-          return target.on(name, handler, options);
-        };
+    // A plain wrapper is used instead of Proxy here. Some OpenClaw runtime API
+    // implementations expose bound methods/accessors whose behaviour can differ
+    // when read through a Proxy receiver. Keeping the original API as prototype
+    // preserves every runtime property while overriding only typed-hook capture.
+    const baseApi = Object.create(api);
+    Object.defineProperty(baseApi, "on", {
+      configurable: true,
+      enumerable: true,
+      writable: false,
+      value(name: string, handler: HookHandler, options?: unknown) {
+        if (name === "agent_end") stickerAgentEnd = handler;
+        return api.on(name, handler, options);
       },
     });
 
     basePlugin.register(baseApi);
+    api.logger.info(
+      `${PLUGIN_ID}: V3 sticker finalizer captured=${stickerAgentEnd ? "true" : "false"}`,
+    );
 
     // V2.1 normally finalizes WeChat sticker selection in agent_end/message_sent.
     // Multi-bubble delivery cancels the original outbound message before message_sent,
@@ -94,7 +102,8 @@ export default definePluginEntry({
     api.on(
       "message_sending",
       async (event: any, ctx: any) => {
-        if (!stickerAgentEnd || eventHasMedia(event)) return;
+        if (!stickerAgentEnd) return;
+        if (eventHasMedia(event)) return;
         const text = optionalText(event?.content) || optionalText(event?.text);
         const target = messageTarget(event, ctx);
         if (!text || !target) return;
