@@ -25,7 +25,15 @@
           "maxMemories": 3,
           "stickerEnabled": false,
           "stickerConfigPath": "/Users/your-name/Yogurt_Chat_Bot/social_layer/config/stickers.json",
-          "stickerSelectionMode": "auto"
+          "stickerSelectionMode": "auto",
+          "autoMemoryEnabled": false,
+          "autoMemoryPromotionThreshold": 0.78,
+          "autoMemoryTimeoutMs": 2500,
+          "multiBubbleEnabled": false,
+          "multiBubbleMinChars": 24,
+          "multiBubbleMaxChars": 360,
+          "multiBubbleMaxBubbles": 3,
+          "multiBubbleDelayMs": 420
         }
       }
     }
