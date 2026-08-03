@@ -2,40 +2,123 @@
 
 酸奶是一个运行在 **OpenClaw + Ollama + 微信官方 Bot** 之上的本地 AI 角色项目。
 
-它在不增加第二次聊天模型推理的前提下，为每轮消息补充可解释、可回滚的社交上下文，并根据当前对话、酸奶最终回复、用户关系和离线审核过的表情包资产，自主判断是否适合发送表情，以及应该发送哪一张。
+项目在只进行一次正常聊天模型推理的前提下，为酸奶提供：
 
-## 当前稳定状态
+- 可解释、可回滚的社交上下文；
+- 基于最终回复的表情发送决策；
+- 自动长期记忆候选与审计；
+- 自然的微信多气泡回复；
+- 技术、严肃和高风险场景保护；
+- Python、SQLite、Catalog 或媒体发送异常时的 fail-open 文本链路。
+
+实时聊天不会调用视觉模型，也不会为了自动记忆或多气泡再调用一次聊天模型。
+
+## 当前版本
 
 ```text
-Yogurt Chat Bot: V2.1
-OpenClaw 插件: yogurt-social-injector 0.4.0
-Yogurt Sticker Tagger: 0.3.0
+Yogurt Chat Bot: V3
+OpenClaw 插件: yogurt-social-injector 0.5.0-alpha.1
+Sticker Runtime: V2.1
 Catalog Schema: 1.0
-正式资产基线: 14 张 approved + enabled 表情包
 ```
 
-实机环境：
+当前实机环境：
 
-- macOS
-- OpenClaw `2026.7.1-2`
-- `@tencent-weixin/openclaw-weixin` `2.4.6`
-- Ollama
-- `qwen3.5:9b`
-- 微信官方 Bot 私聊
+- macOS Apple Silicon；
+- OpenClaw `2026.7.1-2`；
+- `@tencent-weixin/openclaw-weixin` `2.4.6`；
+- Ollama；
+- `qwen3.5:9b`；
+- 微信官方 Bot 私聊。
 
-V2.1 在 V2 真实图片发送链路上新增：
+V3 已完成实机验证：
 
-- 发送决策与选图决策分离；
-- 主动发送在酸奶最终回复生成后判断；
-- `comfort` 和受控的 `casual` 通道开放；
-- 技术、严肃和高风险求助内容硬阻断；
-- 具体语义、Emotion、Description、OCR 和 Tone 优先于宽泛 Scene；
-- Scene 从主导信号降为上下文修正；
-- `weight` 从乘法改为受限加法先验；
-- 具体显式请求找不到相关图时不再强行发送；
-- 每个候选提供可解释的 `score_breakdown`；
-- 仍然只有一次 Qwen 聊天推理；
-- 图片失败不阻断已经生成的文字回复。
+- 自动记忆候选写入、晋升、待确认和修订审计；
+- 2～3 个微信文字气泡按顺序发送；
+- 原始整段回复不重复发送；
+- 表情决策先读取完整回复，再拆分气泡；
+- 文字气泡发送完成后发送表情图片；
+- 一轮最多选择并发送一张表情；
+- `celebration` 意图可以从“弄好了、太开心、夸夸我”等表达中触发；
+- 图片发送失败不影响已经生成的文字。
+
+## V3 新增能力
+
+### 自动记忆
+
+V3 使用确定性规则从用户消息中提取有限类型的长期信息，不调用第二个模型。
+
+支持：
+
+- 用户事实；
+- 用户偏好；
+- 重要里程碑；
+- 重复确认；
+- 新旧事实冲突检测；
+- 稳定记忆更新；
+- 不可变修订记录。
+
+候选状态：
+
+```text
+pending     尚未达到自动晋升条件
+promoted    已写入稳定记忆
+merged      与已有稳定记忆合并
+conflict    与已有记忆冲突，等待确认或后续更新
+```
+
+自动记忆不会：
+
+- 把酸奶自己的回复写成用户事实；
+- 保存密码、Token、验证码、密钥、身份证件或支付信息；
+- 建立原始聊天全文表；
+- 因提取失败而阻断正常回复。
+
+临时信息可以保留为低重要度候选。例如“现在回重庆了”可以记录为 `current_location=重庆` 的 pending 候选，而不会直接覆盖长期居住地。
+
+### 自然多气泡
+
+V3 可以把适合微信私聊的短回复拆成 2～3 个自然气泡。
+
+默认不会拆分：
+
+- 代码块；
+- Markdown 列表；
+- 链接；
+- 长技术回复；
+- 已携带媒体的消息；
+- 不足以形成两个自然语义段的短句。
+
+递归发送的子气泡会通过一次性通行标记跳过再次拆分，因此不会无限递归或重复发送。
+
+### 表情与多气泡协调
+
+OpenClaw 的关键发送顺序：
+
+```text
+完整的模型回复
+  ↓
+message_sending priority 80
+  ├── 复用入站上下文
+  ├── V2.1 读取完整回复
+  ├── StickerSendDecider 判断是否适合发送
+  ├── Ranker 选择最相关候选
+  └── Delivery Policy 检查阈值、分差、冷却和小时上限
+  ↓
+message_sending priority 70
+  ├── 拆成 2～3 个自然文字气泡
+  ├── 依次调用微信 sendText
+  └── 取消原始整段消息
+  ↓
+延迟发送已选表情图片
+```
+
+这样可以保证：
+
+- 表情评分看到的是完整回复，而不是某个子气泡；
+- 子气泡不会重复触发表情决策；
+- 文字先到达，表情随后到达；
+- 原始整段消息不会和子气泡一起重复出现。
 
 ## 完整架构
 
@@ -46,74 +129,36 @@ V2.1 在 V2 真实图片发送链路上新增：
   ↓
 OpenClaw before_prompt_build
   ↓
-Yogurt Social Injector 0.4.0
-  ↓
-Python bridge
-  ├── V1 SocialLayerService
+Yogurt Social Injector 0.5.0-alpha.1
+  ├── V1 Social Layer
   │   ├── 场景识别
   │   ├── 回复风格路由
   │   ├── 用户关系
-  │   └── 显式记忆检索
-  └── V2.1 Sticker Runtime
-      ├── Catalog 安全过滤
-      ├── 语义优先候选召回
-      ├── score_breakdown
-      └── 发送决策所需上下文
+  │   └── 稳定记忆检索
+  ├── V2.1 Sticker Runtime
+  │   ├── Catalog 安全过滤
+  │   ├── 语义优先候选召回
+  │   ├── score_breakdown
+  │   └── pre-reply 候选准备
+  └── V3 Pending Context
+      ├── 自动记忆待处理 turn
+      ├── 多气泡待处理 turn
+      └── 表情 finalizer 入站上下文
   ↓
 Ollama / Qwen 单次推理生成最终正文
   ↓
-agent_end
-  ├── 读取最终回复
-  ├── StickerSendDecider 判断是否发送
-  ├── 语义 Ranker 选择图片
-  └── message_sent 作为兼容回退
+V3 message_sending 协调器
+  ├── 完整回复上的 V2.1 post-reply 表情决策
+  ├── 自动记忆提交回退
+  ├── 多气泡拆分与发送
+  └── 原始整段消息取消
   ↓
-TypeScript StickerAutoPolicyStore
-  ├── Top1 阈值和 Top1/Top2 分差
-  ├── 全局、场景、单图冷却
-  ├── 每小时上限
-  └── 成功发送后才提交冷却
-  ↓
-api.runtime.channel.outbound.loadAdapter("openclaw-weixin")
-  ↓
-adapter.sendMedia(...)
-  ↓
-微信 CDN
-  ↓
-微信原生图片消息
+WeChat outbound adapter
+  ├── sendText：文字气泡
+  └── sendMedia：表情图片
 ```
 
-## 两个仓库的职责
-
-### Yogurt Chat Bot
-
-负责实时聊天：
-
-- OpenClaw 社交上下文注入；
-- 发送决策；
-- 表情候选召回与选择；
-- 冷却、安全和路径校验；
-- 调用微信频道发送图片。
-
-### Yogurt Sticker Tagger
-
-独立仓库：`Doman1c/Yogurt_Sticker_Tagger`
-
-负责离线资产管理：
-
-- 图片校验、去重和 WebP 归一化；
-- Ollama 视觉模型分类；
-- 人工审核和受约束标签编辑；
-- SQLite 审计；
-- 表情决策实验室；
-- 一键验证、发布和回滚；
-- 导出稳定的 `stickers.json`。
-
-聊天过程中不会调用视觉模型，Chat Bot 也不会直接访问 Tagger SQLite。
-
 ## V1 社交层
-
-### 场景识别
 
 本地 Router 使用以下场景：
 
@@ -126,30 +171,15 @@ celebration
 serious
 ```
 
-### 回复风格路由
+社交层根据场景输出语气、长度、技术细节、是否优先安慰，以及是否避免机械化建议。
 
-根据场景输出语气、长度、技术细节、是否优先安慰以及是否避免机械化建议。
-
-### 显式关系与记忆
-
-SQLite 只保存明确的：
-
-- 用户关系；
-- 事实；
-- 偏好；
-- 共同经历。
-
-普通聊天不会自动写入长期记忆。
-
-### fail-open
-
-Python、SQLite、bridge、Catalog 或图片发送异常时，原始 OpenClaw + Qwen 文本链路继续运行。
+Python、SQLite 或 bridge 异常时，OpenClaw + Qwen 的原始文本链路继续运行。
 
 ## V2.1 表情系统
 
 ### 两阶段决策
 
-第一阶段只回答：
+第一阶段回答：
 
 ```text
 这一轮是否适合发表情？
@@ -160,11 +190,11 @@ Python、SQLite、bridge、Catalog 或图片发送异常时，原始 OpenClaw + 
 - 用户当前消息；
 - 酸奶最终回复；
 - Scene 和 Mood；
-- 候选质量与分差；
+- 候选质量与 Top1/Top2 分差；
 - 技术、严肃和高风险标记；
-- 显式请求或禁止请求。
+- 用户显式请求或禁止请求。
 
-第二阶段只回答：
+第二阶段回答：
 
 ```text
 如果要发，哪张最相关？
@@ -175,7 +205,7 @@ Python、SQLite、bridge、Catalog 或图片发送异常时，原始 OpenClaw + 
 - `celebration`：积极；
 - `playful`：积极；
 - `comfort`：开放，但要求更高相关性；
-- `casual`：开放，但阈值更高、发送更克制；
+- `casual`：开放，但发送更克制；
 - `technical`：主动发送硬阻断；
 - `serious`：主动发送硬阻断。
 
@@ -183,10 +213,11 @@ Python、SQLite、bridge、Catalog 或图片发送异常时，原始 OpenClaw + 
 
 ### 语义优先 Ranker
 
-V2.1 的大致优先级：
+候选排序大致优先级：
 
 ```text
-精确关键词和短语
+用户精确关键词和短语
+> 回复关键词
 > Emotion
 > Description / OCR
 > Tone
@@ -195,7 +226,7 @@ V2.1 的大致优先级：
 > 受限 Weight prior
 ```
 
-Scene 不再以最高权重压过“无语、疲惫、拥抱、惊讶、生气”等具体语义。
+Scene 不会压过“无语、疲惫、拥抱、惊讶、生气”等具体语义。
 
 ### 显式请求模式
 
@@ -211,24 +242,47 @@ explicit_generic
 
 proactive
 用户没有要求
-→ 由最终回复后的 Send Decider 判断
+→ 在最终回复生成后由 Send Decider 判断
 ```
 
 ### 默认 `auto` 模式
 
 - `choose_sticker` 不暴露给模型；
-- Qwen 只推理一次；
+- Qwen 只进行一次聊天推理；
 - VLM 不进入实时聊天；
 - 不向模型注入候选绝对路径；
 - 正文发送后由 outbound adapter 发送图片。
 
-### `tool` 调试模式
+`tool` 模式保留 `choose_sticker(sticker_id)` 用于调试，不建议作为 9B 本地模型的日常模式。
 
-保留 `choose_sticker(sticker_id)` 用于调试。该模式可能触发额外推理，不建议用于 9B 本地模型的日常运行。
+## 两个仓库的职责
 
-### 禁止描述图片
+### Yogurt Chat Bot
 
-模型不能描述、解释、复述或虚构即将发送的图片画面。图片由本地系统选中并通过微信媒体链路发送。
+负责实时聊天：
+
+- OpenClaw 社交上下文注入；
+- 自动记忆候选与稳定记忆；
+- 多气泡发送；
+- 表情发送决策和候选选择；
+- 冷却、安全和路径校验；
+- 调用微信频道发送文字与图片。
+
+### Yogurt Sticker Tagger
+
+独立仓库：`Doman1c/Yogurt_Sticker_Tagger`
+
+负责离线资产管理：
+
+- 图片校验、去重和 WebP 归一化；
+- Ollama 视觉模型分类；
+- 人工审核和受约束标签编辑；
+- SQLite 审计；
+- 表情决策实验室；
+- 验证、发布和回滚；
+- 导出稳定的 `stickers.json`。
+
+聊天过程中不会调用视觉模型，Chat Bot 也不会直接访问 Tagger SQLite。
 
 ## 项目目录
 
@@ -237,9 +291,14 @@ Yogurt_Chat_Bot/
 ├── README.md
 ├── workspace/                         # OpenClaw 人格和行为规则
 ├── social_layer/
-│   ├── config/stickers.example.json
+│   ├── config/
+│   │   ├── stickers.example.json
+│   │   └── stickers.json              # 本地运行配置，可不提交
 │   ├── src/yogurt_social/
 │   │   ├── memory.py
+│   │   ├── memory_review.py
+│   │   ├── auto_memory.py
+│   │   ├── auto_memory_extended.py
 │   │   ├── router.py
 │   │   ├── service.py
 │   │   ├── openclaw_adapter.py
@@ -247,47 +306,55 @@ Yogurt_Chat_Bot/
 │   │       ├── catalog.py
 │   │       ├── config.py
 │   │       ├── decision.py
-│   │       ├── lab.py
 │   │       ├── models.py
 │   │       ├── retriever.py
 │   │       └── runtime.py
 │   └── tests/
 ├── assets/stickers/
-│   ├── images/                        # 本地资产，不提交 Git
-│   ├── stickers.json                  # 正式 Catalog，不提交 Git
+│   ├── images/                        # 本地表情资产，不提交 Git
+│   ├── stickers.json                  # 正式 Catalog，可不提交 Git
 │   └── README.md
 ├── integrations/openclaw/
-│   ├── index-v2.ts
+│   ├── index-v2.ts                    # V2.1 表情运行时
+│   ├── index-v3.ts                    # 当前插件入口和协调器
+│   ├── v3-runtime.ts                  # 自动记忆与多气泡
+│   ├── v3-memory-extended.ts           # 额外确定性记忆召回
+│   ├── multi-bubble.ts
 │   ├── sticker-selection.ts
 │   ├── sticker-plugin-utils.ts
 │   ├── sticker-turn.ts
 │   ├── sticker-v21-utils.ts
 │   ├── openclaw.plugin.json
 │   ├── package.json
-│   └── README.md
+│   └── config.example.json
 ├── scripts/
 │   ├── install-openclaw-adapter
+│   ├── yogurt-memory
+│   ├── watch-sticker-scores
 │   ├── test-openclaw-adapter
 │   ├── test-sticker-explicit-fallback
 │   ├── test-sticker-auto-delivery
-│   └── test-sticker-v21
+│   ├── test-sticker-v21
+│   ├── test-v3
+│   ├── test-v3-runtime
+│   └── test-v3-sticker-bubble-order
 └── docs/
     ├── V1_DESIGN.md
     ├── V2_DESIGN.md
     ├── V2_1_DESIGN.md
-    ├── V2_PROGRESS.md
+    ├── V3_RESEARCH_PLAN.md
     └── OPENCLAW_ADAPTER.md
 ```
 
 ## 前置条件
 
-- OpenClaw `>=2026.7.1-0`
-- Node.js `>=22.22.3`
-- Python `>=3.9`
-- Ollama
-- 已配置可用聊天模型
-- 已连接 `openclaw-weixin`
-- Yogurt Sticker Tagger 0.3.0（管理和部署表情资产时）
+- OpenClaw `>=2026.7.1-0`；
+- Node.js `>=22.22.3`；
+- Python `>=3.9`；
+- Ollama；
+- 已配置可用聊天模型；
+- 已连接 `openclaw-weixin`；
+- 管理表情资产时可选 Yogurt Sticker Tagger。
 
 ## 首次安装
 
@@ -298,33 +365,27 @@ git pull --ff-only origin main
 bash scripts/install-openclaw-adapter
 ```
 
-安装脚本会备份 OpenClaw 配置、建立本地插件链接、写入运行路径、创建 owner 用户并运行测试。
+安装脚本会：
 
-首次安装默认保持：
+- 备份 OpenClaw 配置；
+- 以本地路径链接插件；
+- 写入 Python、仓库和 SQLite 路径；
+- 创建 owner 用户；
+- 运行基础测试。
+
+首次安装默认保持高风险功能关闭：
 
 ```json
 {
-  "stickerEnabled": false
+  "stickerEnabled": false,
+  "autoMemoryEnabled": false,
+  "multiBubbleEnabled": false
 }
-```
-
-同步并验证表情资产后再开启：
-
-```bash
-openclaw config set \
-  'plugins.entries.yogurt-social-injector.config.stickerEnabled' \
-  'true' \
-  --strict-json
-
-openclaw config set \
-  'plugins.entries.yogurt-social-injector.config.stickerSelectionMode' \
-  '"auto"' \
-  --strict-json
 ```
 
 ## 已安装环境升级
 
-插件通过 `--link` 指向仓库目录，普通升级不需要重新运行安装脚本：
+插件通过本地路径链接到仓库，普通升级不需要重新运行安装脚本：
 
 ```bash
 cd ~/Yogurt_Chat_Bot
@@ -333,15 +394,18 @@ git pull --ff-only origin main
 
 bash scripts/test-openclaw-adapter
 bash scripts/test-sticker-explicit-fallback
-bash scripts/test-sticker-v21
 bash scripts/test-sticker-auto-delivery
+bash scripts/test-sticker-v21
+bash scripts/test-v3
+bash scripts/test-v3-runtime
+bash scripts/test-v3-sticker-bubble-order
 
 openclaw config validate
 openclaw plugins doctor
 openclaw gateway restart
 ```
 
-不要在仅升级代码时重复运行完整安装脚本，因为安装脚本会把表情系统恢复为安全默认关闭状态。
+不要在仅升级代码时重复运行完整安装脚本，因为安装脚本会把可选功能恢复为安全默认关闭状态。
 
 ## 必需的 OpenClaw Hook 权限
 
@@ -355,8 +419,6 @@ openclaw gateway restart
 }
 ```
 
-`allowConversationAccess=true` 是非 bundled 插件使用 `agent_end` 的必要条件。
-
 修复命令：
 
 ```bash
@@ -364,44 +426,72 @@ openclaw config set \
   'plugins.entries.yogurt-social-injector.hooks.allowConversationAccess' \
   'true' \
   --strict-json
+
+openclaw config set \
+  'plugins.entries.yogurt-social-injector.hooks.allowPromptInjection' \
+  'true' \
+  --strict-json
 ```
 
-## 从 Tagger 部署表情资产
+## 启用功能
 
-推荐使用 Yogurt Sticker Tagger 0.3.0 Web Admin：
+### 表情系统
 
-```text
-审核并批准
-→ 决策实验室模拟
-→ 仅验证
-→ 导出并发布到酸奶
-```
-
-Tagger 会自动：
-
-- 导出最新 `approved + enabled` Catalog；
-- 校验 Schema、warning、文件和路径；
-- 备份生产 Catalog；
-- 同步标准化图片；
-- 原子切换 Catalog；
-- 运行 Chat Bot 三组表情测试；
-- 检查 OpenClaw 配置和插件；
-- 重启并验证 Gateway；
-- 失败时恢复上一版 Catalog。
-
-手工同步只作为备用：
+确认 `assets/stickers/stickers.json`、图片目录和运行配置已经同步后：
 
 ```bash
-cp \
-  ~/Yogurt_Sticker_Tagger/data/stickers.json \
-  ~/Yogurt_Chat_Bot/assets/stickers/stickers.json
+openclaw config set \
+  'plugins.entries.yogurt-social-injector.config.stickerEnabled' \
+  'true' \
+  --strict-json
 
-rsync -a \
-  ~/Yogurt_Sticker_Tagger/data/images/ \
-  ~/Yogurt_Chat_Bot/assets/stickers/images/
+openclaw config set \
+  'plugins.entries.yogurt-social-injector.config.stickerSelectionMode' \
+  '"auto"' \
+  --strict-json
 ```
 
-Catalog 和 `images/` 必须一起同步。
+### 自动记忆
+
+```bash
+openclaw config set \
+  'plugins.entries.yogurt-social-injector.config.autoMemoryEnabled' \
+  'true' \
+  --strict-json
+```
+
+默认自动晋升阈值：
+
+```text
+0.78
+```
+
+### 多气泡
+
+```bash
+openclaw config set \
+  'plugins.entries.yogurt-social-injector.config.multiBubbleEnabled' \
+  'true' \
+  --strict-json
+```
+
+默认参数：
+
+```json
+{
+  "multiBubbleMinChars": 24,
+  "multiBubbleMaxChars": 360,
+  "multiBubbleMaxBubbles": 3,
+  "multiBubbleDelayMs": 420
+}
+```
+
+修改配置后执行：
+
+```bash
+openclaw config validate
+openclaw gateway restart
+```
 
 ## 运行时配置
 
@@ -418,252 +508,238 @@ yogurt-social-injector
 | `repoPath` | Chat Bot 仓库绝对路径 | 安装时写入 |
 | `dbPath` | SQLite 路径 | `~/.openclaw/yogurt-social/memory.sqlite3` |
 | `defaultUserId` | 默认用户 ID | `owner` |
+| `senderMap` | 微信发送者到用户 ID 的映射 | `{}` |
+| `unknownSenderPolicy` | 未知用户处理方式 | `default` |
 | `allowedChannels` | 允许渠道 | `[]`，不限制 |
 | `timeoutMs` | Python bridge 超时 | `2500` |
-| `maxMemories` | 单轮最多记忆数 | `3` |
+| `maxMemories` | 单轮最多注入的稳定记忆 | `3` |
 | `stickerEnabled` | 是否启用表情系统 | `false` |
-| `stickerConfigPath` | Sticker Runtime 配置 | 仓库内配置文件 |
+| `stickerConfigPath` | Sticker Runtime 配置路径 | 仓库内配置文件 |
 | `stickerSelectionMode` | `auto` 或 `tool` | `auto` |
+| `autoMemoryEnabled` | 是否启用自动记忆 | `false` |
+| `autoMemoryPromotionThreshold` | 自动晋升阈值 | `0.78` |
+| `autoMemoryTimeoutMs` | 自动记忆超时 | `2500` |
+| `multiBubbleEnabled` | 是否启用多气泡 | `false` |
+| `multiBubbleMinChars` | 最短拆分长度 | `24` |
+| `multiBubbleMaxChars` | 可拆分的最大长度 | `360` |
+| `multiBubbleMaxBubbles` | 单轮最大气泡数 | `3` |
+| `multiBubbleDelayMs` | 气泡发送间隔 | `420` |
 
-Sticker Runtime 配置见：
+完整示例：
 
 ```text
-social_layer/config/stickers.example.json
+integrations/openclaw/config.example.json
 ```
 
+## 自动记忆检查
+
+只读检查命令不会修改数据库。
+
+查看全部候选：
+
+```bash
+bash scripts/yogurt-memory --pretty \
+  candidates --user-id owner
+```
+
+只看 pending：
+
+```bash
+bash scripts/yogurt-memory --pretty \
+  candidates --user-id owner --status pending
+```
+
+查看稳定记忆快照：
+
+```bash
+bash scripts/yogurt-memory --pretty \
+  snapshot --user-id owner
+```
+
+查看最近修订：
+
+```bash
+bash scripts/yogurt-memory --pretty \
+  revisions --user-id owner --limit 50
+```
+
+通过环境变量检查其他数据库：
+
+```bash
+YOGURT_SOCIAL_DB=/path/to/memory.sqlite3 \
+  bash scripts/yogurt-memory --pretty snapshot --user-id owner
+```
+
+## 表情评分观察
+
+```bash
+cd ~/Yogurt_Chat_Bot
+bash scripts/watch-sticker-scores
+```
+
+该脚本会打印当前实际运行配置，并过滤：
+
+```text
+send decision trigger=
+send decision rejected by delivery policy
+post-reply sticker selected
+sticker media sent
+sticker media send failed
+multi bubble sent
+```
+
+示例：
+
+```text
+send decision trigger=agent_end mode=proactive
+shouldSend=true score=6.85 threshold=5.80
+intents=celebration
+post-reply sticker selected sticker=...
+multi bubble sent count=2
+sticker media sent trigger=channel_outbound_adapter
+```
+
+仓库默认阈值和本地调参可能不同，以实时日志中的 `threshold` 以及 `watch-sticker-scores` 打印的配置为准。
+
+常见拒绝原因：
+
+```text
+proactive_threshold   候选最高分低于主动发送下限
+score_margin          第一、第二名分差不足
+global_cooldown       全局冷却
+candidate_cooldown    单图或场景冷却
+hourly_limit          每小时发送上限
+```
+
+## 从 Tagger 部署表情资产
+
+推荐流程：
+
+```text
+审核并批准
+→ 决策实验室模拟
+→ 验证
+→ 导出并发布到酸奶
+```
+
+手工同步只作为备用：
+
+```bash
+cp \
+  ~/Yogurt_Sticker_Tagger/data/stickers.json \
+  ~/Yogurt_Chat_Bot/assets/stickers/stickers.json
+
+rsync -a \
+  ~/Yogurt_Sticker_Tagger/data/images/ \
+  ~/Yogurt_Chat_Bot/assets/stickers/images/
+```
+
+Catalog 和 `images/` 必须一起同步。
+
 ## 测试
+
+完整测试：
 
 ```bash
 cd ~/Yogurt_Chat_Bot
 
 bash scripts/test-openclaw-adapter
 bash scripts/test-sticker-explicit-fallback
-bash scripts/test-sticker-v21
 bash scripts/test-sticker-auto-delivery
+bash scripts/test-sticker-v21
+bash scripts/test-v3
+bash scripts/test-v3-runtime
+bash scripts/test-v3-sticker-bubble-order
 ```
 
-V2.1 测试覆盖：
+CI 使用：
 
-- 精确语义压过 Scene 和高 Weight；
-- 具体显式请求不发送无关 fallback；
-- 泛化显式请求仍可选择安全候选；
-- comfort 通道开放；
-- 高风险内容全场景硬阻断；
-- casual 可进入决策但中性聊天保持安静；
-- technical 和 serious 主动发送阻断；
-- agent_end / message_sent 去重；
-- outbound adapter 图片发送；
-- 发送成功后才提交冷却。
+- Python 3.9；
+- Python 3.10；
+- Python 3.11；
+- Python 3.12；
+- Node.js 22。
 
-CI 覆盖 Python 3.9、3.10、3.11、3.12 和 Node.js 22。
+## 实机检查
 
-## 决策实验室
-
-Tagger 0.3.0 可以在浏览器中调用本仓库的生产算法进行模拟，但不会：
-
-- 发送微信消息；
-- 写入冷却；
-- 修改 Catalog；
-- 调用 VLM 或第二次聊天模型推理。
-
-输出包含：
-
-```text
-Scene / Mood
-should_send
-score / threshold
-reasons
-Top-K
-score_breakdown
-```
-
-## 运行时验证
+查看插件入口和 Hook：
 
 ```bash
-openclaw config validate
-openclaw plugins doctor
-openclaw plugins inspect yogurt-social-injector --runtime --json
-openclaw gateway status --deep --require-rpc
+openclaw plugins inspect \
+  yogurt-social-injector \
+  --runtime \
+  --json
 ```
 
-正确的 runtime inspect 应包含：
+正常情况下可以看到：
 
 ```text
-version: 0.4.0
-status: loaded
-hookCount: 4
-before_prompt_build
-agent_end
-message_sent
-reply_payload_sending
+source: .../integrations/openclaw/index-v3.ts
+version: 0.5.0-alpha.1
+message_sending priority 80
+message_sending priority 70
 ```
 
-实时日志：
-
-```bash
-openclaw logs --follow --local-time
-```
-
-V2.1 关键日志：
+Gateway 启动后应出现：
 
 ```text
-send decision
-shouldSend=
-score=
-threshold=
-top=
-runnerUp=
-post-reply sticker selected
-sticker media sent
+yogurt-social-injector: V3 sticker finalizer captured=true
 ```
 
-正文日志中的 `mediaUrl=none` 是正常的：正文和图片通过两次独立发送完成。
+## 回滚
 
-## 微信工具进度卡片
-
-关闭微信侧进度消息：
+不需要卸载插件即可关闭 V3 功能：
 
 ```bash
 openclaw config set \
-  'channels.openclaw-weixin.replyProgressMessages' \
+  'plugins.entries.yogurt-social-injector.config.autoMemoryEnabled' \
   'false' \
   --strict-json
-```
 
-新会话默认关闭 verbose：
-
-```bash
 openclaw config set \
-  'agents.defaults.verboseDefault' \
-  '"off"' \
+  'plugins.entries.yogurt-social-injector.config.multiBubbleEnabled' \
+  'false' \
   --strict-json
+
+openclaw config validate
+openclaw gateway restart
 ```
 
-## 常见故障
-
-### 用户没有要求发表情，但一直不发送
-
-检查最终回复后的日志是否出现 `send decision`。如果只有 `awaiting_assistant_reply`，确认 `agent_end` 未被权限阻断，并检查 `message_sent` 回退。
-
-真实微信测试受以下冷却影响：
-
-```text
-全局主动发送冷却
-Scene 冷却
-单图冷却
-每小时发送上限
-```
-
-连续测试不能把冷却拒绝误判为识别失败。
-
-### 发送了错误的宽泛 Scene 表情
-
-查看候选 `score_breakdown`。V2.1 中具体关键词、Emotion、Description、OCR 和 Tone 应高于 Scene；高 `weight` 只能提供受限先验。
-
-### `stickerCandidates=0`
-
-检查：
-
-- `stickers.json` 是否已同步；
-- 图片文件是否存在；
-- `status=approved`；
-- `enabled=true`；
-- `content_warnings=["none"]`；
-- relationship 是否合法。
-
-### 已选中候选但没有图片
-
-检查 `agent_end`、`message_sent` 和：
-
-```text
-sticker outbound scheduled
-sticker media sent
-sticker media send failed
-```
-
-图片发送失败不会删除已经发送的正文。
-
-### 插件版本与 install.version 不一致
-
-以 runtime inspect 的 `plugin.version` 和 `source` 为运行真值。`install.version` 可能只是旧的安装记录。
-
-## 安全边界
-
-- `auto` 只有一次聊天模型推理；
-- VLM 只用于离线 Tagger；
-- 模型不能指定任意本地路径；
-- 只发送 Catalog 安全资产；
-- `content_warnings` fail-closed；
-- 显式请求不绕过安全过滤；
-- 高风险求助不发表情；
-- 图片失败不阻断文字；
-- 不描述或虚构图片；
-- 不从普通聊天自动写长期记忆；
-- 不修改用户原始消息；
-- 不记录消息正文、Token、图片内容或数据库内容；
-- 使用 `realpath` 限制资产目录；
-- 真实发送成功后才记录冷却；
-- Token、SQLite、真实图片、Catalog 和日志不得提交 Git。
-
-## 关闭与回滚
-
-只关闭表情系统、保留 V1：
+如需同时关闭表情：
 
 ```bash
 openclaw config set \
   'plugins.entries.yogurt-social-injector.config.stickerEnabled' \
   'false' \
   --strict-json
+
 openclaw gateway restart
 ```
 
-关闭整个插件：
+关闭 V3 开关不会删除已有稳定记忆、候选或修订记录。
 
-```bash
-openclaw plugins disable yogurt-social-injector
-openclaw gateway restart
+## 安全边界
+
+- 不把密码、Token、验证码、密钥、身份文件和支付信息写入长期记忆；
+- 不允许助手回复成为用户事实；
+- 不在实时聊天中调用 VLM；
+- 不向聊天模型暴露表情绝对路径；
+- 技术和严肃场景默认不主动发表情；
+- 高风险求助场景禁止发表情；
+- 一轮最多选择一张图片；
+- 图片失败保留文字；
+- 自动记忆失败保留聊天；
+- 多气泡部分发送失败时避免重复发送整段原文。
+
+## 版本演进
+
+```text
+V1    社交上下文、关系和显式记忆
+V2    微信真实图片发送链路
+V2.1  最终回复后的发送决策、语义 Ranker 和 Delivery Policy
+V3    自动记忆候选、修订审计、自然多气泡和表情/气泡协调器
 ```
 
-Catalog 发布回滚由 Sticker Tagger 0.3.0 Web Admin 执行。
+## License
 
-## 版本记录
-
-### V2.1（稳定）
-
-- 独立发送决策和选图决策；
-- 最终回复参与主动发送判断；
-- comfort 和受控 casual 通道；
-- 高风险全场景阻断；
-- 语义优先加法 Ranker；
-- 具体、泛化显式请求分离；
-- 完整决策与候选可观测性；
-- 一次 Qwen 推理；
-- Tagger 0.3.0 决策实验室与一键发布。
-
-### V2.0（归档）
-
-- 独立 Sticker Tagger；
-- 本地安全候选召回；
-- auto 单次推理选图；
-- tool 调试模式；
-- 明确请求安全 fallback；
-- 冷却与数量限制；
-- 微信真实图片发送。
-
-### V1.0（归档）
-
-- 社交场景识别；
-- 回复风格路由；
-- 显式关系与记忆；
-- OpenClaw 前置注入；
-- senderId 映射；
-- fail-open。
-
-## 相关文档
-
-- `integrations/openclaw/README.md`：插件、Hook、发送链路和排障；
-- `assets/stickers/README.md`：Catalog 与资产安全边界；
-- `docs/V2_1_DESIGN.md`：V2.1 发送决策和语义 Ranker；
-- `docs/V2_DESIGN.md`：V2 基础架构；
-- `docs/archive/V1_RELEASE.md`：V1 归档；
-- `docs/archive/V2_RELEASE.md`：V2 微信实机验收归档。
+当前仓库为私人项目，未声明公共开源许可证。
