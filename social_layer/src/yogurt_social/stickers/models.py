@@ -47,6 +47,7 @@ class StickerCandidate:
     emotions: tuple[str, ...]
     tones: tuple[str, ...]
     matched_signals: tuple[str, ...]
+    score_breakdown: tuple[tuple[str, float], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,4 +59,27 @@ class StickerCandidate:
             "emotions": list(self.emotions),
             "tones": list(self.tones),
             "matched_signals": list(self.matched_signals),
+            "score_breakdown": {name: value for name, value in self.score_breakdown},
+        }
+
+
+@dataclass(frozen=True)
+class StickerSendDecision:
+    should_send: bool
+    mode: str
+    score: float
+    threshold: float
+    intents: tuple[str, ...]
+    reasons: tuple[str, ...]
+    deferred: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "should_send": self.should_send,
+            "mode": self.mode,
+            "score": self.score,
+            "threshold": self.threshold,
+            "intents": list(self.intents),
+            "reasons": list(self.reasons),
+            "deferred": self.deferred,
         }
