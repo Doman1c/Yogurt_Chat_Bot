@@ -1,6 +1,7 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 import v21Plugin from "./index-v2.ts";
+import { registerExtendedMemoryRuntime } from "./v3-memory-extended.ts";
 import { registerV3Runtime } from "./v3-runtime.ts";
 
 const basePlugin = v21Plugin as any;
@@ -13,5 +14,6 @@ export default definePluginEntry({
   register(api: any) {
     basePlugin.register(api);
     registerV3Runtime(api);
+    registerExtendedMemoryRuntime(api);
   },
 });
