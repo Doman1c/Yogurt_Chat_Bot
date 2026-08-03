@@ -65,3 +65,23 @@ assert payload["candidate_count"] == 1
 assert payload["promoted_count"] == 1
 print("v3 automatic-memory CLI: ok")
 PY
+
+python3 -m yogurt_social.memory_review \
+  --db "$TMP_DIR/memory.sqlite3" \
+  candidates --user-id owner > "$TMP_DIR/candidates.json"
+python3 -m yogurt_social.memory_review \
+  --db "$TMP_DIR/memory.sqlite3" \
+  revisions --user-id owner > "$TMP_DIR/revisions.json"
+python3 - "$TMP_DIR/candidates.json" "$TMP_DIR/revisions.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+candidates = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+revisions = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+assert candidates["count"] == 1
+assert candidates["items"][0]["status"] == "promoted"
+assert revisions["count"] == 1
+assert revisions["items"][0]["action"] == "inserted"
+print("v3 memory review CLI: ok")
+PY
