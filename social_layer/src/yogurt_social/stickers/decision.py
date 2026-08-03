@@ -56,8 +56,15 @@ class StickerSendDecider:
             if explicit_request
             else "proactive"
         )
+        user = _normalized(user_message)
+        reply = _normalized(assistant_reply)
+        combined = f"{user}{reply}"
         if forbidden:
             return StickerSendDecision(False, "forbidden", 0.0, 999.0, (), ("user_forbid",))
+        if any(marker in combined for marker in _HIGH_RISK_COMFORT):
+            return StickerSendDecision(
+                False, "safety_block", 0.0, 999.0, (), ("high_risk_comfort",)
+            )
         if not candidates:
             return StickerSendDecision(False, explicit_mode, 0.0, 0.0, (), ("no_candidates",))
         if explicit_request:
@@ -86,16 +93,9 @@ class StickerSendDecider:
                 deferred=True,
             )
 
-        user = _normalized(user_message)
-        reply = _normalized(assistant_reply)
-        combined = f"{user}{reply}"
         if scene in {"technical", "serious"}:
             return StickerSendDecision(
                 False, "proactive", 0.0, 999.0, (), (f"blocked_scene:{scene}",)
-            )
-        if scene == "comfort" and any(marker in combined for marker in _HIGH_RISK_COMFORT):
-            return StickerSendDecision(
-                False, "proactive", 0.0, 999.0, (), ("high_risk_comfort",)
             )
 
         score = 0.0
