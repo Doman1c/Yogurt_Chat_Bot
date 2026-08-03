@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+TEST_ROOT="$TMP_DIR/plugin-test"
+mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
+cp "$REPO_ROOT/integrations/openclaw/index-v3.ts" "$TEST_ROOT/index-v3.ts"
+
+cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
+{
+  "name": "openclaw",
+  "version": "0.0.0-test",
+  "type": "module",
+  "exports": {
+    "./plugin-sdk/plugin-entry": "./plugin-sdk/plugin-entry.js"
+  }
+}
+JSON
+
+cat > "$TEST_ROOT/node_modules/openclaw/plugin-sdk/plugin-entry.js" <<'JS'
+export function definePluginEntry(definition) {
+  return definition;
+}
+JS
+
+cat > "$TEST_ROOT/index-v2.ts" <<'TS'
+export default {
+  register(api: any) {
+    api.on("agent_end", async (event: any, ctx: any) => {
+      api.trace.push({
+        step: "sticker-finalizer",
+        event,
+        ctx,
+      });
+    });
+  },
+};
+TS
+
+cat > "$TEST_ROOT/v3-runtime.ts" <<'TS'
+export function registerV3Runtime(api: any): void {
+  api.on(
+    "message_sending",
+    async (event: any) => {
+      api.trace.push({ step: "multi-bubble", event });
+      return { cancel: true };
+    },
+    { priority: 70 },
+  );
+}
+TS
+
+cat > "$TEST_ROOT/v3-memory-extended.ts" <<'TS'
+export function registerExtendedMemoryRuntime(_api: any): void {}
+TS
+
+node --experimental-strip-types --input-type=module - "$TEST_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const testRoot = process.argv[2];
+const plugin = (await import(pathToFileURL(`${testRoot}/index-v3.ts`))).default;
+const hooks = new Map();
+const trace = [];
+const logs = [];
+
+const api = {
+  trace,
+  logger: {
+    info(message) {
+      logs.push(String(message));
+    },
+  },
+  on(name, handler, options = {}) {
+    const values = hooks.get(name) || [];
+    values.push({ handler, priority: options.priority || 0 });
+    hooks.set(name, values);
+  },
+};
+
+plugin.register(api);
+const sendingHooks = hooks.get("message_sending") || [];
+assert.deepEqual(
+  sendingHooks.map((item) => item.priority).sort((a, b) => b - a),
+  [80, 70],
+);
+
+async function dispatch(event, ctx) {
+  let result;
+  const ordered = [...(hooks.get("message_sending") || [])].sort(
+    (left, right) => right.priority - left.priority,
+  );
+  for (const item of ordered) {
+    const current = await item.handler(event, ctx);
+    if (current !== undefined) result = current;
+  }
+  return result;
+}
+
+const fullReply = "终于全部弄好了！\n\n主人真的太厉害啦喵！";
+const result = await dispatch(
+  {
+    content: fullReply,
+    to: "wx-owner@im.wechat",
+    metadata: {
+      channel: "openclaw-weixin",
+      accountId: "weixin-account",
+    },
+  },
+  {
+    channelId: "openclaw-weixin",
+    sessionKey: "session-1",
+  },
+);
+
+assert.equal(result.cancel, true);
+assert.deepEqual(
+  trace.map((item) => item.step),
+  ["sticker-finalizer", "multi-bubble"],
+);
+assert.equal(trace[0].event.success, true);
+assert.equal(trace[0].event.messages[0].content, fullReply);
+assert.equal(trace[0].event.to, "wx-owner@im.wechat");
+assert.equal(trace[0].ctx.channel, "openclaw-weixin");
+assert.ok(logs.some((message) => message.includes("pre-bubble sticker finalizer")));
+
+trace.length = 0;
+await dispatch(
+  {
+    content: fullReply,
+    to: "wx-owner@im.wechat",
+    metadata: {
+      channel: "openclaw-weixin",
+      mediaUrls: ["/tmp/sticker.webp"],
+    },
+  },
+  { channelId: "openclaw-weixin" },
+);
+assert.deepEqual(
+  trace.map((item) => item.step),
+  ["multi-bubble"],
+  "media messages must skip the pre-bubble sticker finalizer",
+);
+
+console.log("v3 sticker-before-bubble hook order: ok");
+JS
