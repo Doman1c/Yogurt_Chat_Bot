@@ -13,6 +13,7 @@
     "sticker-v21-utils.ts",
     "multi-bubble.ts",
     "v3-runtime.ts",
+    "v3-memory-extended.ts",
     "openclaw.plugin.json",
     "README.md",
     "config.example.json"
