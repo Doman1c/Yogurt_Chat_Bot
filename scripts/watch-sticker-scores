@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_PATH="${YOGURT_STICKER_CONFIG:-$REPO_ROOT/social_layer/config/stickers.json}"
+
+command -v openclaw >/dev/null 2>&1 || {
+  echo "openclaw CLI not found" >&2
+  exit 1
+}
+command -v python3 >/dev/null 2>&1 || {
+  echo "python3 not found" >&2
+  exit 1
+}
+
+echo "========== Yogurt Sticker Score Watch =========="
+echo "Config: $CONFIG_PATH"
+python3 - "$CONFIG_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(f"无法读取运行配置：{type(exc).__name__}")
+else:
+    fields = (
+        ("explicit_min_score", 5.0),
+        ("proactive_min_score", 7.0),
+        ("proactive_min_margin", 2.0),
+        ("global_cooldown_seconds", 300),
+        ("scene_cooldown_seconds", 900),
+        ("default_sticker_cooldown_seconds", 1800),
+        ("max_stickers_per_hour", 4),
+    )
+    for key, fallback in fields:
+        print(f"{key}={data.get(key, fallback)}")
+PY
+
+echo
+echo "实时观察已开始。按 Ctrl+C 退出。"
+echo "说明："
+echo "  shouldSend=false              → 发送决策分数未达到 threshold，或被安全/场景规则阻止"
+echo "  proactive_threshold           → 第一名候选低于 proactive_min_score"
+echo "  score_margin                  → 第一名与第二名分差低于 proactive_min_margin"
+echo "  global/candidate/hourly limit → 冷却或频率限制，不要继续降低分数阈值"
+echo "  完全没有 send decision        → 本轮表情决策 Hook 没执行，不是阈值问题"
+echo
+
+openclaw logs --follow --local-time | python3 -u -c '
+import sys
+
+markers = (
+    "stickerDecision=",
+    "send decision trigger=",
+    "send decision rejected by delivery policy",
+    "post-reply sticker selected",
+    "sticker media sent",
+    "sticker media failed",
+    "post-reply sticker decision unavailable",
+    "multi bubble sent count=",
+    "cancelled by message_sending hook",
+)
+for line in sys.stdin:
+    if any(marker in line for marker in markers):
+        print(line, end="", flush=True)
+'
