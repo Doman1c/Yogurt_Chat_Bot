@@ -1,33 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
-
 python3 - <<'PY'
 from pathlib import Path
-
-from yogurt_social.stickers.models import (
-    StickerCatalogSnapshot,
-    StickerRecord,
-)
+from yogurt_social.stickers.models import StickerCatalogSnapshot, StickerRecord
 from yogurt_social.stickers.retriever import StickerRetriever
 
 
-def record(*, warnings=("none",)):
+def record(*, keywords=("可爱", "卖萌", "开心"), warnings=("none",)):
     return StickerRecord(
-        id="sticker-low-weight",
-        file="images/sticker-low-weight.webp",
-        asset_path=Path("/tmp/sticker-low-weight.webp"),
+        id="sticker-safe",
+        file="images/sticker-safe.webp",
+        asset_path=Path("/tmp/sticker-safe.webp"),
         sha256="0" * 64,
         status="approved",
         enabled=True,
-        description="一张安全的可爱卖萌表情",
+        description="一张安全的可爱表情",
         ocr_text="",
-        scenes=("playful",),
+        scenes=("playful", "casual"),
         emotions=("happy",),
         tones=("cute",),
-        keywords=("可爱",),
+        keywords=keywords,
         relationships=("owner",),
         avoid_when=(),
         content_warnings=warnings,
@@ -40,53 +34,51 @@ def record(*, warnings=("none",)):
 def snapshot(sticker):
     return StickerCatalogSnapshot(
         schema_version="1.0",
-        generated_at="2026-08-02T00:00:00+00:00",
+        generated_at="2026-08-03T00:00:00+00:00",
         generated_by="test",
         source_path=Path("/tmp/stickers.json"),
         asset_root=Path("/tmp"),
         stickers=(sticker,),
     )
 
-
 retriever = StickerRetriever(snapshot(record()), minimum_score=5.0, max_candidates=5)
 
-ordinary = retriever.retrieve(
-    message="发一个卖萌的表情包",
+# A specific request must not force an unrelated sticker to the threshold.
+specific = retriever.retrieve(
+    message="发一个生气的表情包",
     scene="playful",
+    mood="angry",
+    relationship="owner",
+    allow_sticker=True,
+    explicit_request=True,
+)
+assert specific == [], specific
+
+# A generic request may still choose one safe context candidate.
+generic = retriever.retrieve(
+    message="随便发个表情包",
+    scene="casual",
     mood="neutral",
     relationship="owner",
     allow_sticker=True,
-    explicit_request=False,
-)
-assert ordinary == [], ordinary
-
-explicit = retriever.retrieve(
-    message="发一个卖萌的表情包",
-    scene="playful",
-    mood="neutral",
-    relationship="owner",
-    allow_sticker=False,
     explicit_request=True,
 )
-assert len(explicit) == 1, explicit
-assert explicit[0].sticker_id == "sticker-low-weight"
-assert explicit[0].score == 5.0
-assert "intent:explicit_fallback" in explicit[0].matched_signals
+assert len(generic) == 1, generic
+assert generic[0].score == 5.0
+assert "intent:explicit_generic" in generic[0].matched_signals
 
-unsafe_retriever = StickerRetriever(
+unsafe = StickerRetriever(
     snapshot(record(warnings=("violence",))),
     minimum_score=5.0,
     max_candidates=5,
-)
-unsafe = unsafe_retriever.retrieve(
-    message="发一个表情包",
-    scene="playful",
+).retrieve(
+    message="随便发个表情包",
+    scene="casual",
     mood="neutral",
     relationship="owner",
     allow_sticker=True,
     explicit_request=True,
 )
 assert unsafe == [], unsafe
-
-print("sticker explicit fallback: ok")
+print("sticker explicit modes v2.1: ok")
 PY

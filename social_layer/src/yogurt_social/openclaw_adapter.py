@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 from .service import SocialLayerService
+from .stickers.decision import StickerSendDecider
 from .stickers.runtime import StickerRuntime
 
 LOGGER = logging.getLogger("yogurt_social.openclaw_adapter")
@@ -17,11 +18,10 @@ LOGGER = logging.getLogger("yogurt_social.openclaw_adapter")
 
 @dataclass
 class AdapterResult:
-    """One-turn adapter output consumed by the OpenClaw plugin bridge."""
-
     original_message: str
     social_context: str
     sticker_candidates: list[Dict[str, Any]]
+    sticker_decision: Dict[str, Any]
     final_model_input: Dict[str, str]
     metadata: Dict[str, Any]
 
@@ -30,7 +30,7 @@ class AdapterResult:
 
 
 class OpenClawAdapter:
-    """Prepare additive social and sticker context without rewriting user text."""
+    """Prepare V1 context and V2.1 sticker ranking/decision without rewriting user text."""
 
     def __init__(
         self,
@@ -43,6 +43,7 @@ class OpenClawAdapter:
         self.enabled = enabled
         self.sticker_runtime = sticker_runtime
         self.sticker_runtime_error = sticker_runtime_error
+        self.send_decider = StickerSendDecider()
 
     @classmethod
     def from_db(
@@ -66,12 +67,8 @@ class OpenClawAdapter:
                     resolved_root,
                 )
             except Exception as exc:
-                # Sticker failures must never disable the established V1 social layer.
                 sticker_runtime_error = type(exc).__name__
-                LOGGER.warning(
-                    "Yogurt sticker runtime unavailable; continuing without candidates"
-                )
-
+                LOGGER.warning("Yogurt sticker runtime unavailable; continuing without candidates")
         return cls(
             SocialLayerService(
                 db_path=db_path,
@@ -110,22 +107,30 @@ class OpenClawAdapter:
         user_id: str,
         message: str,
         explicit_sticker_request: bool = False,
+        *,
+        assistant_reply: str = "",
+        decision_phase: str = "pre_reply",
+        sticker_forbidden: bool = False,
     ) -> AdapterResult:
-        """Return a fail-open, one-turn injection plan."""
-
         original_message = message
-        base_input = {
-            "prepend_system_context": "",
-            "user_message": original_message,
+        base_input = {"prepend_system_context": "", "user_message": original_message}
+        empty_decision = {
+            "should_send": False,
+            "mode": "disabled",
+            "score": 0.0,
+            "threshold": 0.0,
+            "intents": [],
+            "reasons": ["disabled"],
+            "deferred": False,
         }
-
         if not self.enabled:
             return AdapterResult(
-                original_message=original_message,
-                social_context="",
-                sticker_candidates=[],
-                final_model_input=base_input,
-                metadata={
+                original_message,
+                "",
+                [],
+                empty_decision,
+                base_input,
+                {
                     "enabled": False,
                     "applied": False,
                     "fail_open": True,
@@ -133,46 +138,65 @@ class OpenClawAdapter:
                     "original_message_preserved": True,
                     "sticker_candidate_count": 0,
                     "explicit_sticker_request": explicit_sticker_request,
+                    "decision_phase": decision_phase,
                 },
             )
 
         try:
             if not isinstance(user_id, str) or not user_id.strip():
                 raise ValueError("user_id must be a non-empty string")
-            if not isinstance(message, str):
-                raise TypeError("message must be a string")
+            if not isinstance(message, str) or not isinstance(assistant_reply, str):
+                raise TypeError("message and assistant_reply must be strings")
+            if decision_phase not in {"pre_reply", "post_reply"}:
+                raise ValueError("decision_phase must be pre_reply or post_reply")
 
             social_result = self.service.analyze(user_id.strip(), original_message)
             state = social_result.get("state") or {}
             memories = social_result.get("memories") or []
-            base_social_context = str(social_result.get("context_block") or "").strip()
+            base_social_context = (
+                str(social_result.get("context_block") or "").strip()
+                if decision_phase == "pre_reply"
+                else ""
+            )
 
-            candidates: list[Dict[str, Any]] = []
+            typed_candidates = []
             sticker_error = self.sticker_runtime_error
             if self.sticker_runtime is not None:
                 try:
-                    candidates = [
-                        candidate.to_dict()
-                        for candidate in self.sticker_runtime.retrieve(
-                            message=original_message,
-                            scene=str(state.get("scene") or "casual"),
-                            mood=str(state.get("mood") or "neutral"),
-                            relationship=str(state.get("relationship") or "owner"),
-                            allow_sticker=(
-                                bool(state.get("use_sticker", False))
-                                or explicit_sticker_request
-                            ),
-                            explicit_request=explicit_sticker_request,
-                        )
-                    ]
+                    typed_candidates = self.sticker_runtime.retrieve(
+                        message=original_message,
+                        assistant_reply=assistant_reply,
+                        scene=str(state.get("scene") or "casual"),
+                        mood=str(state.get("mood") or "neutral"),
+                        relationship=str(state.get("relationship") or "owner"),
+                        allow_sticker=(
+                            bool(state.get("use_sticker", False))
+                            or explicit_sticker_request
+                        ),
+                        explicit_request=explicit_sticker_request,
+                    )
                 except Exception as exc:
                     sticker_error = type(exc).__name__
-                    LOGGER.warning(
-                        "Yogurt sticker retrieval failed; continuing without candidates"
-                    )
-                    candidates = []
+                    LOGGER.warning("Yogurt sticker retrieval failed; continuing without candidates")
+                    typed_candidates = []
+            candidates = [candidate.to_dict() for candidate in typed_candidates]
 
-            sticker_context = self._build_sticker_context(candidates)
+            decision = self.send_decider.decide(
+                user_message=original_message,
+                assistant_reply=assistant_reply,
+                scene=str(state.get("scene") or "casual"),
+                mood=str(state.get("mood") or "neutral"),
+                explicit_request=explicit_sticker_request,
+                candidates=typed_candidates,
+                phase=decision_phase,
+                forbidden=sticker_forbidden,
+            ).to_dict()
+
+            sticker_context = (
+                self._build_sticker_context(candidates)
+                if decision_phase == "pre_reply"
+                else ""
+            )
             context_parts = [part for part in (base_social_context, sticker_context) if part]
             social_context = "\n\n".join(context_parts)
             final_model_input = {
@@ -189,29 +213,34 @@ class OpenClawAdapter:
                 "memory_count": len(memories),
                 "sticker_candidate_count": len(candidates),
                 "explicit_sticker_request": explicit_sticker_request,
-                "original_message_preserved": (
-                    final_model_input["user_message"] == original_message
-                ),
+                "decision_phase": decision_phase,
+                "sticker_decision_score": decision.get("score"),
+                "sticker_decision_reason": decision.get("reasons"),
+                "original_message_preserved": final_model_input["user_message"] == original_message,
             }
             if sticker_error:
                 metadata["sticker_fail_open"] = True
                 metadata["sticker_error_type"] = sticker_error
-
             return AdapterResult(
-                original_message=original_message,
-                social_context=social_context,
-                sticker_candidates=candidates,
-                final_model_input=final_model_input,
-                metadata=metadata,
+                original_message,
+                social_context,
+                candidates,
+                decision,
+                final_model_input,
+                metadata,
             )
-        except Exception as exc:  # fail-open is an explicit V1 requirement
+        except Exception as exc:
             LOGGER.exception("Yogurt social layer failed; continuing without injection")
+            failed_decision = dict(empty_decision)
+            failed_decision["mode"] = "error"
+            failed_decision["reasons"] = ["social_layer_error"]
             return AdapterResult(
-                original_message=original_message,
-                social_context="",
-                sticker_candidates=[],
-                final_model_input=base_input,
-                metadata={
+                original_message,
+                "",
+                [],
+                failed_decision,
+                base_input,
+                {
                     "enabled": True,
                     "applied": False,
                     "fail_open": True,
@@ -220,6 +249,7 @@ class OpenClawAdapter:
                     "original_message_preserved": True,
                     "sticker_candidate_count": 0,
                     "explicit_sticker_request": explicit_sticker_request,
+                    "decision_phase": decision_phase,
                 },
             )
 
@@ -243,7 +273,7 @@ def _read_request(stream: Any) -> Mapping[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Yogurt Social Layer V1 + Sticker V2 OpenClaw bridge"
+        description="Yogurt Social Layer V1 + Sticker V2.1 bridge"
     )
     parser.add_argument("--db", type=Path, default=default_db_path())
     parser.add_argument("--max-memories", type=int, default=3)
@@ -262,23 +292,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         stream=sys.stderr,
         format="%(levelname)s %(name)s: %(message)s",
     )
-
     try:
         request = _read_request(sys.stdin)
         user_id = request.get("user_id")
         message = request.get("message")
-        explicit_sticker_request = request.get("explicit_sticker_request") is True
+        assistant_reply = request.get("assistant_reply", "")
+        decision_phase = request.get("decision_phase", "pre_reply")
+        explicit = request.get("explicit_sticker_request") is True
+        forbidden = request.get("sticker_forbidden") is True
         if not isinstance(user_id, str):
             raise ValueError("request.user_id must be a string")
-        if not isinstance(message, str):
-            raise ValueError("request.message must be a string")
+        if not isinstance(message, str) or not isinstance(assistant_reply, str):
+            raise ValueError("request message fields must be strings")
+        if not isinstance(decision_phase, str):
+            raise ValueError("request.decision_phase must be a string")
     except Exception as exc:
         print(
             json.dumps(
-                {
-                    "error": "invalid_request",
-                    "error_type": type(exc).__name__,
-                },
+                {"error": "invalid_request", "error_type": type(exc).__name__},
                 ensure_ascii=False,
             )
         )
@@ -295,21 +326,31 @@ def main(argv: Optional[list[str]] = None) -> int:
         result = adapter.prepare(
             user_id=user_id,
             message=message,
-            explicit_sticker_request=explicit_sticker_request,
+            explicit_sticker_request=explicit,
+            assistant_reply=assistant_reply,
+            decision_phase=decision_phase,
+            sticker_forbidden=forbidden,
         ).to_dict()
     except Exception as exc:
-        LOGGER.exception(
-            "Yogurt social layer initialization failed; continuing without injection"
-        )
-        result = AdapterResult(
-            original_message=message,
-            social_context="",
-            sticker_candidates=[],
-            final_model_input={
+        LOGGER.exception("Yogurt social layer initialization failed; continuing without injection")
+        result = {
+            "original_message": message,
+            "social_context": "",
+            "sticker_candidates": [],
+            "sticker_decision": {
+                "should_send": False,
+                "mode": "error",
+                "score": 0.0,
+                "threshold": 0.0,
+                "intents": [],
+                "reasons": ["initialization_error"],
+                "deferred": False,
+            },
+            "final_model_input": {
                 "prepend_system_context": "",
                 "user_message": message,
             },
-            metadata={
+            "metadata": {
                 "enabled": not args.disabled,
                 "applied": False,
                 "fail_open": True,
@@ -317,16 +358,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "error_type": type(exc).__name__,
                 "original_message_preserved": True,
                 "sticker_candidate_count": 0,
-                "explicit_sticker_request": explicit_sticker_request,
+                "explicit_sticker_request": explicit,
+                "decision_phase": decision_phase,
             },
-        ).to_dict()
-    print(
-        json.dumps(
-            result,
-            ensure_ascii=False,
-            indent=2 if args.pretty else None,
-        )
-    )
+        }
+    print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None))
     return 0
 
 

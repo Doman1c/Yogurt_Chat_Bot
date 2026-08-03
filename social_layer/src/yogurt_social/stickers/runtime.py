@@ -51,11 +51,13 @@ class StickerRuntime:
         relationship: str,
         allow_sticker: bool,
         explicit_request: bool = False,
+        assistant_reply: str = "",
     ) -> list[StickerCandidate]:
         if not self.config.enabled or self.retriever is None:
             return []
         return self.retriever.retrieve(
             message=message,
+            assistant_reply=assistant_reply,
             scene=scene,
             mood=mood,
             relationship=relationship,

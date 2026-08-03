@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
+python3 -m pytest -q "$REPO_ROOT/social_layer/tests/test_sticker_v21.py"
+node --experimental-strip-types --check "$REPO_ROOT/integrations/openclaw/index-v2.ts"
+node --experimental-strip-types --check "$REPO_ROOT/integrations/openclaw/sticker-turn.ts"
+node --experimental-strip-types --check "$REPO_ROOT/integrations/openclaw/sticker-v21-utils.ts"

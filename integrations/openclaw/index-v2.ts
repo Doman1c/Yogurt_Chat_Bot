@@ -6,6 +6,12 @@ import {
   StickerAutoPolicyStore,
   StickerSelectionStore,
 } from "./sticker-selection.ts";
+import { StickerTurnStore } from "./sticker-turn.ts";
+import {
+  assistantTextFromEvent,
+  compactDecisionLog,
+  parseStickerBridgeDecision,
+} from "./sticker-v21-utils.ts";
 import {
   channelFromContext,
   channelIsAllowed,
@@ -38,13 +44,10 @@ const AGENT_END_DELIVERY_DELAY_MS = (() => {
 
 const selectionStore = new StickerSelectionStore();
 const autoPolicyStore = new StickerAutoPolicyStore();
+const turnStore = new StickerTurnStore();
 const deliveryTimers = new Map<string, NodeJS.Timeout>();
 
-function addPeerAlias(
-  aliases: string[],
-  channel: string,
-  peerId: unknown,
-): string[] {
+function addPeerAlias(aliases: string[], channel: string, peerId: unknown): string[] {
   const resolvedPeerId = optionalString(peerId);
   if (!resolvedPeerId) return aliases;
   return [...new Set([...aliases, `peer:${channel}:${resolvedPeerId}`])];
@@ -69,12 +72,12 @@ function targetFromContext(ctx: any, event?: any): string | undefined {
   );
 }
 
-function buildConciseAutoStickerContext(): string {
+function buildExplicitStickerAvailableContext(): string {
   return [
     "[Yogurt Sticker Delivery]",
-    "系统会在本轮文字回复之后自动发送一张合适的表情包。",
-    "正文只需要一句很短、自然的确认（建议不超过 20 个汉字）或一个可爱颜文字。",
-    "不要描述、解释或复述表情包画面，也不要提及表情包 ID、文件名、本地路径、候选或系统流程。",
+    "用户明确要求发送表情包，系统会在本轮文字回复之后根据最终语义选择一张安全图片。",
+    "正文只需要一句很短、自然的确认，建议不超过 20 个汉字。",
+    "不要描述、解释或虚构表情包画面，也不要提及 ID、文件名、本地路径、候选或系统流程。",
     "不要调用 choose_sticker。",
   ].join("\n");
 }
@@ -82,7 +85,7 @@ function buildConciseAutoStickerContext(): string {
 function buildExplicitStickerUnavailableContext(): string {
   return [
     "[Yogurt Sticker Request]",
-    "用户明确要求发送表情包，但本轮没有找到可安全发送的候选。",
+    "用户明确要求发送表情包，但本轮没有找到足够相关且安全的候选。",
     "只回复一句很短、自然的话说明这次没有发出来，建议不超过 15 个汉字。",
     "绝对不要描述、解释、复述或虚构任何表情包画面，也不要假装已经发送图片。",
     "不要提及表情包 ID、文件名、本地路径、候选、评分或系统流程。",
@@ -131,7 +134,7 @@ const chooseStickerOutput = {
 export default definePluginEntry({
   id: PLUGIN_ID,
   name: "Yogurt Social Injector",
-  description: "Injects Yogurt social context and delivers bounded V2 stickers.",
+  description: "Injects Yogurt social context and delivers bounded V2.1 stickers.",
   register(api) {
     if (typeof api.registerTool === "function") {
       api.registerTool((toolContext: any) => {
@@ -166,7 +169,6 @@ export default definePluginEntry({
                 details: { status: "rejected", reason: "invalid_sticker_id" },
               };
             }
-
             const result = selectionStore.select(aliases, stickerId, Date.now(), {
               sessionKey: sessionKeyFromContext(toolContext),
               policyKey: preferredPolicyKey(aliases),
@@ -184,7 +186,6 @@ export default definePluginEntry({
                 details: { status: "rejected", reason: result.reason },
               };
             }
-
             api.logger.info(`${PLUGIN_ID}: sticker selection pending mode=tool`);
             return {
               content: [
@@ -211,13 +212,10 @@ export default definePluginEntry({
       async (event, ctx) => {
         const config = readConfig(api, event);
         if (!config.enabled) return;
-
         const prompt = typeof event.prompt === "string" ? event.prompt : "";
         if (!prompt) return;
-
         const channel = channelFromContext(ctx);
         if (!channelIsAllowed(config, channel) || ctx?.jobId) return;
-
         const senderId = senderIdFromContext(ctx);
         const userId = resolveUserId(config, senderId, channel);
         if (!userId) return;
@@ -229,6 +227,7 @@ export default definePluginEntry({
         );
         const policyKey = preferredPolicyKey(aliases);
         const explicit = messageExplicitlyRequestsSticker(prompt);
+        const forbidden = messageForbidsSticker(prompt);
         const startedAt = Date.now();
         api.logger.info(
           `${PLUGIN_ID}: injection start channel=${channel} promptChars=${prompt.length}`,
@@ -240,7 +239,10 @@ export default definePluginEntry({
             {
               user_id: userId,
               message: prompt,
+              assistant_reply: "",
+              decision_phase: "pre_reply",
               explicit_sticker_request: explicit,
+              sticker_forbidden: forbidden,
             } as any,
           );
           const rawSocialContext =
@@ -250,14 +252,17 @@ export default definePluginEntry({
           const candidates = config.stickerEnabled
             ? parseStickerCandidates(bridgeResult.sticker_candidates)
             : [];
+          const bridgeDecision = parseStickerBridgeDecision(
+            (bridgeResult as any).sticker_decision,
+          );
 
           let socialContext = rawSocialContext;
-          let selectedId = "none";
           let decisionReason = "disabled";
-
           if (!config.stickerEnabled) {
             selectionStore.clear(aliases);
+            turnStore.clear(aliases);
           } else if (config.stickerSelectionMode === "tool") {
+            turnStore.clear(aliases);
             if (candidates.length > 0) {
               selectionStore.register(aliases, candidates);
               decisionReason = "tool_candidates";
@@ -267,75 +272,44 @@ export default definePluginEntry({
             }
           } else {
             socialContext = stripStickerCandidateContext(rawSocialContext);
-            if (messageForbidsSticker(prompt)) {
-              selectionStore.clear(aliases);
+            selectionStore.clear(aliases);
+            if (forbidden) {
+              turnStore.clear(aliases);
               decisionReason = "user_forbid";
             } else {
-              const deliveryConfig = readStickerDeliveryConfig(config.stickerConfigPath);
-              const decision = autoPolicyStore.choose(
-                policyKey,
-                candidates,
+              turnStore.register(aliases, {
+                userId,
+                message: prompt,
                 explicit,
-                deliveryConfig,
-              );
-              decisionReason = decision.reason;
-              if (decision.selected) {
-                selectionStore.register(aliases, candidates);
-                const selected = selectionStore.select(
-                  aliases,
-                  decision.selected.id,
-                  Date.now(),
-                  {
-                    sessionKey: sessionKeyFromContext(ctx),
-                    policyKey,
-                    mode: "auto",
-                    explicit,
-                  },
-                );
-                if (selected.status === "selected") {
-                  selectedId = selected.sticker.id;
-                  socialContext = [socialContext, buildConciseAutoStickerContext()]
-                    .filter(Boolean)
-                    .join("\n\n");
-                } else {
-                  selectionStore.clear(aliases);
-                  decisionReason = selected.reason;
-                  if (explicit) {
-                    socialContext = [
-                      socialContext,
-                      buildExplicitStickerUnavailableContext(),
-                    ]
-                      .filter(Boolean)
-                      .join("\n\n");
-                  }
-                }
-              } else {
-                selectionStore.clear(aliases);
-                if (explicit) {
-                  socialContext = [
-                    socialContext,
-                    buildExplicitStickerUnavailableContext(),
-                  ]
-                    .filter(Boolean)
-                    .join("\n\n");
+                forbidden,
+                policyKey,
+                sessionKey: sessionKeyFromContext(ctx),
+              });
+              decisionReason = explicit ? bridgeDecision.mode : "deferred_post_reply";
+              if (explicit) {
+                socialContext = [
+                  socialContext,
+                  bridgeDecision.shouldSend && candidates.length > 0
+                    ? buildExplicitStickerAvailableContext()
+                    : buildExplicitStickerUnavailableContext(),
+                ]
+                  .filter(Boolean)
+                  .join("\n\n");
+                if (!bridgeDecision.shouldSend || candidates.length === 0) {
+                  turnStore.clear(aliases);
                 }
               }
             }
           }
 
-          if (!socialContext) {
-            api.logger.info(
-              `${PLUGIN_ID}: bridge returned no context in ${Date.now() - startedAt}ms`,
-            );
-            return;
-          }
-
           api.logger.info(
-            `${PLUGIN_ID}: injection ready bridgeMs=${Date.now() - startedAt} contextChars=${socialContext.length} stickerMode=${config.stickerSelectionMode} stickerCandidates=${candidates.length} stickerSelected=${selectedId} stickerDecision=${decisionReason} stickerExplicit=${explicit}`,
+            `${PLUGIN_ID}: injection ready bridgeMs=${Date.now() - startedAt} contextChars=${socialContext.length} stickerMode=${config.stickerSelectionMode} stickerCandidates=${candidates.length} stickerDecision=${decisionReason} stickerExplicit=${explicit}`,
           );
+          if (!socialContext) return;
           return { prependContext: socialContext };
         } catch (error) {
           selectionStore.clear(aliases);
+          turnStore.clear(aliases);
           const reason = error instanceof Error ? error.message : "unknown_error";
           api.logger.warn(`${PLUGIN_ID}: social layer unavailable (${reason}); fail-open`);
           return;
@@ -343,6 +317,100 @@ export default definePluginEntry({
       },
       { priority: 60, timeoutMs: 12000 },
     );
+
+    const finalizeAutoSelection = async (params: {
+      trigger: "agent_end" | "message_sent" | "reply_payload_sending";
+      aliases: string[];
+      assistantText?: string;
+      ctx: any;
+      event?: any;
+    }): Promise<boolean> => {
+      const config = readConfig(api, params.event);
+      if (
+        !config.enabled ||
+        !config.stickerEnabled ||
+        config.stickerSelectionMode !== "auto"
+      ) {
+        return false;
+      }
+      if (selectionStore.getPending(params.aliases)) return true;
+      const turn = turnStore.get(params.aliases);
+      if (!turn) return false;
+      if (!params.assistantText && !turn.explicit) return false;
+
+      try {
+        const bridgeResult = await runBridge(
+          config,
+          {
+            user_id: turn.userId,
+            message: turn.message,
+            assistant_reply: params.assistantText || "",
+            decision_phase: "post_reply",
+            explicit_sticker_request: turn.explicit,
+            sticker_forbidden: turn.forbidden,
+          } as any,
+        );
+        const candidates = parseStickerCandidates(bridgeResult.sticker_candidates);
+        const bridgeDecision = parseStickerBridgeDecision(
+          (bridgeResult as any).sticker_decision,
+        );
+        api.logger.info(
+          `${PLUGIN_ID}: send decision trigger=${params.trigger} ${compactDecisionLog(bridgeDecision)} candidates=${candidates.length} top=${candidates[0]?.id || "none"}:${candidates[0]?.score || 0} runnerUp=${candidates[1]?.id || "none"}:${candidates[1]?.score || 0}`,
+        );
+        turnStore.consume(params.aliases);
+        if (!bridgeDecision.shouldSend || candidates.length === 0) {
+          selectionStore.clear(params.aliases);
+          return false;
+        }
+
+        const deliveryConfig = readStickerDeliveryConfig(config.stickerConfigPath);
+        const policyDecision = autoPolicyStore.choose(
+          turn.policyKey,
+          candidates,
+          turn.explicit,
+          deliveryConfig,
+        );
+        if (!policyDecision.selected) {
+          api.logger.info(
+            `${PLUGIN_ID}: send decision rejected by delivery policy reason=${policyDecision.reason}`,
+          );
+          selectionStore.clear(params.aliases);
+          return false;
+        }
+
+        const resolvedAliases = [...new Set([...turn.aliases, ...params.aliases])];
+        selectionStore.register(resolvedAliases, candidates);
+        const selected = selectionStore.select(
+          resolvedAliases,
+          policyDecision.selected.id,
+          Date.now(),
+          {
+            sessionKey: turn.sessionKey,
+            policyKey: turn.policyKey,
+            mode: "auto",
+            explicit: turn.explicit,
+          },
+        );
+        if (selected.status !== "selected") {
+          selectionStore.clear(resolvedAliases);
+          api.logger.warn(
+            `${PLUGIN_ID}: post-reply selection rejected reason=${selected.reason}`,
+          );
+          return false;
+        }
+        api.logger.info(
+          `${PLUGIN_ID}: post-reply sticker selected sticker=${selected.sticker.id} reason=${policyDecision.reason}`,
+        );
+        return true;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "unknown_error";
+        api.logger.warn(
+          `${PLUGIN_ID}: post-reply sticker decision unavailable trigger=${params.trigger} (${reason}); text preserved`,
+        );
+        if (params.trigger !== "agent_end") turnStore.clear(params.aliases);
+        return false;
+      }
+    };
 
     const scheduleWeixinStickerDelivery = (params: {
       trigger: "agent_end" | "message_sent";
@@ -353,9 +421,9 @@ export default definePluginEntry({
     }) => {
       const config = readConfig(api);
       if (!config.enabled || !config.stickerEnabled) return;
-
       const pending = selectionStore.getPending(params.aliases);
       if (!pending) return;
+      if (deliveryTimers.has(pending.snapshotId)) return;
 
       const target = targetFromContext(params.ctx, params.event);
       if (!target) {
@@ -371,9 +439,6 @@ export default definePluginEntry({
         deliveryConfig.deliveryDelayMs,
         params.minimumDelayMs || 0,
       );
-
-      const existingTimer = deliveryTimers.get(pending.snapshotId);
-      if (existingTimer) clearTimeout(existingTimer);
       api.logger.info(
         `${PLUGIN_ID}: sticker outbound scheduled trigger=${params.trigger} mode=${pending.mode} hasTarget=true delayMs=${delayMs}`,
       );
@@ -382,14 +447,12 @@ export default definePluginEntry({
         deliveryTimers.delete(pending.snapshotId);
         const selected = selectionStore.consumePendingBySnapshot(pending.snapshotId);
         if (!selected) return;
-
         try {
           const filePath = resolveStickerFile(config, selected.sticker);
           const fileSize = statSync(filePath).size;
           if (fileSize > deliveryConfig.maxBytes) {
             throw new Error("sticker_file_too_large");
           }
-
           const loadAdapter = api.runtime?.channel?.outbound?.loadAdapter;
           if (typeof loadAdapter !== "function") {
             throw new Error("channel_outbound_adapter_unavailable");
@@ -398,7 +461,6 @@ export default definePluginEntry({
           if (typeof adapter?.sendMedia !== "function") {
             throw new Error("weixin_send_media_unavailable");
           }
-
           await adapter.sendMedia({
             cfg: api.config,
             to: target,
@@ -420,7 +482,7 @@ export default definePluginEntry({
       deliveryTimers.set(pending.snapshotId, timer);
     };
 
-    api.on("agent_end", (event: any, ctx: any) => {
+    api.on("agent_end", async (event: any, ctx: any) => {
       if (event?.success !== true) return;
       const channel = channelFromContext(ctx);
       if (channel !== WEIXIN_CHANNEL) return;
@@ -431,6 +493,13 @@ export default definePluginEntry({
         channel,
         peerId,
       );
+      await finalizeAutoSelection({
+        trigger: "agent_end",
+        aliases,
+        assistantText: assistantTextFromEvent(event, ctx),
+        ctx,
+        event,
+      });
       scheduleWeixinStickerDelivery({
         trigger: "agent_end",
         aliases,
@@ -440,7 +509,7 @@ export default definePluginEntry({
       });
     });
 
-    api.on("message_sent", (event: any, ctx: any) => {
+    api.on("message_sent", async (event: any, ctx: any) => {
       if (event?.success !== true || !optionalString(event?.content)) return;
       const channel = channelFromContext(ctx);
       if (channel !== WEIXIN_CHANNEL) return;
@@ -451,6 +520,13 @@ export default definePluginEntry({
         channel,
         peerId,
       );
+      await finalizeAutoSelection({
+        trigger: "message_sent",
+        aliases,
+        assistantText: optionalString(event.content),
+        ctx,
+        event,
+      });
       scheduleWeixinStickerDelivery({
         trigger: "message_sent",
         aliases,
@@ -463,15 +539,10 @@ export default definePluginEntry({
       "reply_payload_sending",
       async (event: any, ctx: any) => {
         if (event?.kind !== "final") return;
-
         const config = readConfig(api, event);
         if (!config.enabled || !config.stickerEnabled) return;
-
         const channel = optionalString(event?.channel) || channelFromContext(ctx);
         if (!channelIsAllowed(config, channel)) return;
-        // Tencent openclaw-weixin uses a low-level prebuilt dispatcher path that
-        // does not invoke reply_payload_sending. Its media is sent by the
-        // channel outbound adapter from agent_end/message_sent above.
         if (channel === WEIXIN_CHANNEL) return;
 
         const senderId = senderIdFromContext(ctx);
@@ -481,6 +552,13 @@ export default definePluginEntry({
           channel,
           peerId,
         );
+        await finalizeAutoSelection({
+          trigger: "reply_payload_sending",
+          aliases,
+          assistantText: assistantTextFromEvent(event, ctx),
+          ctx,
+          event,
+        });
         const pending = selectionStore.getPending(aliases);
         if (!pending) return;
 
@@ -495,14 +573,11 @@ export default definePluginEntry({
           );
           return;
         }
-
         const selected = selectionStore.consumePendingBySnapshot(pending.snapshotId);
         if (!selected) return;
-
         const mediaUrls = normalizePayloadMediaUrls(event?.payload);
         if (!mediaUrls.includes(filePath)) mediaUrls.push(filePath);
         autoPolicyStore.recordSent(selected.policyKey, selected.sticker);
-
         api.logger.info(
           `${PLUGIN_ID}: sticker media attached trigger=reply_payload_sending mode=${selected.mode} sticker=${selected.sticker.id} mediaCount=${mediaUrls.length}`,
         );
@@ -514,11 +589,11 @@ export default definePluginEntry({
           },
         };
       },
-      { priority: 40, timeoutMs: 5000 },
+      { priority: 40, timeoutMs: 12000 },
     );
 
     api.logger.info(
-      `${PLUGIN_ID}: registered before_prompt_build, agent_end, message_sent, reply_payload_sending, and optional choose_sticker`,
+      `${PLUGIN_ID}: registered before_prompt_build, agent_end, message_sent, reply_payload_sending, V2.1 post-reply decision, and optional choose_sticker`,
     );
   },
 });

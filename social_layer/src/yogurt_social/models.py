@@ -28,6 +28,15 @@ class Mood(StringEnum):
     SAD = "sad"
     FRUSTRATED = "frustrated"
     ANXIOUS = "anxious"
+    SPEECHLESS = "speechless"
+    EMBARRASSED = "embarrassed"
+    AFFECTIONATE = "affectionate"
+    ANGRY = "angry"
+    SURPRISED = "surprised"
+    CONFUSED = "confused"
+    TIRED = "tired"
+    PROUD = "proud"
+    WARM = "warm"
 
 
 class ReplyLength(StringEnum):

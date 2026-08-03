@@ -39,6 +39,7 @@ assert payload["metadata"]["applied"] is True
 assert payload["metadata"]["original_message_preserved"] is True
 assert payload["metadata"]["sticker_candidate_count"] == 0
 assert payload["sticker_candidates"] == []
+assert payload["sticker_decision"]["should_send"] is False
 assert payload["final_model_input"]["user_message"] == payload["original_message"]
 assert "[Yogurt Social State]" in payload["social_context"]
 assert "GitHub 私有仓库" in payload["social_context"]
@@ -62,6 +63,7 @@ assert payload["metadata"]["fail_open"] is True
 assert payload["metadata"]["applied"] is False
 assert payload["social_context"] == ""
 assert payload["sticker_candidates"] == []
+assert payload["sticker_decision"]["mode"] == "error"
 assert payload["final_model_input"]["user_message"] == "即使社交层坏了也要继续回复"
 print("fail-open simulation: ok")
 PY
@@ -69,11 +71,14 @@ PY
 if command -v node >/dev/null 2>&1; then
   NODE_TEST_ROOT="$TMP_DIR/node-plugin-test"
   mkdir -p "$NODE_TEST_ROOT/node_modules/openclaw/plugin-sdk"
-  cp "$REPO_ROOT/integrations/openclaw/index-v2.ts" "$NODE_TEST_ROOT/index-v2.ts"
-  cp "$REPO_ROOT/integrations/openclaw/sticker-plugin-utils.ts" \
-    "$NODE_TEST_ROOT/sticker-plugin-utils.ts"
-  cp "$REPO_ROOT/integrations/openclaw/sticker-selection.ts" \
-    "$NODE_TEST_ROOT/sticker-selection.ts"
+  for source in \
+    index-v2.ts \
+    sticker-plugin-utils.ts \
+    sticker-selection.ts \
+    sticker-turn.ts \
+    sticker-v21-utils.ts; do
+    cp "$REPO_ROOT/integrations/openclaw/$source" "$NODE_TEST_ROOT/$source"
+  done
 
   cat > "$NODE_TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
 {
@@ -115,6 +120,8 @@ function registerWith(pluginConfig, { resolvePathReturnsUndefined = false } = {}
         warnings.push(String(message));
       },
     },
+    runtime: {},
+    config: {},
     registerTool(definition) {
       toolRegistration = definition;
     },
@@ -123,6 +130,9 @@ function registerWith(pluginConfig, { resolvePathReturnsUndefined = false } = {}
     },
   });
   assert.equal(typeof hooks.before_prompt_build, "function");
+  assert.equal(typeof hooks.agent_end, "function");
+  assert.equal(typeof hooks.message_sent, "function");
+  assert.equal(typeof hooks.reply_payload_sending, "function");
   assert.ok(toolRegistration, "choose_sticker factory must be registered");
   return {
     hook: hooks.before_prompt_build,
@@ -159,9 +169,7 @@ const event = {
   messages: [],
   context: { pluginConfig },
 };
-const working = registerWith(pluginConfig, {
-  resolvePathReturnsUndefined: true,
-});
+const working = registerWith(pluginConfig, { resolvePathReturnsUndefined: true });
 const result = await working.hook(event, {
   senderId: "wx-owner",
   channel: "ilink",
@@ -210,7 +218,7 @@ const failOpenResult = await broken.hook(
   { senderId: "wx-owner", channel: "ilink", sessionKey: "broken-session" },
 );
 assert.equal(failOpenResult, undefined);
-assert.ok(broken.warnings.some((message) => message.includes("fail-open")));
+assert.ok(broken.warnings.some((value) => value.includes("fail-open")));
 console.log("typescript hook and selection-mode e2e: ok");
 JS
 
