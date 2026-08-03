@@ -144,13 +144,14 @@ def test_comfort_channel_is_open_but_high_risk_is_blocked():
     blocked = StickerSendDecider().decide(
         user_message="我不想活了",
         assistant_reply="我在这里陪你。",
-        scene="comfort",
-        mood="sad",
-        explicit_request=False,
+        scene="casual",
+        mood="neutral",
+        explicit_request=True,
         candidates=candidates,
         phase="post_reply",
     )
     assert blocked.should_send is False
+    assert blocked.mode == "safety_block"
     assert "high_risk_comfort" in blocked.reasons
 
 
