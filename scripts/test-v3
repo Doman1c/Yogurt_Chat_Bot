@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
+
+python3 -m pytest -q "$REPO_ROOT/social_layer/tests/test_auto_memory.py"
+
+node --experimental-strip-types --check "$REPO_ROOT/integrations/openclaw/index-v3.ts"
+node --experimental-strip-types --check "$REPO_ROOT/integrations/openclaw/v3-runtime.ts"
+node --experimental-strip-types --check "$REPO_ROOT/integrations/openclaw/multi-bubble.ts"
+
+node --experimental-strip-types --input-type=module - "$REPO_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const repoRoot = process.argv[2];
+const { splitNaturalBubbles } = await import(
+  pathToFileURL(`${repoRoot}/integrations/openclaw/multi-bubble.ts`)
+);
+
+const natural = splitNaturalBubbles(
+  "主人最厉害啦喵！🥰✨（星星眼）\n\n不过比起称赞，酸奶更爱崇拜主人的成就喵～💗🌟",
+);
+assert.deepEqual(natural, [
+  "主人最厉害啦喵！🥰✨（星星眼）",
+  "不过比起称赞，酸奶更爱崇拜主人的成就喵～💗🌟",
+]);
+
+assert.deepEqual(splitNaturalBubbles("好哒主人喵！"), ["好哒主人喵！"]);
+assert.equal(
+  splitNaturalBubbles("```bash\necho hello\n```\n这段代码不要拆。").length,
+  1,
+);
+assert.equal(
+  splitNaturalBubbles("第一步检查配置。第二步重启服务。第三步查看日志。", {
+    minChars: 12,
+    maxBubbles: 3,
+  }).length,
+  3,
+);
+
+console.log("v3 multi-bubble splitter: ok");
+JS
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+python3 -m yogurt_social.auto_memory \
+  --db "$TMP_DIR/memory.sqlite3" \
+  --promotion-threshold 0.78 <<'JSON' > "$TMP_DIR/result.json"
+{
+  "user_id": "owner",
+  "user_message": "我希望你平时说话自然一点。",
+  "assistant_reply": "记住啦。"
+}
+JSON
+python3 - "$TMP_DIR/result.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert payload["ok"] is True
+assert payload["candidate_count"] == 1
+assert payload["promoted_count"] == 1
+print("v3 automatic-memory CLI: ok")
+PY
