@@ -2,11 +2,11 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from yogurt_social.conversation_state import ConversationStateStore
+from yogurt_social.conversation_state_runtime import ConversationStateRuntimeStore
 
 
 def test_v4_plan_turn_creates_bounded_structured_state(tmp_path):
-    store = ConversationStateStore(tmp_path / "memory.sqlite3")
+    store = ConversationStateRuntimeStore(tmp_path / "memory.sqlite3")
     message = "开始编写 V4 代码吧，然后我本地同步，再开始测试"
     state = store.observe_user_turn("owner", "session:v4", message)
 
@@ -24,7 +24,7 @@ def test_v4_plan_turn_creates_bounded_structured_state(tmp_path):
 
 def test_assistant_observation_updates_pattern_without_raw_reply(tmp_path):
     db_path = tmp_path / "memory.sqlite3"
-    store = ConversationStateStore(db_path)
+    store = ConversationStateRuntimeStore(db_path)
     store.observe_user_turn("owner", "session:v4", "开始实现 V4 状态引擎")
     reply = "下面开始编写代码：\n\n```python\nprint('v4')\n```"
     state = store.observe_assistant_turn("owner", "session:v4", reply)
@@ -47,7 +47,7 @@ def test_assistant_observation_updates_pattern_without_raw_reply(tmp_path):
 
 
 def test_state_isolated_by_user_and_conversation_key(tmp_path):
-    store = ConversationStateStore(tmp_path / "memory.sqlite3")
+    store = ConversationStateRuntimeStore(tmp_path / "memory.sqlite3")
     store.observe_user_turn("owner", "session:a", "开始编写 V4 代码")
     store.observe_user_turn("friend", "session:a", "我今天有点难过")
     store.observe_user_turn("owner", "session:b", "微信机器人现在正常吗？")
@@ -63,7 +63,7 @@ def test_state_isolated_by_user_and_conversation_key(tmp_path):
 
 
 def test_topic_and_mood_expire_without_mutating_a_read(tmp_path):
-    store = ConversationStateStore(
+    store = ConversationStateRuntimeStore(
         tmp_path / "memory.sqlite3",
         topic_ttl_minutes=60,
         mood_ttl_minutes=30,
@@ -73,7 +73,7 @@ def test_topic_and_mood_expire_without_mutating_a_read(tmp_path):
     store.observe_user_turn(
         "owner",
         "session:v4",
-        "V4 终于搞定了，我太开心了",
+        "开始开发 V4，我太开心了",
         now=start,
     )
 
@@ -100,7 +100,7 @@ def test_topic_and_mood_expire_without_mutating_a_read(tmp_path):
 
 
 def test_completed_threads_are_removed_and_actions_are_audited(tmp_path):
-    store = ConversationStateStore(tmp_path / "memory.sqlite3")
+    store = ConversationStateRuntimeStore(tmp_path / "memory.sqlite3")
     store.observe_user_turn(
         "owner",
         "session:v4",
@@ -124,7 +124,7 @@ def test_completed_threads_are_removed_and_actions_are_audited(tmp_path):
 
 
 def test_inspector_payload_is_json_safe(tmp_path):
-    store = ConversationStateStore(tmp_path / "memory.sqlite3")
+    store = ConversationStateRuntimeStore(tmp_path / "memory.sqlite3")
     store.observe_user_turn("owner", "session:v4", "开始开发 V4")
     payload = {
         "states": store.list_states("owner"),
