@@ -48,7 +48,8 @@
           "memoryRecallCooldownTurns": 8,
           "memoryRecallSameMemoryCooldownTurns": 20,
           "memoryRecallMaxCandidates": 5,
-          "unifiedOutboundShadowEnabled": false
+          "unifiedOutboundShadowEnabled": false,
+          "unifiedOutboundEnforceEnabled": false
         }
       }
     }
