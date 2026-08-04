@@ -119,16 +119,17 @@ with open(os.environ["V4_OBSERVER_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(request, ensure_ascii=False) + "\n")
 phase = request["phase"]
 state = {
-    "current_topic": "回复规划器",
+    "current_topic": "记忆召回门控",
     "dialogue_act": "plan",
     "user_mood": "neutral",
     "interaction_mode": "technical",
-    "open_threads": ["实现 V4.1 回复规划器"],
+    "open_threads": ["实现 V4.2 记忆召回门控"],
     "last_response_pattern": None if phase == "user" else "concise",
     "state_version": 1 if phase == "user" else 2,
 }
 response_plan = None
 response_plan_context = ""
+memory_recall = None
 if phase == "user" and request.get("include_response_plan") is True:
     response_plan = {
         "plan_version": "4.1",
@@ -146,12 +147,35 @@ if phase == "user" and request.get("include_response_plan") is True:
         "首要目标：推进当前项目的下一步",
         "主动追问：否",
     ])
+if phase == "user" and request.get("include_memory_recall") is True:
+    memory_recall = {
+        "mode": "shadow_only",
+        "decision": "allow",
+        "threshold": 0.48,
+        "explicit_request": False,
+        "turn_index": 1,
+        "state_version": 1,
+        "cooldown_remaining": 0,
+        "same_memory_cooldown_remaining": 0,
+        "reasons": ["candidate_layer:stable", "candidate_kind:fact", "gate_allow"],
+        "candidate": {
+            "layer": "stable",
+            "kind": "fact",
+            "source_id": 7,
+            "memory_key": "model",
+            "score": 0.731,
+            "lexical_score": 0.75,
+            "continuity_score": 0.5,
+            "quality_score": 1.0,
+        },
+    }
 print(json.dumps({
     "ok": True,
     "phase": phase,
     "state": state,
     "response_plan": response_plan,
     "response_plan_context": response_plan_context,
+    "memory_recall": memory_recall,
 }, ensure_ascii=False))
 PY
 
@@ -175,6 +199,11 @@ const api = {
     conversationStateTimeoutMs: 2500,
     responsePlannerEnabled: true,
     responsePlannerMaxContextChars: 1600,
+    memoryRecallGateEnabled: true,
+    memoryRecallMinScore: 0.48,
+    memoryRecallCooldownTurns: 8,
+    memoryRecallSameMemoryCooldownTurns: 20,
+    memoryRecallMaxCandidates: 5,
   },
   logger: {
     info(message) { logs.push(String(message)); },
@@ -210,17 +239,20 @@ async function dispatch(name, event, ctx) {
 const inboundCtx = {
   channelId: "openclaw-weixin",
   senderId: "wx-owner@im.wechat",
-  sessionKey: "session-v41",
+  sessionKey: "session-v42",
 };
 const promptResult = await dispatch(
   "before_prompt_build",
-  { prompt: "开始 4.1 吧" },
+  { prompt: "开始 V4.2 Memory Recall Gate" },
   inboundCtx,
 );
 assert.ok(promptResult?.prependContext?.startsWith("[Yogurt Response Plan V4.1]"));
 assert.ok(promptResult.prependContext.includes("主动追问：否"));
+assert.ok(!promptResult.prependContext.includes("source_id"));
+assert.ok(!promptResult.prependContext.includes("memory_key"));
+assert.ok(!promptResult.prependContext.includes("qwen"));
 
-const fullReply = "代码已经准备好了，我们开始测试。";
+const fullReply = "召回门控的影子模式已经准备好了，我们开始测试。";
 const result = await dispatch(
   "message_sending",
   {
@@ -252,16 +284,21 @@ const observerLog = readFileSync(process.env.V4_OBSERVER_LOG, "utf8")
   .split("\n")
   .map((line) => JSON.parse(line));
 assert.deepEqual(observerLog.map((item) => item.phase), ["user", "assistant"]);
-assert.equal(observerLog[0].conversation_key, "session:session-v41");
+assert.equal(observerLog[0].conversation_key, "session:session-v42");
 assert.equal(observerLog[0].include_response_plan, true);
+assert.equal(observerLog[0].include_memory_recall, true);
 assert.equal(observerLog[1].assistant_reply, fullReply);
 assert.ok(logs.some((message) => message.includes("phase=user")));
 assert.ok(logs.some((message) => message.includes("v4 response plan ready")));
+assert.ok(logs.some((message) => message.includes("v4 memory recall shadow")));
+assert.ok(logs.some((message) => message.includes("decision=allow")));
+assert.ok(logs.some((message) => message.includes("layer=stable")));
+assert.ok(logs.some((message) => message.includes("sourceId=7")));
 assert.ok(logs.some((message) => message.includes("phase=assistant")));
 assert.equal(
   logs.filter((message) => message.includes("phase=assistant")).length,
   1,
   "child bubbles must not create another assistant observation",
 );
-console.log("v4.1 response planner runtime: ok");
+console.log("v4.2 shadow recall runtime: ok");
 JS
