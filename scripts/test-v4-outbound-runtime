@@ -64,6 +64,12 @@ export default {
   register(api: any) {
     api.on(
       "before_prompt_build",
+      async () => undefined,
+      { priority: 60 },
+    );
+
+    api.on(
+      "before_prompt_build",
       async (event: any) => ({
         prependContext: [
           "[Yogurt Response Plan V4.1]",
@@ -74,6 +80,45 @@ export default {
         ].join("\n"),
       }),
       { priority: 50 },
+    );
+
+    api.on(
+      "message_sending",
+      async (event: any) => {
+        const content = String(event?.content || "");
+        if (content === "sticker-success") {
+          api.logger.info(
+            "yogurt-social-injector: post-reply sticker selected sticker=test_sticker reason=score_pass",
+          );
+          api.logger.info(
+            "yogurt-social-injector: sticker outbound scheduled trigger=agent_end mode=auto hasTarget=true delayMs=0",
+          );
+          setTimeout(() => {
+            api.logger.info(
+              "yogurt-social-injector: sticker media sent trigger=channel_outbound_adapter mode=auto sticker=test_sticker",
+            );
+          }, 0);
+        }
+        if (content === "sticker-failure") {
+          api.logger.info(
+            "yogurt-social-injector: post-reply sticker selected sticker=failed_sticker reason=score_pass",
+          );
+          api.logger.info(
+            "yogurt-social-injector: sticker outbound scheduled trigger=agent_end mode=auto hasTarget=true delayMs=0",
+          );
+          setTimeout(() => {
+            api.logger.warn(
+              "yogurt-social-injector: sticker media send failed trigger=channel_outbound_adapter (weixin_send_media_unavailable); text preserved",
+            );
+          }, 0);
+        }
+        if (content === "sticker-skipped") {
+          api.logger.info(
+            "yogurt-social-injector: send decision trigger=agent_end mode=auto shouldSend=false score=4.20 threshold=5.80 intents=casual reasons=below_threshold candidates=2 top=a:4.2 runnerUp=b:3.9",
+          );
+        }
+      },
+      { priority: 80 },
     );
 
     api.on(
@@ -122,6 +167,7 @@ const api = {
     responsePlannerEnabled: true,
     unifiedOutboundShadowEnabled: true,
     unifiedOutboundEnforceEnabled: false,
+    stickerEnabled: false,
     multiBubbleMinChars: 8,
     multiBubbleMaxChars: 360,
     multiBubbleDelayMs: 0,
@@ -150,6 +196,7 @@ const api = {
   logger: {
     info(message) { logs.push(String(message)); },
     warn(message) { logs.push(String(message)); },
+    error(message) { logs.push(String(message)); },
   },
   on(name, handler, options = {}) {
     const items = hooks.get(name) || [];
@@ -191,6 +238,8 @@ await dispatch(
 assert.ok(logs.some((value) => value.includes("v4.3 outbound shadow")));
 assert.ok(logs.some((value) => value.includes("actualBubbles=3")));
 assert.ok(logs.some((value) => value.includes("matched=false")));
+assert.ok(logs.some((value) => value.includes("sticker=skipped")));
+assert.ok(logs.every((value) => !value.includes("sticker=unknown")));
 
 logs.length = 0;
 await dispatch("before_prompt_build", { prompt: "one" }, ctx);
@@ -230,6 +279,7 @@ assert.ok(logs.some((value) => value.includes("outbound enforced")));
 assert.ok(logs.some((value) => value.includes("actualBubbles=1")));
 assert.ok(logs.some((value) => value.includes("enforced_target_applied")));
 assert.ok(logs.some((value) => value.includes("hostAction=explicit_passthrough")));
+assert.ok(logs.some((value) => value.includes("stickerReason=sticker_disabled")));
 
 logs.length = 0;
 sent.length = 0;
@@ -317,7 +367,89 @@ assert.equal(partialResult.metadata.sentCount, 1);
 assert.ok(logs.some((value) => value.includes("outcome=partial")));
 assert.ok(logs.some((value) => value.includes("enforced_partial_delivery")));
 
+api.pluginConfig.stickerEnabled = true;
 logs.length = 0;
+await dispatch("before_prompt_build", { prompt: "one" }, ctx);
+const stickerSuccessResult = await dispatch(
+  "message_sending",
+  {
+    content: "sticker-success",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.deepEqual(stickerSuccessResult, {
+  content: "sticker-success",
+  cancel: false,
+});
+assert.ok(
+  logs.some((value) =>
+    value.includes("v4.3 outbound enforced") &&
+    value.includes("sticker=pending") &&
+    value.includes("stickerReason=delivery_scheduled"),
+  ),
+);
+await new Promise((resolve) => setTimeout(resolve, 15));
+assert.ok(
+  logs.some((value) =>
+    value.includes("v4.3 outbound finalized") &&
+    value.includes("mode=enforced") &&
+    value.includes("actualBubbles=1") &&
+    value.includes("sticker=sent") &&
+    value.includes("stickerReason=media_sent") &&
+    value.includes("finalStage=sticker"),
+  ),
+);
+assert.ok(logs.every((value) => !value.includes("sticker=unknown")));
+
+logs.length = 0;
+await dispatch("before_prompt_build", { prompt: "one" }, ctx);
+await dispatch(
+  "message_sending",
+  {
+    content: "sticker-failure",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+await new Promise((resolve) => setTimeout(resolve, 15));
+assert.ok(
+  logs.some((value) =>
+    value.includes("v4.3 outbound finalized") &&
+    value.includes("sticker=failed") &&
+    value.includes("stickerReason=weixin_send_media_unavailable") &&
+    value.includes("sticker_failed"),
+  ),
+);
+
+logs.length = 0;
+await dispatch("before_prompt_build", { prompt: "one" }, ctx);
+await dispatch(
+  "message_sending",
+  {
+    content: "sticker-skipped",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.ok(
+  logs.some((value) =>
+    value.includes("v4.3 outbound enforced") &&
+    value.includes("sticker=skipped") &&
+    value.includes("stickerReason=below_threshold"),
+  ),
+);
+assert.equal(
+  logs.some((value) => value.includes("v4.3 outbound finalized")),
+  false,
+  "terminal skipped decisions must not create a pending finalizer",
+);
+
+logs.length = 0;
+api.pluginConfig.stickerEnabled = false;
 api.pluginConfig.unifiedOutboundEnforceEnabled = false;
 await dispatch("before_prompt_build", { prompt: "two" }, ctx);
 await dispatch(
@@ -332,6 +464,7 @@ await dispatch(
 assert.equal(logs.some((value) => value.includes("v4.3 outbound intent ready")), false);
 assert.equal(logs.some((value) => value.includes("v4.3 outbound enforced")), false);
 assert.equal(logs.some((value) => value.includes("v4.3 outbound shadow")), false);
+assert.equal(logs.some((value) => value.includes("v4.3 outbound finalized")), false);
 
-console.log("v4.3 shadow and enforced outbound runtime: ok");
+console.log("v4.3 shadow, enforcement, and sticker finalization runtime: ok");
 JS
