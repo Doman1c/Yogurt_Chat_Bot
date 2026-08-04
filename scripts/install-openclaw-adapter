@@ -89,6 +89,7 @@ print(f"Yogurt plugin package check: ok ({entry_filename})")
 PY
 
 CONFIG_FILE="$(openclaw config file 2>/dev/null || true)"
+CONFIG_FILE="${CONFIG_FILE/#\~/$HOME}"
 if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
   BACKUP_PATH="$CONFIG_FILE.pre-yogurt-adapter.$(date +%Y%m%d%H%M%S).backup"
   cp "$CONFIG_FILE" "$BACKUP_PATH"
@@ -154,6 +155,11 @@ patch = {
                     "conversationStateMaxRecentActions": 6,
                     "responsePlannerEnabled": False,
                     "responsePlannerMaxContextChars": 1600,
+                    "memoryRecallGateEnabled": False,
+                    "memoryRecallMinScore": 0.48,
+                    "memoryRecallCooldownTurns": 8,
+                    "memoryRecallSameMemoryCooldownTurns": 20,
+                    "memoryRecallMaxCandidates": 5,
                 },
             }
         }
@@ -179,4 +185,4 @@ else
   echo "Gateway restart skipped. Run: openclaw gateway restart"
 fi
 
-echo "Yogurt OpenClaw adapter installed. Stickers, V3 features, V4 state, and V4.1 response planning remain disabled until explicitly enabled."
+echo "Yogurt OpenClaw adapter installed. Stickers, V3 features, V4 state, V4.1 planning, and V4.2 recall gating remain disabled until explicitly enabled."
