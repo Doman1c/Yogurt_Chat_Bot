@@ -40,7 +40,9 @@
           "conversationStateMoodTtlMinutes": 30,
           "conversationStateThreadTtlMinutes": 1440,
           "conversationStateMaxOpenThreads": 5,
-          "conversationStateMaxRecentActions": 6
+          "conversationStateMaxRecentActions": 6,
+          "responsePlannerEnabled": false,
+          "responsePlannerMaxContextChars": 1600
         }
       }
     }
