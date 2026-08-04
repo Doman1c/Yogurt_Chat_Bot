@@ -9,6 +9,7 @@ mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
 
 cp "$REPO_ROOT/integrations/openclaw/index-v43.ts" "$TEST_ROOT/index-v43.ts"
 cp "$REPO_ROOT/integrations/openclaw/outbound-coordinator.ts" "$TEST_ROOT/outbound-coordinator.ts"
+cp "$REPO_ROOT/integrations/openclaw/multi-bubble.ts" "$TEST_ROOT/multi-bubble.ts"
 
 cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
 {
@@ -63,13 +64,13 @@ export default {
   register(api: any) {
     api.on(
       "before_prompt_build",
-      async () => ({
+      async (event: any) => ({
         prependContext: [
           "[Yogurt Response Plan V4.1]",
-          "本轮行为：acknowledge",
-          "建议长度：很短",
-          "建议气泡数：1",
-          "表情倾向：不建议",
+          "本轮行为：plan",
+          "建议长度：中等",
+          `建议气泡数：${String(event?.prompt || "").includes("two") ? 2 : 1}`,
+          "表情倾向：中性",
         ].join("\n"),
       }),
       { priority: 50 },
@@ -78,10 +79,11 @@ export default {
     api.on(
       "message_sending",
       async (event: any, ctx: any) => {
-        if (event?.content === "parent") {
+        api.legacyCalls += 1;
+        if (event?.content === "parent-shadow") {
           await api.testDispatch(
             "message_sending",
-            { content: "child", to: event.to },
+            { content: "child-shadow", to: event.to },
             ctx,
           );
           return {
@@ -90,7 +92,7 @@ export default {
             metadata: { bubbleCount: 2 },
           };
         }
-        if (event?.content === "three bubbles") {
+        if (String(event?.content || "").includes("legacy-three")) {
           return {
             cancel: true,
             cancelReason: "yogurt_multi_bubble",
@@ -113,10 +115,37 @@ const testRoot = process.argv[2];
 const plugin = (await import(pathToFileURL(`${testRoot}/index-v43.ts`))).default;
 const hooks = new Map();
 const logs = [];
+const sent = [];
+let failAfter = Number.POSITIVE_INFINITY;
 const api = {
   pluginConfig: {
-    unifiedOutboundShadowEnabled: true,
     responsePlannerEnabled: true,
+    unifiedOutboundShadowEnabled: true,
+    unifiedOutboundEnforceEnabled: false,
+    multiBubbleMinChars: 8,
+    multiBubbleMaxChars: 360,
+    multiBubbleDelayMs: 0,
+  },
+  legacyCalls: 0,
+  config: {},
+  runtime: {
+    channel: {
+      outbound: {
+        async loadAdapter() {
+          return {
+            async sendText({ to, text }) {
+              if (sent.length >= failAfter) throw new Error("simulated_send_failure");
+              sent.push(text);
+              await dispatch(
+                "message_sending",
+                { content: text, to, metadata: { channel: "openclaw-weixin" } },
+                ctx,
+              );
+            },
+          };
+        },
+      },
+    },
   },
   logger: {
     info(message) { logs.push(String(message)); },
@@ -129,13 +158,13 @@ const api = {
   },
 };
 
-async function dispatch(name, event, ctx) {
+async function dispatch(name, event, context) {
   let result;
   const ordered = [...(hooks.get(name) || [])].sort(
     (left, right) => right.priority - left.priority,
   );
   for (const item of ordered) {
-    const current = await item.handler(event, ctx);
+    const current = await item.handler(event, context);
     if (current !== undefined) result = current;
   }
   return result;
@@ -148,28 +177,27 @@ const ctx = {
   senderId: "wx-owner@im.wechat",
   sessionKey: "session-v43",
 };
-await dispatch("before_prompt_build", { prompt: "好的" }, ctx);
+
+await dispatch("before_prompt_build", { prompt: "one" }, ctx);
 await dispatch(
   "message_sending",
   {
-    content: "three bubbles",
+    content: "legacy-three",
     to: "wx-owner@im.wechat",
     metadata: { channel: "openclaw-weixin" },
   },
   ctx,
 );
-assert.ok(logs.some((value) => value.includes("v4.3 outbound intent ready")));
-assert.ok(logs.some((value) => value.includes("targetBubbles=1")));
+assert.ok(logs.some((value) => value.includes("v4.3 outbound shadow")));
 assert.ok(logs.some((value) => value.includes("actualBubbles=3")));
 assert.ok(logs.some((value) => value.includes("matched=false")));
-assert.ok(logs.some((value) => value.includes("actual_bubbles_exceeded_target")));
 
 logs.length = 0;
-await dispatch("before_prompt_build", { prompt: "收到" }, ctx);
+await dispatch("before_prompt_build", { prompt: "one" }, ctx);
 await dispatch(
   "message_sending",
   {
-    content: "parent",
+    content: "parent-shadow",
     to: "wx-owner@im.wechat",
     metadata: { channel: "openclaw-weixin" },
   },
@@ -178,23 +206,103 @@ await dispatch(
 assert.equal(
   logs.filter((value) => value.includes("v4.3 outbound shadow")).length,
   1,
-  "recursive child bubbles must not consume or report the parent intent",
+  "legacy recursive child bubbles must report only the parent",
 );
-assert.ok(logs.some((value) => value.includes("actualBubbles=2")));
 
-logs.length = 0;
 api.pluginConfig.unifiedOutboundShadowEnabled = false;
-await dispatch("before_prompt_build", { prompt: "关闭" }, ctx);
-await dispatch(
+api.pluginConfig.unifiedOutboundEnforceEnabled = true;
+logs.length = 0;
+const callsBeforeSingle = api.legacyCalls;
+await dispatch("before_prompt_build", { prompt: "one" }, ctx);
+const singleResult = await dispatch(
   "message_sending",
   {
-    content: "three bubbles",
+    content: "第一句会保留。第二句不会再被旧系统拆开。",
     to: "wx-owner@im.wechat",
     metadata: { channel: "openclaw-weixin" },
   },
   ctx,
 );
+assert.equal(singleResult, undefined);
+assert.equal(api.legacyCalls, callsBeforeSingle);
+assert.ok(logs.some((value) => value.includes("outbound enforced")));
+assert.ok(logs.some((value) => value.includes("actualBubbles=1")));
+assert.ok(logs.some((value) => value.includes("enforced_target_applied")));
+
+logs.length = 0;
+sent.length = 0;
+failAfter = Number.POSITIVE_INFINITY;
+await dispatch("before_prompt_build", { prompt: "two" }, ctx);
+const exactResult = await dispatch(
+  "message_sending",
+  {
+    content: "第一句足够自然。第二句也足够自然。",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.equal(exactResult.cancelReason, "yogurt_unified_outbound");
+assert.deepEqual(sent, ["第一句足够自然。", "第二句也足够自然。"]);
+assert.ok(logs.some((value) => value.includes("targetBubbles=2")));
+assert.ok(logs.some((value) => value.includes("actualBubbles=2")));
+assert.ok(logs.some((value) => value.includes("matched=true")));
+assert.equal(
+  logs.filter((value) => value.includes("v4.3 outbound enforced")).length,
+  1,
+  "coordinator child bubbles must not report the parent again",
+);
+
+logs.length = 0;
+await dispatch("before_prompt_build", { prompt: "two" }, ctx);
+const fallbackResult = await dispatch(
+  "message_sending",
+  {
+    content: "```bash\necho hi\n``` legacy-three",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.equal(fallbackResult.cancelReason, "yogurt_multi_bubble");
+assert.ok(
+  logs.some((value) => value.includes("enforcement_fallback:code_block_passthrough")),
+);
+assert.ok(logs.some((value) => value.includes("actualBubbles=3")));
+
+logs.length = 0;
+sent.length = 0;
+failAfter = 1;
+await dispatch("before_prompt_build", { prompt: "two" }, ctx);
+const partialResult = await dispatch(
+  "message_sending",
+  {
+    content: "第一句可以发送。第二句会模拟失败。",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.equal(partialResult.cancelReason, "yogurt_unified_outbound_partial");
+assert.equal(partialResult.metadata.sentCount, 1);
+assert.ok(logs.some((value) => value.includes("outcome=partial")));
+assert.ok(logs.some((value) => value.includes("enforced_partial_delivery")));
+
+logs.length = 0;
+api.pluginConfig.unifiedOutboundEnforceEnabled = false;
+await dispatch("before_prompt_build", { prompt: "two" }, ctx);
+await dispatch(
+  "message_sending",
+  {
+    content: "legacy-three",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.equal(logs.some((value) => value.includes("v4.3 outbound intent ready")), false);
+assert.equal(logs.some((value) => value.includes("v4.3 outbound enforced")), false);
 assert.equal(logs.some((value) => value.includes("v4.3 outbound shadow")), false);
 
-console.log("v4.3 shadow outbound runtime: ok");
+console.log("v4.3 shadow and enforced outbound runtime: ok");
 JS
