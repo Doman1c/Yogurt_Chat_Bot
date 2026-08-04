@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from .conversation_state import ConversationStateStore
+from .conversation_state_runtime import ConversationStateRuntimeStore
 
 
 def _request(stream: Any) -> Mapping[str, Any]:
@@ -49,7 +49,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not isinstance(message, str) or not isinstance(assistant_reply, str):
             raise ValueError("message fields must be strings")
 
-        store = ConversationStateStore(
+        store = ConversationStateRuntimeStore(
             args.db,
             topic_ttl_minutes=args.topic_ttl_minutes,
             mood_ttl_minutes=args.mood_ttl_minutes,
