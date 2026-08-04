@@ -21,6 +21,27 @@ def test_v41_request_creates_planner_thread_and_project_plan(tmp_path):
     assert plan.active_thread == "实现 V4.1 回复规划器"
 
 
+def test_entering_v41_retires_superseded_v40_implementation_threads(tmp_path):
+    store = ConversationStateRuntimeStore(tmp_path / "memory.sqlite3")
+    previous = store.observe_user_turn(
+        "owner",
+        "session:migration",
+        "开始实现 V4.0 会话状态，然后运行测试",
+    )
+    assert "实现 V4.0 会话状态" in previous.open_threads
+    assert "运行 V4.0 测试" in previous.open_threads
+
+    migrated = store.observe_user_turn(
+        "owner",
+        "session:migration",
+        "开始 4.1，先实现回复规划器",
+    )
+
+    assert "实现 V4.0 会话状态" not in migrated.open_threads
+    assert "运行 V4.0 测试" not in migrated.open_threads
+    assert migrated.open_threads == ("实现 V4.1 回复规划器",)
+
+
 def test_completion_is_celebration_and_closes_v41_thread(tmp_path):
     store = ConversationStateRuntimeStore(tmp_path / "memory.sqlite3")
     store.observe_user_turn(
@@ -28,7 +49,7 @@ def test_completion_is_celebration_and_closes_v41_thread(tmp_path):
         "session:v41",
         "开始实现 V4.1 回复规划器",
     )
-    message = "V4.1 回复规划器已经实现，测试通过了"
+    message = "V4.1 回复规划器已经实现，测试也通过了"
     state = store.observe_user_turn("owner", "session:v41", message)
     plan = ResponsePlanner().plan(message, state)
 
