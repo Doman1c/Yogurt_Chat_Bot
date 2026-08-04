@@ -43,3 +43,4 @@ jobs:
           bash scripts/test-v3-sticker-bubble-order
           bash scripts/test-v4-state
           bash scripts/test-v4-runtime
+          bash scripts/test-v4-outbound
