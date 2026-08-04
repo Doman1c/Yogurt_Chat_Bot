@@ -1,8 +1,8 @@
 {
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
-  "description": "Injects Yogurt social context, delivers bounded V2.1 stickers, and provides opt-in V3 memory and multi-bubble experiments.",
-  "version": "0.5.0-alpha.1",
+  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, and opt-in V4 conversation-state observation.",
+  "version": "0.6.0-alpha.1",
   "activation": {
     "onStartup": true
   },
@@ -139,6 +139,46 @@
         "minimum": 0,
         "maximum": 3000,
         "default": 420
+      },
+      "conversationStateEnabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "conversationStateTimeoutMs": {
+        "type": "integer",
+        "minimum": 500,
+        "maximum": 10000,
+        "default": 2500
+      },
+      "conversationStateTopicTtlMinutes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10080,
+        "default": 60
+      },
+      "conversationStateMoodTtlMinutes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1440,
+        "default": 30
+      },
+      "conversationStateThreadTtlMinutes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 43200,
+        "default": 1440
+      },
+      "conversationStateMaxOpenThreads": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 5
+      },
+      "conversationStateMaxRecentActions": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 6
       }
     }
   }
