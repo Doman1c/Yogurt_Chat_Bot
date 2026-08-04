@@ -11,11 +11,37 @@ from .conversation_state import ConversationState, ConversationStateStore
 class ConversationStateRuntimeStore(ConversationStateStore):
     """Runtime reducer with completion-first and V4 phase-aware semantics."""
 
+    _V40_SUPERSEDED_THREADS = frozenset(
+        {
+            "实现 V4.0 会话状态",
+            "运行 V4.0 测试",
+        }
+    )
+
     @classmethod
     def _is_v41(cls, text: str) -> bool:
         return cls._contains_any(
             text,
             ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
+        )
+
+    @classmethod
+    def _test_passed(cls, text: str) -> bool:
+        return cls._contains_any(
+            text,
+            (
+                "测试通过",
+                "测试也通过",
+                "测试已经通过",
+                "测试都通过",
+                "测试全部通过",
+                "测试均通过",
+                "测试顺利通过",
+                "全部测试通过",
+                "ci通过",
+                "ci也通过",
+                "ci已经通过",
+            ),
         )
 
     @classmethod
@@ -27,14 +53,13 @@ class ConversationStateRuntimeStore(ConversationStateStore):
                 "已经完成",
                 "已经实现",
                 "实现完成",
-                "测试通过",
                 "全部通过",
                 "成功合并",
                 "搞定了",
                 "完成了",
                 "终于好了",
             ),
-        ):
+        ) or cls._test_passed(text):
             return "celebrate"
         if cls._contains_any(
             text,
@@ -80,16 +105,17 @@ class ConversationStateRuntimeStore(ConversationStateStore):
         text = re.sub(r"\s+", "", message.casefold())
         is_v41 = cls._is_v41(text)
         completed = [] if is_v41 else list(super()._completed_thread_markers(message))
-        if not cls._contains_any(
+        has_completion = cls._contains_any(
             text,
-            ("已经完成", "完成了", "搞定了", "测试通过", "同步完成", "成功", "已经实现"),
-        ):
+            ("已经完成", "完成了", "搞定了", "同步完成", "成功", "已经实现"),
+        ) or cls._test_passed(text)
+        if not has_completion:
             return tuple(completed)
         if is_v41 and cls._contains_any(text, ("代码", "实现", "规划器", "planner")):
             completed.append("实现 V4.1 回复规划器")
         if is_v41 and "同步" in text:
             completed.append("本地同步 V4.1 分支")
-        if is_v41 and "测试" in text:
+        if is_v41 and "测试" in text and cls._test_passed(text):
             completed.append("运行 V4.1 测试")
         if is_v41 and cls._contains_any(text, ("readme", "文档")):
             completed.append("补全 V4.1 文档")
@@ -100,7 +126,7 @@ class ConversationStateRuntimeStore(ConversationStateStore):
         text = re.sub(r"\s+", "", message.casefold())
         is_v41 = cls._is_v41(text)
         actions = [] if is_v41 else list(super()._action_candidates(message))
-        if is_v41 and cls._contains_any(text, ("测试通过", "ci通过", "全部通过")):
+        if is_v41 and cls._test_passed(text):
             actions.append("V4.1 回复规划器测试已通过")
         if is_v41 and cls._contains_any(text, ("代码写完", "实现完成", "已经实现")):
             actions.append("V4.1 回复规划器已实现")
@@ -130,8 +156,13 @@ class ConversationStateRuntimeStore(ConversationStateStore):
         interaction_mode = self.classify_interaction_mode(message, dialogue_act, mood)
 
         completed_threads = set(self._completed_thread_markers(message))
+        normalized_text = re.sub(r"\s+", "", message.casefold())
+        v41_phase_active = self._is_v41(normalized_text) or topic == "回复规划器"
+        superseded_threads = self._V40_SUPERSEDED_THREADS if v41_phase_active else frozenset()
         remaining_threads = tuple(
-            item for item in before.open_threads if item not in completed_threads
+            item
+            for item in before.open_threads
+            if item not in completed_threads and item not in superseded_threads
         )
         new_threads = tuple(
             item
