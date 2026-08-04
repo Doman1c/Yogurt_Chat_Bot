@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+TEST_ROOT="$TMP_DIR/plugin-test"
+mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
+
+cp "$REPO_ROOT/integrations/openclaw/index-v43.ts" "$TEST_ROOT/index-v43.ts"
+cp "$REPO_ROOT/integrations/openclaw/outbound-coordinator.ts" "$TEST_ROOT/outbound-coordinator.ts"
+
+cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
+{
+  "name": "openclaw",
+  "version": "0.0.0-test",
+  "type": "module",
+  "exports": {
+    "./plugin-sdk/plugin-entry": "./plugin-sdk/plugin-entry.js"
+  }
+}
+JSON
+
+cat > "$TEST_ROOT/node_modules/openclaw/plugin-sdk/plugin-entry.js" <<'JS'
+export function definePluginEntry(definition) {
+  return definition;
+}
+JS
+
+cat > "$TEST_ROOT/sticker-plugin-utils.ts" <<'TS'
+export function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+export function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+export function channelFromContext(ctx: any): string {
+  return optionalString(ctx?.channelId) || "openclaw-weixin";
+}
+
+export function senderIdFromContext(ctx: any): string | undefined {
+  return optionalString(ctx?.senderId);
+}
+
+export function contextAliases(
+  ctx: any,
+  channel: string,
+  senderId?: string,
+): string[] {
+  const aliases: string[] = [];
+  if (ctx?.sessionKey) aliases.push(`session:${ctx.sessionKey}`);
+  if (senderId) aliases.push(`sender:${channel}:${senderId}`);
+  return aliases;
+}
+TS
+
+cat > "$TEST_ROOT/index-v4.ts" <<'TS'
+export default {
+  register(api: any) {
+    api.on(
+      "before_prompt_build",
+      async () => ({
+        prependContext: [
+          "[Yogurt Response Plan V4.1]",
+          "本轮行为：acknowledge",
+          "建议长度：很短",
+          "建议气泡数：1",
+          "表情倾向：不建议",
+        ].join("\n"),
+      }),
+      { priority: 50 },
+    );
+
+    api.on(
+      "message_sending",
+      async (event: any, ctx: any) => {
+        if (event?.content === "parent") {
+          await api.testDispatch(
+            "message_sending",
+            { content: "child", to: event.to },
+            ctx,
+          );
+          return {
+            cancel: true,
+            cancelReason: "yogurt_multi_bubble",
+            metadata: { bubbleCount: 2 },
+          };
+        }
+        if (event?.content === "three bubbles") {
+          return {
+            cancel: true,
+            cancelReason: "yogurt_multi_bubble",
+            metadata: { bubbleCount: 3 },
+          };
+        }
+        return undefined;
+      },
+      { priority: 70 },
+    );
+  },
+};
+TS
+
+node --experimental-strip-types --input-type=module - "$TEST_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const testRoot = process.argv[2];
+const plugin = (await import(pathToFileURL(`${testRoot}/index-v43.ts`))).default;
+const hooks = new Map();
+const logs = [];
+const api = {
+  pluginConfig: {
+    unifiedOutboundShadowEnabled: true,
+    responsePlannerEnabled: true,
+  },
+  logger: {
+    info(message) { logs.push(String(message)); },
+    warn(message) { logs.push(String(message)); },
+  },
+  on(name, handler, options = {}) {
+    const items = hooks.get(name) || [];
+    items.push({ handler, priority: options.priority || 0 });
+    hooks.set(name, items);
+  },
+};
+
+async function dispatch(name, event, ctx) {
+  let result;
+  const ordered = [...(hooks.get(name) || [])].sort(
+    (left, right) => right.priority - left.priority,
+  );
+  for (const item of ordered) {
+    const current = await item.handler(event, ctx);
+    if (current !== undefined) result = current;
+  }
+  return result;
+}
+api.testDispatch = dispatch;
+plugin.register(api);
+
+const ctx = {
+  channelId: "openclaw-weixin",
+  senderId: "wx-owner@im.wechat",
+  sessionKey: "session-v43",
+};
+await dispatch("before_prompt_build", { prompt: "好的" }, ctx);
+await dispatch(
+  "message_sending",
+  {
+    content: "three bubbles",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.ok(logs.some((value) => value.includes("v4.3 outbound intent ready")));
+assert.ok(logs.some((value) => value.includes("targetBubbles=1")));
+assert.ok(logs.some((value) => value.includes("actualBubbles=3")));
+assert.ok(logs.some((value) => value.includes("matched=false")));
+assert.ok(logs.some((value) => value.includes("actual_bubbles_exceeded_target")));
+
+logs.length = 0;
+await dispatch("before_prompt_build", { prompt: "收到" }, ctx);
+await dispatch(
+  "message_sending",
+  {
+    content: "parent",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.equal(
+  logs.filter((value) => value.includes("v4.3 outbound shadow")).length,
+  1,
+  "recursive child bubbles must not consume or report the parent intent",
+);
+assert.ok(logs.some((value) => value.includes("actualBubbles=2")));
+
+logs.length = 0;
+api.pluginConfig.unifiedOutboundShadowEnabled = false;
+await dispatch("before_prompt_build", { prompt: "关闭" }, ctx);
+await dispatch(
+  "message_sending",
+  {
+    content: "three bubbles",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.equal(logs.some((value) => value.includes("v4.3 outbound shadow")), false);
+
+console.log("v4.3 shadow outbound runtime: ok");
+JS
