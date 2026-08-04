@@ -7,7 +7,9 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 DB_PATH="$TMP_DIR/state.sqlite3"
 
-python3 -m pytest -q "$REPO_ROOT/social_layer/tests/test_conversation_state.py"
+python3 -m pytest -q \
+  "$REPO_ROOT/social_layer/tests/test_conversation_state.py" \
+  "$REPO_ROOT/social_layer/tests/test_response_planner.py"
 
 printf '%s' '{"user_id":"owner","conversation_key":"session:v4-test","phase":"user","message":"开始编写 V4 代码，然后本地同步，再开始测试"}' \
   | python3 -m yogurt_social.conversation_state_observer --db "$DB_PATH" \
@@ -17,7 +19,11 @@ printf '%s' '{"user_id":"owner","conversation_key":"session:v4-test","phase":"as
   | python3 -m yogurt_social.conversation_state_observer --db "$DB_PATH" \
   > "$TMP_DIR/assistant.json"
 
-python3 - "$TMP_DIR/user.json" "$TMP_DIR/assistant.json" <<'PY'
+printf '%s' '{"user_id":"owner","conversation_key":"session:v41-plan","phase":"user","message":"开始 4.1 吧，先实现 Response Planner","include_response_plan":true}' \
+  | python3 -m yogurt_social.conversation_state_observer --db "$DB_PATH" \
+  > "$TMP_DIR/planner.json"
+
+python3 - "$TMP_DIR/user.json" "$TMP_DIR/assistant.json" "$TMP_DIR/planner.json" <<'PY'
 import json
 import sys
 
@@ -25,15 +31,28 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     user = json.load(handle)
 with open(sys.argv[2], encoding="utf-8") as handle:
     assistant = json.load(handle)
+with open(sys.argv[3], encoding="utf-8") as handle:
+    planner = json.load(handle)
 
 assert user["ok"] is True
 assert user["mode"] == "observe_only"
 assert user["state"]["current_topic"] == "Yogurt V4 开发"
 assert user["state"]["dialogue_act"] == "plan"
 assert len(user["state"]["open_threads"]) == 3
+assert user["response_plan"] is None
 assert assistant["ok"] is True
 assert assistant["state"]["last_response_pattern"] == "technical_code"
 assert assistant["state"]["state_version"] == 2
+
+assert planner["ok"] is True
+assert planner["mode"] == "response_planner"
+assert planner["state"]["current_topic"] == "回复规划器"
+assert planner["state"]["open_threads"] == ["实现 V4.1 回复规划器"]
+assert planner["response_plan"]["primary_goal"] == "advance_current_project"
+assert planner["response_plan"]["bubble_target"] == 2
+assert planner["response_plan"]["ask_followup"] is False
+assert planner["response_plan_context"].startswith("[Yogurt Response Plan V4.1]")
+assert "开始 4.1 吧" not in planner["response_plan_context"]
 PY
 
 python3 -m yogurt_social.conversation_state_review \
@@ -55,4 +74,4 @@ PY
 node --experimental-strip-types --check \
   "$REPO_ROOT/integrations/openclaw/index-v4.ts"
 
-echo "v4 conversation state: ok"
+echo "v4 state and v4.1 response planner: ok"

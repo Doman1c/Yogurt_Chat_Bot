@@ -119,15 +119,40 @@ with open(os.environ["V4_OBSERVER_LOG"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps(request, ensure_ascii=False) + "\n")
 phase = request["phase"]
 state = {
-    "current_topic": "Yogurt V4 开发",
+    "current_topic": "回复规划器",
     "dialogue_act": "plan",
     "user_mood": "neutral",
     "interaction_mode": "technical",
-    "open_threads": ["实现 V4.0 会话状态"],
+    "open_threads": ["实现 V4.1 回复规划器"],
     "last_response_pattern": None if phase == "user" else "concise",
     "state_version": 1 if phase == "user" else 2,
 }
-print(json.dumps({"ok": True, "phase": phase, "state": state}, ensure_ascii=False))
+response_plan = None
+response_plan_context = ""
+if phase == "user" and request.get("include_response_plan") is True:
+    response_plan = {
+        "plan_version": "4.1",
+        "dialogue_act": "plan",
+        "primary_goal": "advance_current_project",
+        "reply_length": "medium",
+        "ask_followup": False,
+        "bubble_target": 2,
+        "sticker_preference": "neutral",
+        "state_version": 1,
+    }
+    response_plan_context = "\n".join([
+        "[Yogurt Response Plan V4.1]",
+        "本轮行为：plan",
+        "首要目标：推进当前项目的下一步",
+        "主动追问：否",
+    ])
+print(json.dumps({
+    "ok": True,
+    "phase": phase,
+    "state": state,
+    "response_plan": response_plan,
+    "response_plan_context": response_plan_context,
+}, ensure_ascii=False))
 PY
 
 V4_TEST_PYTHON="$PYTHON_BIN" \
@@ -148,6 +173,8 @@ const api = {
   pluginConfig: {
     conversationStateEnabled: true,
     conversationStateTimeoutMs: 2500,
+    responsePlannerEnabled: true,
+    responsePlannerMaxContextChars: 1600,
   },
   logger: {
     info(message) { logs.push(String(message)); },
@@ -183,13 +210,15 @@ async function dispatch(name, event, ctx) {
 const inboundCtx = {
   channelId: "openclaw-weixin",
   senderId: "wx-owner@im.wechat",
-  sessionKey: "session-v4",
+  sessionKey: "session-v41",
 };
-await dispatch(
+const promptResult = await dispatch(
   "before_prompt_build",
-  { prompt: "开始编写 V4 代码" },
+  { prompt: "开始 4.1 吧" },
   inboundCtx,
 );
+assert.ok(promptResult?.prependContext?.startsWith("[Yogurt Response Plan V4.1]"));
+assert.ok(promptResult.prependContext.includes("主动追问：否"));
 
 const fullReply = "代码已经准备好了，我们开始测试。";
 const result = await dispatch(
@@ -223,14 +252,16 @@ const observerLog = readFileSync(process.env.V4_OBSERVER_LOG, "utf8")
   .split("\n")
   .map((line) => JSON.parse(line));
 assert.deepEqual(observerLog.map((item) => item.phase), ["user", "assistant"]);
-assert.equal(observerLog[0].conversation_key, "session:session-v4");
+assert.equal(observerLog[0].conversation_key, "session:session-v41");
+assert.equal(observerLog[0].include_response_plan, true);
 assert.equal(observerLog[1].assistant_reply, fullReply);
 assert.ok(logs.some((message) => message.includes("phase=user")));
+assert.ok(logs.some((message) => message.includes("v4 response plan ready")));
 assert.ok(logs.some((message) => message.includes("phase=assistant")));
 assert.equal(
   logs.filter((message) => message.includes("phase=assistant")).length,
   1,
   "child bubbles must not create another assistant observation",
 );
-console.log("v4 observe-only runtime: ok");
+console.log("v4.1 response planner runtime: ok");
 JS

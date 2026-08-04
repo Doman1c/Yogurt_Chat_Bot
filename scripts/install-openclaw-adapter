@@ -152,6 +152,8 @@ patch = {
                     "conversationStateThreadTtlMinutes": 1440,
                     "conversationStateMaxOpenThreads": 5,
                     "conversationStateMaxRecentActions": 6,
+                    "responsePlannerEnabled": False,
+                    "responsePlannerMaxContextChars": 1600,
                 },
             }
         }
@@ -177,4 +179,4 @@ else
   echo "Gateway restart skipped. Run: openclaw gateway restart"
 fi
 
-echo "Yogurt OpenClaw adapter installed. Stickers, V3 alpha features, and V4 conversation state remain disabled until explicitly enabled."
+echo "Yogurt OpenClaw adapter installed. Stickers, V3 features, V4 state, and V4.1 response planning remain disabled until explicitly enabled."
