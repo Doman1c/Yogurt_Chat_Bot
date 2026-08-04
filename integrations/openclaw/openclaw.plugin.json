@@ -1,8 +1,8 @@
 {
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
-  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, and opt-in V4 conversation-state observation.",
-  "version": "0.6.0-alpha.1",
+  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, and opt-in V4.1 response planning.",
+  "version": "0.6.1-alpha.1",
   "activation": {
     "onStartup": true
   },
@@ -179,6 +179,16 @@
         "minimum": 1,
         "maximum": 20,
         "default": 6
+      },
+      "responsePlannerEnabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "responsePlannerMaxContextChars": {
+        "type": "integer",
+        "minimum": 300,
+        "maximum": 1800,
+        "default": 1600
       }
     }
   }
