@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 TEST_ROOT="$TMP_DIR/plugin-test"
+PYTHON_BIN="$(command -v python3)"
 mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
 cp "$REPO_ROOT/integrations/openclaw/index-v4.ts" "$TEST_ROOT/index-v4.ts"
 
@@ -91,7 +92,7 @@ export function resolveUserId(): string {
 export function readConfig(api: any): any {
   return {
     enabled: true,
-    pythonPath: api.fakePython,
+    pythonPath: process.env.V4_TEST_PYTHON || "python3",
     repoPath: api.testRoot,
     dbPath: `${api.testRoot}/state.sqlite3`,
     allowedChannels: [],
@@ -104,9 +105,11 @@ export function readConfig(api: any): any {
 }
 TS
 
-mkdir -p "$TEST_ROOT/social_layer/src"
-cat > "$TEST_ROOT/fake-python" <<'PY'
-#!/usr/bin/env python3
+mkdir -p "$TEST_ROOT/social_layer/src/yogurt_social"
+cat > "$TEST_ROOT/social_layer/src/yogurt_social/__init__.py" <<'PY'
+"""Temporary test package for the V4 observer runtime simulation."""
+PY
+cat > "$TEST_ROOT/social_layer/src/yogurt_social/conversation_state_observer.py" <<'PY'
 import json
 import os
 import sys
@@ -117,7 +120,7 @@ with open(os.environ["V4_OBSERVER_LOG"], "a", encoding="utf-8") as handle:
 phase = request["phase"]
 state = {
     "current_topic": "Yogurt V4 开发",
-    "dialogue_act": "plan" if phase == "user" else "plan",
+    "dialogue_act": "plan",
     "user_mood": "neutral",
     "interaction_mode": "technical",
     "open_threads": ["实现 V4.0 会话状态"],
@@ -126,12 +129,12 @@ state = {
 }
 print(json.dumps({"ok": True, "phase": phase, "state": state}, ensure_ascii=False))
 PY
-chmod +x "$TEST_ROOT/fake-python"
 
+V4_TEST_PYTHON="$PYTHON_BIN" \
 V4_OBSERVER_LOG="$TMP_DIR/observer.jsonl" \
 node --experimental-strip-types --input-type=module - "$TEST_ROOT" <<'JS'
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const testRoot = process.argv[2];
@@ -141,7 +144,6 @@ const logs = [];
 const trace = [];
 const api = {
   testRoot,
-  fakePython: `${testRoot}/fake-python`,
   trace,
   pluginConfig: {
     conversationStateEnabled: true,
@@ -212,6 +214,10 @@ await dispatch(
   { channelId: "openclaw-weixin" },
 );
 
+assert.ok(
+  existsSync(process.env.V4_OBSERVER_LOG),
+  `observer log missing; runtime logs: ${logs.join(" | ")}`,
+);
 const observerLog = readFileSync(process.env.V4_OBSERVER_LOG, "utf8")
   .trim()
   .split("\n")
