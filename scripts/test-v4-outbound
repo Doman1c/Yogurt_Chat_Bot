@@ -60,14 +60,17 @@ const mismatch = compareOutboundResult(
     actualBubbleCount: 3,
     textChars: 88,
     outcome: "split",
-    stickerOutcome: "unknown",
+    stickerOutcome: "pending",
+    stickerReason: "delivery_scheduled",
   },
 );
 assert.equal(mismatch.bubbleTargetMatched, false);
 assert.equal(mismatch.bubbleDelta, 2);
 assert.ok(mismatch.reasons.includes("actual_bubbles_exceeded_target"));
+assert.ok(mismatch.reasons.includes("sticker_pending"));
 assert.ok(formatOutboundComparison(mismatch).includes("targetBubbles=1"));
 assert.ok(formatOutboundComparison(mismatch).includes("actualBubbles=3"));
+assert.ok(formatOutboundComparison(mismatch).includes("stickerReason=delivery_scheduled"));
 
 const matched = compareOutboundResult(
   outboundIntentFromResponsePlan({ bubble_target: 2, state_version: 12 }),
@@ -75,12 +78,15 @@ const matched = compareOutboundResult(
     actualBubbleCount: 2,
     textChars: 45,
     outcome: "split",
-    stickerOutcome: "selected",
+    stickerOutcome: "skipped",
+    stickerReason: "policy_rejected",
   },
 );
 assert.equal(matched.bubbleTargetMatched, true);
 assert.equal(matched.bubbleDelta, 0);
-assert.deepEqual(matched.reasons, ["bubble_target_matched"]);
+assert.ok(matched.reasons.includes("bubble_target_matched"));
+assert.ok(matched.reasons.includes("sticker_skipped"));
+assert.ok(formatOutboundComparison(matched).includes("sticker=skipped"));
 
 const partial = compareOutboundResult(
   outboundIntentFromResponsePlan({ bubble_target: 3, state_version: 13 }),
@@ -89,10 +95,17 @@ const partial = compareOutboundResult(
     textChars: 72,
     outcome: "partial",
     stickerOutcome: "failed",
+    stickerReason: "weixin_send_media_unavailable",
   },
 );
 assert.ok(partial.reasons.includes("actual_bubbles_below_target"));
 assert.ok(partial.reasons.includes("partial_delivery"));
+assert.ok(partial.reasons.includes("sticker_failed"));
+assert.ok(
+  formatOutboundComparison(partial).includes(
+    "stickerReason=weixin_send_media_unavailable",
+  ),
+);
 
 console.log("v4.3 outbound coordinator model: ok");
 JS
