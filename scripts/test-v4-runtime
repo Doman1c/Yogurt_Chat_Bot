@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+TEST_ROOT="$TMP_DIR/plugin-test"
+mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
+cp "$REPO_ROOT/integrations/openclaw/index-v4.ts" "$TEST_ROOT/index-v4.ts"
+
+cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
+{
+  "name": "openclaw",
+  "version": "0.0.0-test",
+  "type": "module",
+  "exports": {
+    "./plugin-sdk/plugin-entry": "./plugin-sdk/plugin-entry.js"
+  }
+}
+JSON
+
+cat > "$TEST_ROOT/node_modules/openclaw/plugin-sdk/plugin-entry.js" <<'JS'
+export function definePluginEntry(definition) {
+  return definition;
+}
+JS
+
+cat > "$TEST_ROOT/index-v3.ts" <<'TS'
+export default {
+  register(api: any) {
+    api.on(
+      "message_sending",
+      async (event: any) => {
+        api.trace.push({ step: "multi-bubble", text: event.content });
+        return { cancel: true };
+      },
+      { priority: 70 },
+    );
+  },
+};
+TS
+
+cat > "$TEST_ROOT/sticker-v21-utils.ts" <<'TS'
+export function assistantTextFromEvent(event: any): string | undefined {
+  return typeof event?.content === "string" ? event.content : undefined;
+}
+TS
+
+cat > "$TEST_ROOT/sticker-plugin-utils.ts" <<'TS'
+export function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+export function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+export function senderIdFromContext(ctx: any): string | undefined {
+  return optionalString(ctx?.senderId);
+}
+
+export function channelFromContext(ctx: any): string {
+  return optionalString(ctx?.channelId) || "unknown";
+}
+
+export function channelIsAllowed(): boolean {
+  return true;
+}
+
+export function contextAliases(
+  ctx: any,
+  channel: string,
+  senderId?: string,
+): string[] {
+  const values: string[] = [];
+  if (ctx?.sessionKey) values.push(`session:${ctx.sessionKey}`);
+  if (senderId) values.push(`sender:${channel}:${senderId}`);
+  return values;
+}
+
+export function preferredPolicyKey(aliases: string[]): string {
+  return aliases.find((value) => value.startsWith("session:")) || aliases[0] || "unknown";
+}
+
+export function resolveUserId(): string {
+  return "owner";
+}
+
+export function readConfig(api: any): any {
+  return {
+    enabled: true,
+    pythonPath: api.fakePython,
+    repoPath: api.testRoot,
+    dbPath: `${api.testRoot}/state.sqlite3`,
+    allowedChannels: [],
+    onlyUserTurns: true,
+    defaultUserId: "owner",
+    senderMap: {},
+    ownerSenderIds: [],
+    unknownSenderPolicy: "default",
+  };
+}
+TS
+
+mkdir -p "$TEST_ROOT/social_layer/src"
+cat > "$TEST_ROOT/fake-python" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+request = json.load(sys.stdin)
+with open(os.environ["V4_OBSERVER_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(request, ensure_ascii=False) + "\n")
+phase = request["phase"]
+state = {
+    "current_topic": "Yogurt V4 开发",
+    "dialogue_act": "plan" if phase == "user" else "plan",
+    "user_mood": "neutral",
+    "interaction_mode": "technical",
+    "open_threads": ["实现 V4.0 会话状态"],
+    "last_response_pattern": None if phase == "user" else "concise",
+    "state_version": 1 if phase == "user" else 2,
+}
+print(json.dumps({"ok": True, "phase": phase, "state": state}, ensure_ascii=False))
+PY
+chmod +x "$TEST_ROOT/fake-python"
+
+V4_OBSERVER_LOG="$TMP_DIR/observer.jsonl" \
+node --experimental-strip-types --input-type=module - "$TEST_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const testRoot = process.argv[2];
+const plugin = (await import(pathToFileURL(`${testRoot}/index-v4.ts`))).default;
+const hooks = new Map();
+const logs = [];
+const trace = [];
+const api = {
+  testRoot,
+  fakePython: `${testRoot}/fake-python`,
+  trace,
+  pluginConfig: {
+    conversationStateEnabled: true,
+    conversationStateTimeoutMs: 2500,
+  },
+  logger: {
+    info(message) { logs.push(String(message)); },
+    warn(message) { logs.push(String(message)); },
+  },
+  on(name, handler, options = {}) {
+    const items = hooks.get(name) || [];
+    items.push({ handler, priority: options.priority || 0 });
+    hooks.set(name, items);
+  },
+};
+
+plugin.register(api);
+assert.deepEqual(
+  (hooks.get("message_sending") || [])
+    .map((item) => item.priority)
+    .sort((a, b) => b - a),
+  [75, 70],
+);
+
+async function dispatch(name, event, ctx) {
+  let result;
+  const ordered = [...(hooks.get(name) || [])].sort(
+    (left, right) => right.priority - left.priority,
+  );
+  for (const item of ordered) {
+    const current = await item.handler(event, ctx);
+    if (current !== undefined) result = current;
+  }
+  return result;
+}
+
+const inboundCtx = {
+  channelId: "openclaw-weixin",
+  senderId: "wx-owner@im.wechat",
+  sessionKey: "session-v4",
+};
+await dispatch(
+  "before_prompt_build",
+  { prompt: "开始编写 V4 代码" },
+  inboundCtx,
+);
+
+const fullReply = "代码已经准备好了，我们开始测试。";
+const result = await dispatch(
+  "message_sending",
+  {
+    content: fullReply,
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  { channelId: "openclaw-weixin" },
+);
+assert.equal(result.cancel, true);
+assert.deepEqual(trace, [{ step: "multi-bubble", text: fullReply }]);
+
+await dispatch(
+  "message_sending",
+  {
+    content: "开始测试。",
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  { channelId: "openclaw-weixin" },
+);
+
+const observerLog = readFileSync(process.env.V4_OBSERVER_LOG, "utf8")
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line));
+assert.deepEqual(observerLog.map((item) => item.phase), ["user", "assistant"]);
+assert.equal(observerLog[0].conversation_key, "session:session-v4");
+assert.equal(observerLog[1].assistant_reply, fullReply);
+assert.ok(logs.some((message) => message.includes("phase=user")));
+assert.ok(logs.some((message) => message.includes("phase=assistant")));
+assert.equal(
+  logs.filter((message) => message.includes("phase=assistant")).length,
+  1,
+  "child bubbles must not create another assistant observation",
+);
+console.log("v4 observe-only runtime: ok");
+JS
