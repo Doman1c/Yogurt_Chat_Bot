@@ -38,6 +38,8 @@ def test_completion_is_celebration_and_closes_v41_thread(tmp_path):
     assert "实现 V4.1 回复规划器" not in state.open_threads
     assert "V4.1 回复规划器已实现" in state.recent_actions
     assert "V4.1 回复规划器测试已通过" in state.recent_actions
+    assert "V4.0 状态引擎已实现" not in state.recent_actions
+    assert "V4.0 测试已通过" not in state.recent_actions
     assert plan.primary_goal == "acknowledge_achievement"
     assert plan.reply_length == "short"
     assert plan.sticker_preference == "celebration"
