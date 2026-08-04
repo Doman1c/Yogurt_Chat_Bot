@@ -134,7 +134,12 @@ def test_explicit_recall_request_can_override_cooldown(tmp_path):
     db_path = tmp_path / "memory.sqlite3"
     memory = MemoryStore(db_path)
     memory.add_fact("owner", "school", "哥大 BME", confidence=1.0)
-    gate = MemoryRecallGate(db_path, cooldown_turns=8, same_memory_cooldown_turns=20)
+    gate = MemoryRecallGate(
+        db_path,
+        min_score=0.44,
+        cooldown_turns=8,
+        same_memory_cooldown_turns=20,
+    )
     first_message = "哥大 BME 的课程安排怎么规划"
     first_state = _state(db_path, "owner", "session:explicit", first_message)
     first = gate.evaluate(
