@@ -32,7 +32,7 @@ jobs:
       - name: Install test dependency
         run: python -m pip install pytest
 
-      - name: Run adapter, sticker, and V3 tests
+      - name: Run adapter, sticker, V3, and V4 tests
         run: |
           bash scripts/test-openclaw-adapter
           bash scripts/test-sticker-explicit-fallback
@@ -41,3 +41,5 @@ jobs:
           bash scripts/test-v3
           bash scripts/test-v3-runtime
           bash scripts/test-v3-sticker-bubble-order
+          bash scripts/test-v4-state
+          bash scripts/test-v4-runtime
