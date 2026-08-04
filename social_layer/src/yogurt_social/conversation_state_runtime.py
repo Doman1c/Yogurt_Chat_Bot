@@ -36,6 +36,11 @@ class ConversationStateRuntimeStore(ConversationStateStore):
             ),
         ):
             return "celebrate"
+        if cls._contains_any(
+            text,
+            ("继续", "接着", "就按照", "还是刚才", "上一步", "下一步继续"),
+        ):
+            return "continue"
         return super().classify_dialogue_act(message)
 
     @classmethod
