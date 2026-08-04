@@ -44,3 +44,4 @@ jobs:
           bash scripts/test-v4-state
           bash scripts/test-v4-runtime
           bash scripts/test-v4-outbound
+          bash scripts/test-v4-outbound-runtime
