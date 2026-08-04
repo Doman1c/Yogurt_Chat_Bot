@@ -1,8 +1,8 @@
 {
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
-  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, V4.1 response planning, V4.2 shadow recall gating, and opt-in V4.3 shadow outbound coordination.",
-  "version": "0.6.3-alpha.1",
+  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, V4.1 response planning, V4.2 shadow recall gating, and opt-in V4.3 shadow/enforced outbound coordination.",
+  "version": "0.6.3-alpha.2",
   "activation": {
     "onStartup": true
   },
@@ -219,6 +219,10 @@
         "default": 5
       },
       "unifiedOutboundShadowEnabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "unifiedOutboundEnforceEnabled": {
         "type": "boolean",
         "default": false
       }
