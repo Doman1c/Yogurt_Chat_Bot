@@ -33,7 +33,14 @@
           "multiBubbleMinChars": 24,
           "multiBubbleMaxChars": 360,
           "multiBubbleMaxBubbles": 3,
-          "multiBubbleDelayMs": 420
+          "multiBubbleDelayMs": 420,
+          "conversationStateEnabled": false,
+          "conversationStateTimeoutMs": 2500,
+          "conversationStateTopicTtlMinutes": 60,
+          "conversationStateMoodTtlMinutes": 30,
+          "conversationStateThreadTtlMinutes": 1440,
+          "conversationStateMaxOpenThreads": 5,
+          "conversationStateMaxRecentActions": 6
         }
       }
     }
