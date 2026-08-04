@@ -86,71 +86,21 @@ V4.3 不负责：
 
 ### V4.3b：Shadow Coordinator
 
-- V4 observer 复用同一次调用生成 ResponsePlan；
+- V4 observer 在需要时生成 ResponsePlan；
 - 将白名单字段注册为 OutboundIntent；
 - V3 multi-bubble 报告实际结果；
 - 输出 `targetBubbles / actualBubbles / delta` 日志；
 - 仍由 V3 原逻辑决定实际发送。
 
-Shadow 开关默认关闭：
-
-```json
-{
-  "unifiedOutboundShadowEnabled": false
-}
-```
-
 ### V4.3c：Enforced Coordinator
 
-强制协调开关同样默认关闭：
-
-```json
-{
-  "unifiedOutboundEnforceEnabled": false
-}
-```
-
-开启后：
-
-- `bubbleTarget=1` 时跳过旧多气泡拆分，让原始文本作为一个气泡发送；
-- `bubbleTarget=2/3` 时仅在存在足够自然边界时直接按目标数量发送；
-- Coordinator 子气泡通过 `AsyncLocalStorage` 跳过旧 V3 拆分，避免递归；
-- 发送成功后取消父级原消息，防止重复；
-- 部分发送失败时取消父级原消息，并记录已发送数量；
-- 首条发送前失败、adapter 不可用或内容不适合强制拆分时回退旧 V3 链路；
-- 回退和部分发送均记录固定、有限的原因码。
-
-安全回退原因包括：
-
-```text
-media_passthrough
-code_block_passthrough
-link_passthrough
-list_passthrough
-structured_text_passthrough
-text_below_split_minimum
-text_above_split_maximum
-natural_boundary_count_mismatch
-target_missing
-channel_not_supported
-adapter_loader_unavailable
-adapter_send_text_unavailable
-adapter_send_failed_before_first
-```
-
-成功示例：
-
-```text
-yogurt-social-injector: v4.3 outbound enforced targetBubbles=2 actualBubbles=2 matched=true delta=0 outcome=split sticker=unknown textChars=84 stateVersion=0 reasons=bubble_target_matched,enforced_target_applied
-```
-
-安全回退示例：
-
-```text
-yogurt-social-injector: v4.3 outbound enforced targetBubbles=2 actualBubbles=1 matched=false delta=-1 outcome=single sticker=unknown textChars=180 stateVersion=0 reasons=actual_bubbles_below_target,enforcement_fallback:code_block_passthrough
-```
-
-`stateVersion=0` 是 V4.3 当前从人类可读 Planner Context 读取目标时的已知限制，不表示 Conversation State 丢失。后续内部结构化通道可消除这一限制。
+- 统一计划成为实际发送的唯一入口；
+- 在安全约束允许时，使实际气泡数等于目标；
+- 代码块、长技术回复、媒体消息和发送失败可以安全降级；
+- 降级必须记录明确原因；
+- 当旧 V3 对降级消息没有返回修改或取消结果时，Coordinator 显式返回 `{ content, cancel: false }`，确保宿主继续投递原父消息；
+- 日志增加 `hostAction=explicit_passthrough|legacy_result|coordinator_delivery`，用于实机确认最终投递路径；
+- Sticker finalizer 与文本发送共享同一 Turn。
 
 ## 关键验收
 
@@ -161,39 +111,13 @@ yogurt-social-injector: v4.3 outbound enforced targetBubbles=2 actualBubbles=1 m
 允许的例外：
 
 - 文本无法安全拆成目标数量；
-- 代码、链接、列表、长技术内容禁止强拆；
+- 代码、链接、长技术内容禁止拆分；
 - 已携带媒体；
 - outbound adapter 不可用；
 - 部分发送失败；
 - 功能关闭或运行时异常。
 
-所有例外必须 fail-open，并记录结构化原因。
-
-## 开关组合
-
-Shadow 验证：
-
-```json
-{
-  "responsePlannerEnabled": true,
-  "multiBubbleEnabled": true,
-  "unifiedOutboundShadowEnabled": true,
-  "unifiedOutboundEnforceEnabled": false
-}
-```
-
-Enforced 验证：
-
-```json
-{
-  "responsePlannerEnabled": true,
-  "multiBubbleEnabled": true,
-  "unifiedOutboundShadowEnabled": false,
-  "unifiedOutboundEnforceEnabled": true
-}
-```
-
-不要在首次实机验证时同时打开 Shadow 和 Enforced，以便日志含义保持清晰。
+所有例外必须 fail-open，并记录结构化原因。对于单条原文回退，日志还必须显示 `hostAction=explicit_passthrough`，且微信端收到完整原文而不是空响应提示。
 
 ## 安全边界
 
@@ -203,6 +127,4 @@ Enforced 验证：
 - 每个计划只能消费一次；
 - 子气泡不得再次消费父级计划；
 - 任何协调失败都保留原始 V3 文本链路；
-- 不覆盖本地 Sticker 阈值或运行配置；
-- 不增加第二次聊天模型推理；
-- 不保存用户或助手正文。
+- 不覆盖本地 Sticker 阈值或运行配置。
