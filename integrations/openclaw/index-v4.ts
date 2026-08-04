@@ -20,6 +20,7 @@ import {
 
 const PLUGIN_ID = "yogurt-social-injector";
 const WEIXIN_CHANNEL = "openclaw-weixin";
+const RESPONSE_PLAN_MARKER = "[Yogurt Response Plan V4.1]";
 const MAX_PENDING_TURNS = 200;
 const TURN_TTL_MS = 15 * 60 * 1000;
 const MAX_OBSERVER_OUTPUT_BYTES = 256 * 1024;
@@ -32,6 +33,8 @@ type V4Config = {
   conversationStateThreadTtlMinutes: number;
   conversationStateMaxOpenThreads: number;
   conversationStateMaxRecentActions: number;
+  responsePlannerEnabled: boolean;
+  responsePlannerMaxContextChars: number;
 };
 
 type PendingStateTurn = {
@@ -45,6 +48,8 @@ type ObserverResult = {
   ok?: boolean;
   phase?: string;
   state?: Record<string, unknown>;
+  response_plan?: Record<string, unknown> | null;
+  response_plan_context?: string;
   error?: string;
   error_type?: string;
 };
@@ -107,7 +112,18 @@ function readV4Config(api: any, event?: any): V4Config {
       1,
       20,
     ),
+    responsePlannerEnabled: booleanValue(raw.responsePlannerEnabled, false),
+    responsePlannerMaxContextChars: integerValue(
+      raw.responsePlannerMaxContextChars,
+      1600,
+      300,
+      1800,
+    ),
   };
+}
+
+function v4RuntimeEnabled(config: V4Config): boolean {
+  return config.conversationStateEnabled || config.responsePlannerEnabled;
 }
 
 function eventMetadata(event: any): Record<string, unknown> {
@@ -318,11 +334,33 @@ function compactStateLog(result: ObserverResult): string {
   ].join(" ");
 }
 
+function compactPlanLog(result: ObserverResult): string {
+  const plan = asRecord(result.response_plan);
+  return [
+    `act=${optionalString(plan.dialogue_act) || "none"}`,
+    `goal=${optionalString(plan.primary_goal) || "none"}`,
+    `length=${optionalString(plan.reply_length) || "none"}`,
+    `bubbles=${typeof plan.bubble_target === "number" ? plan.bubble_target : 0}`,
+    `followup=${plan.ask_followup === true}`,
+    `sticker=${optionalString(plan.sticker_preference) || "neutral"}`,
+    `stateVersion=${typeof plan.state_version === "number" ? plan.state_version : 0}`,
+  ].join(" ");
+}
+
+function responsePlanContext(
+  result: ObserverResult,
+  config: V4Config,
+): string | undefined {
+  const value = optionalString(result.response_plan_context);
+  if (!value || !value.startsWith(RESPONSE_PLAN_MARKER)) return undefined;
+  return value.slice(0, config.responsePlannerMaxContextChars);
+}
+
 export default definePluginEntry({
   id: PLUGIN_ID,
   name: "Yogurt Social Injector",
   description:
-    "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, and opt-in V4 conversation-state observation.",
+    "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, and opt-in V4.1 response planning.",
   register(api: any) {
     const pendingTurns = new PendingStateTurnStore();
     (v3Plugin as any).register(api);
@@ -332,7 +370,7 @@ export default definePluginEntry({
       async (event: any, ctx: any) => {
         const baseConfig = readConfig(api, event);
         const config = readV4Config(api, event);
-        if (!baseConfig.enabled || !config.conversationStateEnabled) return;
+        if (!baseConfig.enabled || !v4RuntimeEnabled(config)) return;
         const prompt = optionalString(event?.prompt);
         if (!prompt || ctx?.jobId) return;
         const channel = channelFromContext(ctx);
@@ -349,6 +387,7 @@ export default definePluginEntry({
             conversation_key: conversationKey,
             phase: "user",
             message: prompt,
+            include_response_plan: config.responsePlannerEnabled,
           });
           pendingTurns.register({
             userId,
@@ -358,11 +397,24 @@ export default definePluginEntry({
           api.logger.info(
             `${PLUGIN_ID}: v4 state observed phase=user ${compactStateLog(result)}`,
           );
+          if (!config.responsePlannerEnabled) return;
+          const planContext = responsePlanContext(result, config);
+          if (!planContext) {
+            api.logger.warn(
+              `${PLUGIN_ID}: v4 response plan unavailable (missing_or_invalid_context); chat preserved`,
+            );
+            return;
+          }
+          api.logger.info(
+            `${PLUGIN_ID}: v4 response plan ready ${compactPlanLog(result)} contextChars=${planContext.length}`,
+          );
+          return { prependContext: planContext };
         } catch (error) {
           const reason = error instanceof Error ? error.message : "unknown_error";
           api.logger.warn(
             `${PLUGIN_ID}: v4 state unavailable phase=user (${reason}); chat preserved`,
           );
+          return;
         }
       },
       { priority: 50, timeoutMs: 12000 },
@@ -370,7 +422,7 @@ export default definePluginEntry({
 
     const observeAssistant = async (event: any, ctx: any, text: string) => {
       const config = readV4Config(api, event);
-      if (!config.conversationStateEnabled) return;
+      if (!v4RuntimeEnabled(config)) return;
       const pending = pendingTurns.consume(event, ctx);
       if (!pending) return;
       try {
@@ -416,7 +468,7 @@ export default definePluginEntry({
     });
 
     api.logger.info(
-      `${PLUGIN_ID}: V4.0 observe-only conversation-state runtime registered`,
+      `${PLUGIN_ID}: V4 state runtime and optional V4.1 response planner registered`,
     );
   },
 });
