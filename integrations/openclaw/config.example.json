@@ -42,7 +42,12 @@
           "conversationStateMaxOpenThreads": 5,
           "conversationStateMaxRecentActions": 6,
           "responsePlannerEnabled": false,
-          "responsePlannerMaxContextChars": 1600
+          "responsePlannerMaxContextChars": 1600,
+          "memoryRecallGateEnabled": false,
+          "memoryRecallMinScore": 0.48,
+          "memoryRecallCooldownTurns": 8,
+          "memoryRecallSameMemoryCooldownTurns": 20,
+          "memoryRecallMaxCandidates": 5
         }
       }
     }

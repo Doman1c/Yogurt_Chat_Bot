@@ -1,8 +1,8 @@
 {
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
-  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, and opt-in V4.1 response planning.",
-  "version": "0.6.1-alpha.1",
+  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, V4.1 response planning, and opt-in V4.2 shadow recall gating.",
+  "version": "0.6.2-alpha.1",
   "activation": {
     "onStartup": true
   },
@@ -189,6 +189,34 @@
         "minimum": 300,
         "maximum": 1800,
         "default": 1600
+      },
+      "memoryRecallGateEnabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "memoryRecallMinScore": {
+        "type": "number",
+        "minimum": 0.2,
+        "maximum": 0.95,
+        "default": 0.48
+      },
+      "memoryRecallCooldownTurns": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100,
+        "default": 8
+      },
+      "memoryRecallSameMemoryCooldownTurns": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 300,
+        "default": 20
+      },
+      "memoryRecallMaxCandidates": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 5
       }
     }
   }

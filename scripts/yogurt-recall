@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
+DB_PATH="${YOGURT_SOCIAL_DB:-$HOME/.openclaw/yogurt-social/memory.sqlite3}"
+
+exec python3 -m yogurt_social.memory_recall_review --db "$DB_PATH" "$@"
