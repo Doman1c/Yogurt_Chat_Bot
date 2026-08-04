@@ -278,6 +278,13 @@ function appendComparisonReason(
   return formatOutboundComparison(comparison);
 }
 
+function explicitPassthrough(text: string): Record<string, unknown> {
+  return {
+    content: text,
+    cancel: false,
+  };
+}
+
 async function sendPlannedBubbles(
   api: any,
   deliveryScope: AsyncLocalStorage<DeliveryScope>,
@@ -407,9 +414,9 @@ export default definePluginEntry({
                     stickerOutcome: "unknown",
                   };
                   api.logger.info(
-                    `${PLUGIN_ID}: v4.3 outbound enforced ${appendComparisonReason(intent, result, "enforced_target_applied")}`,
+                    `${PLUGIN_ID}: v4.3 outbound enforced ${appendComparisonReason(intent, result, "enforced_target_applied")} hostAction=explicit_passthrough`,
                   );
-                  return undefined;
+                  return explicitPassthrough(text);
                 }
                 const direct = await sendPlannedBubbles(
                   api,
@@ -425,7 +432,7 @@ export default definePluginEntry({
                       ? "enforced_partial_delivery"
                       : "enforced_target_applied";
                   api.logger.info(
-                    `${PLUGIN_ID}: v4.3 outbound enforced ${appendComparisonReason(intent, direct.result, reason)}`,
+                    `${PLUGIN_ID}: v4.3 outbound enforced ${appendComparisonReason(intent, direct.result, reason)} hostAction=coordinator_delivery`,
                   );
                   return direct.hookResult;
                 }
@@ -436,14 +443,17 @@ export default definePluginEntry({
                 handler(event, ctx),
               );
               const result = outboundResult(event, legacyResult);
+              const useExplicitPassthrough = legacyResult === undefined;
               api.logger.info(
                 `${PLUGIN_ID}: v4.3 outbound enforced ${appendComparisonReason(
                   intent,
                   result,
                   `enforcement_fallback:${planned.fallbackReason || "unknown"}`,
-                )}`,
+                )} hostAction=${useExplicitPassthrough ? "explicit_passthrough" : "legacy_result"}`,
               );
-              return legacyResult;
+              return useExplicitPassthrough
+                ? explicitPassthrough(text)
+                : legacyResult;
             }
 
             const result = await deliveryScope.run("legacy_child", () =>
