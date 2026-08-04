@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from .conversation_state_runtime import ConversationStateRuntimeStore
+from .memory_recall_gate import MemoryRecallGate
 from .response_planner import ResponsePlanner
 
 
@@ -22,7 +23,10 @@ def _request(stream: Any) -> Mapping[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Yogurt V4 conversation-state observer and V4.1 response planner"
+        description=(
+            "Yogurt V4 conversation-state observer, V4.1 response planner, "
+            "and V4.2 shadow memory-recall gate"
+        )
     )
     parser.add_argument("--db", type=Path, required=True)
     parser.add_argument("--topic-ttl-minutes", type=int, default=60)
@@ -30,6 +34,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--thread-ttl-minutes", type=int, default=1440)
     parser.add_argument("--max-open-threads", type=int, default=5)
     parser.add_argument("--max-recent-actions", type=int, default=6)
+    parser.add_argument("--memory-recall-min-score", type=float, default=0.48)
+    parser.add_argument("--memory-recall-cooldown-turns", type=int, default=8)
+    parser.add_argument(
+        "--memory-recall-same-memory-cooldown-turns",
+        type=int,
+        default=20,
+    )
+    parser.add_argument("--memory-recall-max-candidates", type=int, default=5)
     parser.add_argument("--pretty", action="store_true")
     return parser
 
@@ -44,6 +56,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         message = request.get("message", "")
         assistant_reply = request.get("assistant_reply", "")
         include_response_plan = request.get("include_response_plan") is True
+        include_memory_recall = request.get("include_memory_recall") is True
         if not isinstance(user_id, str) or not user_id.strip():
             raise ValueError("user_id must be a non-empty string")
         if not isinstance(conversation_key, str) or not conversation_key.strip():
@@ -54,6 +67,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             raise ValueError("message fields must be strings")
         if include_response_plan and phase != "user":
             raise ValueError("response plan is only available for user phase")
+        if include_memory_recall and phase != "user":
+            raise ValueError("memory recall is only available for user phase")
 
         store = ConversationStateRuntimeStore(
             args.db,
@@ -65,25 +80,53 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         response_plan = None
         response_plan_context = ""
+        memory_recall = None
         if phase == "user":
             state = store.observe_user_turn(user_id, conversation_key, message)
             if include_response_plan:
                 planner = ResponsePlanner()
                 response_plan = planner.plan(message, state)
                 response_plan_context = planner.build_context_block(response_plan)
+            if include_memory_recall:
+                recall_gate = MemoryRecallGate(
+                    args.db,
+                    min_score=args.memory_recall_min_score,
+                    cooldown_turns=args.memory_recall_cooldown_turns,
+                    same_memory_cooldown_turns=(
+                        args.memory_recall_same_memory_cooldown_turns
+                    ),
+                    max_candidates=args.memory_recall_max_candidates,
+                )
+                memory_recall = recall_gate.evaluate(
+                    user_id=user_id,
+                    conversation_key=conversation_key,
+                    message=message,
+                    state=state,
+                )
         else:
             state = store.observe_assistant_turn(
                 user_id,
                 conversation_key,
                 assistant_reply,
             )
+
+        modes = []
+        if response_plan is not None:
+            modes.append("response_planner")
+        if memory_recall is not None:
+            modes.append("memory_recall_shadow")
         result = {
             "ok": True,
-            "mode": "response_planner" if response_plan is not None else "observe_only",
+            "mode": "+".join(modes) if modes else "observe_only",
             "phase": phase,
             "state": state.to_dict(),
             "response_plan": response_plan.to_dict() if response_plan is not None else None,
             "response_plan_context": response_plan_context,
+            "memory_recall": (
+                memory_recall.to_dict(include_text=False)
+                if memory_recall is not None
+                else None
+            ),
         }
     except Exception as exc:
         result = {
