@@ -12,6 +12,13 @@ class ConversationStateRuntimeStore(ConversationStateStore):
     """Runtime reducer with completion-first and V4 phase-aware semantics."""
 
     @classmethod
+    def _is_v41(cls, text: str) -> bool:
+        return cls._contains_any(
+            text,
+            ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
+        )
+
+    @classmethod
     def classify_dialogue_act(cls, message: str) -> str:
         text = re.sub(r"\s+", "", message.casefold())
         if cls._contains_any(
@@ -38,10 +45,7 @@ class ConversationStateRuntimeStore(ConversationStateStore):
         previous_topic: Optional[str] = None,
     ) -> str:
         text = re.sub(r"\s+", "", message.casefold())
-        if cls._contains_any(
-            text,
-            ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
-        ):
+        if cls._is_v41(text):
             return "回复规划器"
         return super().topic_for_message(message, previous_topic)
 
@@ -49,10 +53,7 @@ class ConversationStateRuntimeStore(ConversationStateStore):
     def _thread_candidates(cls, message: str, topic: str) -> list[str]:
         text = re.sub(r"\s+", "", message.casefold())
         threads: list[str] = []
-        is_v41 = cls._contains_any(
-            text,
-            ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
-        )
+        is_v41 = cls._is_v41(text)
         if is_v41 and cls._contains_any(
             text,
             ("开始", "编写", "实现", "开发", "代码", "设计"),
@@ -72,16 +73,13 @@ class ConversationStateRuntimeStore(ConversationStateStore):
     @classmethod
     def _completed_thread_markers(cls, message: str) -> tuple[str, ...]:
         text = re.sub(r"\s+", "", message.casefold())
-        completed = list(super()._completed_thread_markers(message))
+        is_v41 = cls._is_v41(text)
+        completed = [] if is_v41 else list(super()._completed_thread_markers(message))
         if not cls._contains_any(
             text,
-            ("已经完成", "完成了", "搞定了", "测试通过", "同步完成", "成功"),
+            ("已经完成", "完成了", "搞定了", "测试通过", "同步完成", "成功", "已经实现"),
         ):
             return tuple(completed)
-        is_v41 = cls._contains_any(
-            text,
-            ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
-        )
         if is_v41 and cls._contains_any(text, ("代码", "实现", "规划器", "planner")):
             completed.append("实现 V4.1 回复规划器")
         if is_v41 and "同步" in text:
@@ -95,11 +93,8 @@ class ConversationStateRuntimeStore(ConversationStateStore):
     @classmethod
     def _action_candidates(cls, message: str) -> list[str]:
         text = re.sub(r"\s+", "", message.casefold())
-        actions = list(super()._action_candidates(message))
-        is_v41 = cls._contains_any(
-            text,
-            ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
-        )
+        is_v41 = cls._is_v41(text)
+        actions = [] if is_v41 else list(super()._action_candidates(message))
         if is_v41 and cls._contains_any(text, ("测试通过", "ci通过", "全部通过")):
             actions.append("V4.1 回复规划器测试已通过")
         if is_v41 and cls._contains_any(text, ("代码写完", "实现完成", "已经实现")):
