@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .conversation_state import ConversationStateStore
+from .conversation_state_runtime import ConversationStateRuntimeStore
 from .memory import MemoryStore
 from .models import MemorySnippet
 from .router import StyleRouter
@@ -27,7 +27,7 @@ class SocialLayerService:
         self.max_memories_per_reply = max_memories_per_reply
         self.conversation_state_enabled = conversation_state_enabled
         self.conversation_state = (
-            ConversationStateStore(
+            ConversationStateRuntimeStore(
                 db_path,
                 topic_ttl_minutes=conversation_state_topic_ttl_minutes,
                 mood_ttl_minutes=conversation_state_mood_ttl_minutes,
