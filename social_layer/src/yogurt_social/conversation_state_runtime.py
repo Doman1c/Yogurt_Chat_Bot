@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Optional
@@ -8,7 +9,104 @@ from .conversation_state import ConversationState, ConversationStateStore
 
 
 class ConversationStateRuntimeStore(ConversationStateStore):
-    """Runtime reducer with completion-first open-thread semantics."""
+    """Runtime reducer with completion-first and V4 phase-aware semantics."""
+
+    @classmethod
+    def classify_dialogue_act(cls, message: str) -> str:
+        text = re.sub(r"\s+", "", message.casefold())
+        if cls._contains_any(
+            text,
+            (
+                "已经完成",
+                "已经实现",
+                "实现完成",
+                "测试通过",
+                "全部通过",
+                "成功合并",
+                "搞定了",
+                "完成了",
+                "终于好了",
+            ),
+        ):
+            return "celebrate"
+        return super().classify_dialogue_act(message)
+
+    @classmethod
+    def topic_for_message(
+        cls,
+        message: str,
+        previous_topic: Optional[str] = None,
+    ) -> str:
+        text = re.sub(r"\s+", "", message.casefold())
+        if cls._contains_any(
+            text,
+            ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
+        ):
+            return "回复规划器"
+        return super().topic_for_message(message, previous_topic)
+
+    @classmethod
+    def _thread_candidates(cls, message: str, topic: str) -> list[str]:
+        text = re.sub(r"\s+", "", message.casefold())
+        threads: list[str] = []
+        is_v41 = cls._contains_any(
+            text,
+            ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
+        )
+        if is_v41 and cls._contains_any(
+            text,
+            ("开始", "编写", "实现", "开发", "代码", "设计"),
+        ):
+            threads.append("实现 V4.1 回复规划器")
+        if not is_v41:
+            threads.extend(super()._thread_candidates(message, topic))
+        else:
+            if cls._contains_any(text, ("本地同步", "同步到本地", "拉取分支", "gitpull")):
+                threads.append("本地同步 V4.1 分支")
+            if cls._contains_any(text, ("开始测试", "运行测试", "测试一下", "验证")):
+                threads.append("运行 V4.1 测试")
+            if cls._contains_any(text, ("补全readme", "更新readme", "补全文档", "更新文档")):
+                threads.append("补全 V4.1 文档")
+        return threads
+
+    @classmethod
+    def _completed_thread_markers(cls, message: str) -> tuple[str, ...]:
+        text = re.sub(r"\s+", "", message.casefold())
+        completed = list(super()._completed_thread_markers(message))
+        if not cls._contains_any(
+            text,
+            ("已经完成", "完成了", "搞定了", "测试通过", "同步完成", "成功"),
+        ):
+            return tuple(completed)
+        is_v41 = cls._contains_any(
+            text,
+            ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
+        )
+        if is_v41 and cls._contains_any(text, ("代码", "实现", "规划器", "planner")):
+            completed.append("实现 V4.1 回复规划器")
+        if is_v41 and "同步" in text:
+            completed.append("本地同步 V4.1 分支")
+        if is_v41 and "测试" in text:
+            completed.append("运行 V4.1 测试")
+        if is_v41 and cls._contains_any(text, ("readme", "文档")):
+            completed.append("补全 V4.1 文档")
+        return tuple(dict.fromkeys(completed))
+
+    @classmethod
+    def _action_candidates(cls, message: str) -> list[str]:
+        text = re.sub(r"\s+", "", message.casefold())
+        actions = list(super()._action_candidates(message))
+        is_v41 = cls._contains_any(
+            text,
+            ("v4.1", "4.1", "responseplanner", "回复规划器", "回复规划", "planner"),
+        )
+        if is_v41 and cls._contains_any(text, ("测试通过", "ci通过", "全部通过")):
+            actions.append("V4.1 回复规划器测试已通过")
+        if is_v41 and cls._contains_any(text, ("代码写完", "实现完成", "已经实现")):
+            actions.append("V4.1 回复规划器已实现")
+        if is_v41 and cls._contains_any(text, ("同步完成", "已经同步", "拉取完成")):
+            actions.append("V4.1 分支已同步到本地")
+        return list(dict.fromkeys(actions))
 
     def observe_user_turn(
         self,
