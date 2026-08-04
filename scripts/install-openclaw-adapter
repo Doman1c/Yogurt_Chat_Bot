@@ -58,7 +58,11 @@ if "choose_sticker" not in manifest.get("contracts", {}).get("tools", []):
     raise SystemExit("plugin manifest does not declare choose_sticker")
 
 extensions = package.get("openclaw", {}).get("extensions", [])
-if len(extensions) != 1 or extensions[0] not in {"./index-v2.ts", "./index-v3.ts"}:
+if len(extensions) != 1 or extensions[0] not in {
+    "./index-v2.ts",
+    "./index-v3.ts",
+    "./index-v4.ts",
+}:
     raise SystemExit("package.json must expose exactly one supported Yogurt entry")
 entry_filename = extensions[0].removeprefix("./")
 required = {
@@ -69,8 +73,10 @@ required = {
     "sticker-turn.ts",
     "sticker-v21-utils.ts",
 }
-if entry_filename == "index-v3.ts":
-    required.update({"v3-runtime.ts", "multi-bubble.ts"})
+if entry_filename in {"index-v3.ts", "index-v4.ts"}:
+    required.update({"index-v3.ts", "v3-runtime.ts", "multi-bubble.ts"})
+if entry_filename == "index-v4.ts":
+    required.add("index-v4.ts")
 
 package_files = set(package.get("files", []))
 for filename in sorted(required):
@@ -139,6 +145,13 @@ patch = {
                     "multiBubbleMaxChars": 360,
                     "multiBubbleMaxBubbles": 3,
                     "multiBubbleDelayMs": 420,
+                    "conversationStateEnabled": False,
+                    "conversationStateTimeoutMs": 2500,
+                    "conversationStateTopicTtlMinutes": 60,
+                    "conversationStateMoodTtlMinutes": 30,
+                    "conversationStateThreadTtlMinutes": 1440,
+                    "conversationStateMaxOpenThreads": 5,
+                    "conversationStateMaxRecentActions": 6,
                 },
             }
         }
@@ -164,4 +177,4 @@ else
   echo "Gateway restart skipped. Run: openclaw gateway restart"
 fi
 
-echo "Yogurt OpenClaw adapter installed. Stickers and all V3 alpha features remain disabled until explicitly enabled."
+echo "Yogurt OpenClaw adapter installed. Stickers, V3 alpha features, and V4 conversation state remain disabled until explicitly enabled."
