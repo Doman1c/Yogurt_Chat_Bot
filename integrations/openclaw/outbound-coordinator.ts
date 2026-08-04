@@ -10,11 +10,19 @@ export type OutboundIntent = {
   source: "response_planner";
 };
 
+export type StickerOutcome =
+  | "unknown"
+  | "pending"
+  | "sent"
+  | "skipped"
+  | "failed";
+
 export type OutboundResult = {
   actualBubbleCount: number;
   textChars: number;
   outcome: "single" | "split" | "partial" | "fallback" | "media_passthrough";
-  stickerOutcome: "unknown" | "none" | "selected" | "sent" | "failed";
+  stickerOutcome: StickerOutcome;
+  stickerReason?: string;
 };
 
 export type OutboundComparison = {
@@ -89,6 +97,9 @@ export function compareOutboundResult(
   if (result.outcome === "partial") reasons.push("partial_delivery");
   if (result.outcome === "fallback") reasons.push("delivery_fallback");
   if (result.outcome === "media_passthrough") reasons.push("media_passthrough");
+  if (result.stickerOutcome === "pending") reasons.push("sticker_pending");
+  if (result.stickerOutcome === "skipped") reasons.push("sticker_skipped");
+  if (result.stickerOutcome === "failed") reasons.push("sticker_failed");
   return {
     intent,
     result,
@@ -107,6 +118,7 @@ export function formatOutboundComparison(comparison: OutboundComparison): string
     `delta=${comparison.bubbleDelta}`,
     `outcome=${result.outcome}`,
     `sticker=${result.stickerOutcome}`,
+    `stickerReason=${result.stickerReason || "none"}`,
     `textChars=${result.textChars}`,
     `stateVersion=${intent.stateVersion}`,
     `reasons=${comparison.reasons.join(",") || "none"}`,
