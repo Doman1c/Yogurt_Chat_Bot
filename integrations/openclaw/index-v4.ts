@@ -35,6 +35,11 @@ type V4Config = {
   conversationStateMaxRecentActions: number;
   responsePlannerEnabled: boolean;
   responsePlannerMaxContextChars: number;
+  memoryRecallGateEnabled: boolean;
+  memoryRecallMinScore: number;
+  memoryRecallCooldownTurns: number;
+  memoryRecallSameMemoryCooldownTurns: number;
+  memoryRecallMaxCandidates: number;
 };
 
 type PendingStateTurn = {
@@ -50,6 +55,7 @@ type ObserverResult = {
   state?: Record<string, unknown>;
   response_plan?: Record<string, unknown> | null;
   response_plan_context?: string;
+  memory_recall?: Record<string, unknown> | null;
   error?: string;
   error_type?: string;
 };
@@ -65,6 +71,17 @@ function integerValue(
   maximum: number,
 ): number {
   return typeof value === "number" && Number.isInteger(value)
+    ? Math.min(maximum, Math.max(minimum, value))
+    : fallback;
+}
+
+function numberValue(
+  value: unknown,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  return typeof value === "number" && Number.isFinite(value)
     ? Math.min(maximum, Math.max(minimum, value))
     : fallback;
 }
@@ -119,11 +136,35 @@ function readV4Config(api: any, event?: any): V4Config {
       300,
       1800,
     ),
+    memoryRecallGateEnabled: booleanValue(raw.memoryRecallGateEnabled, false),
+    memoryRecallMinScore: numberValue(raw.memoryRecallMinScore, 0.48, 0.2, 0.95),
+    memoryRecallCooldownTurns: integerValue(
+      raw.memoryRecallCooldownTurns,
+      8,
+      0,
+      100,
+    ),
+    memoryRecallSameMemoryCooldownTurns: integerValue(
+      raw.memoryRecallSameMemoryCooldownTurns,
+      20,
+      0,
+      300,
+    ),
+    memoryRecallMaxCandidates: integerValue(
+      raw.memoryRecallMaxCandidates,
+      5,
+      1,
+      20,
+    ),
   };
 }
 
 function v4RuntimeEnabled(config: V4Config): boolean {
-  return config.conversationStateEnabled || config.responsePlannerEnabled;
+  return (
+    config.conversationStateEnabled ||
+    config.responsePlannerEnabled ||
+    config.memoryRecallGateEnabled
+  );
 }
 
 function eventMetadata(event: any): Record<string, unknown> {
@@ -266,6 +307,14 @@ function runObserver(
       String(config.conversationStateMaxOpenThreads),
       "--max-recent-actions",
       String(config.conversationStateMaxRecentActions),
+      "--memory-recall-min-score",
+      String(config.memoryRecallMinScore),
+      "--memory-recall-cooldown-turns",
+      String(config.memoryRecallCooldownTurns),
+      "--memory-recall-same-memory-cooldown-turns",
+      String(config.memoryRecallSameMemoryCooldownTurns),
+      "--memory-recall-max-candidates",
+      String(config.memoryRecallMaxCandidates),
     ];
     const child = spawn(baseConfig.pythonPath, args, {
       cwd: baseConfig.repoPath,
@@ -347,6 +396,27 @@ function compactPlanLog(result: ObserverResult): string {
   ].join(" ");
 }
 
+function compactRecallLog(result: ObserverResult): string {
+  const recall = asRecord(result.memory_recall);
+  const candidate = asRecord(recall.candidate);
+  const reasons = Array.isArray(recall.reasons)
+    ? recall.reasons.filter((item) => typeof item === "string").slice(0, 8)
+    : [];
+  return [
+    `decision=${optionalString(recall.decision) || "none"}`,
+    `layer=${optionalString(candidate.layer) || "none"}`,
+    `kind=${optionalString(candidate.kind) || "none"}`,
+    `sourceId=${typeof candidate.source_id === "number" ? candidate.source_id : 0}`,
+    `score=${typeof candidate.score === "number" ? candidate.score.toFixed(3) : "0.000"}`,
+    `threshold=${typeof recall.threshold === "number" ? recall.threshold.toFixed(3) : "0.000"}`,
+    `explicit=${recall.explicit_request === true}`,
+    `cooldown=${typeof recall.cooldown_remaining === "number" ? recall.cooldown_remaining : 0}`,
+    `sameCooldown=${typeof recall.same_memory_cooldown_remaining === "number" ? recall.same_memory_cooldown_remaining : 0}`,
+    `turn=${typeof recall.turn_index === "number" ? recall.turn_index : 0}`,
+    `reasons=${reasons.join(",") || "none"}`,
+  ].join(" ");
+}
+
 function responsePlanContext(
   result: ObserverResult,
   config: V4Config,
@@ -360,7 +430,7 @@ export default definePluginEntry({
   id: PLUGIN_ID,
   name: "Yogurt Social Injector",
   description:
-    "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, and opt-in V4.1 response planning.",
+    "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, V4.1 planning, and opt-in V4.2 shadow recall gating.",
   register(api: any) {
     const pendingTurns = new PendingStateTurnStore();
     (v3Plugin as any).register(api);
@@ -388,6 +458,7 @@ export default definePluginEntry({
             phase: "user",
             message: prompt,
             include_response_plan: config.responsePlannerEnabled,
+            include_memory_recall: config.memoryRecallGateEnabled,
           });
           pendingTurns.register({
             userId,
@@ -397,6 +468,11 @@ export default definePluginEntry({
           api.logger.info(
             `${PLUGIN_ID}: v4 state observed phase=user ${compactStateLog(result)}`,
           );
+          if (config.memoryRecallGateEnabled) {
+            api.logger.info(
+              `${PLUGIN_ID}: v4 memory recall shadow ${compactRecallLog(result)}`,
+            );
+          }
           if (!config.responsePlannerEnabled) return;
           const planContext = responsePlanContext(result, config);
           if (!planContext) {
@@ -468,7 +544,7 @@ export default definePluginEntry({
     });
 
     api.logger.info(
-      `${PLUGIN_ID}: V4 state runtime and optional V4.1 response planner registered`,
+      `${PLUGIN_ID}: V4 state, V4.1 planner, and optional V4.2 shadow recall gate registered`,
     );
   },
 });
