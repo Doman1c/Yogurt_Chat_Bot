@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 from yogurt_social.conversation_state_runtime import ConversationStateRuntimeStore
 from yogurt_social.response_planner import ResponsePlanner
 
@@ -75,11 +73,14 @@ def test_ambiguous_reference_allows_one_required_followup(tmp_path):
 
 def test_previous_long_reply_adds_repeat_guard(tmp_path):
     store = ConversationStateRuntimeStore(tmp_path / "memory.sqlite3")
-    state = store.observe_user_turn("owner", "session:repeat", "开始实现 V4.1")
-    state = replace(state, last_response_pattern="technical_long", state_version=3)
+    store.observe_user_turn("owner", "session:repeat", "开始实现 V4.1")
+    store.observe_assistant_turn("owner", "session:repeat", "很长的技术回复" * 100)
     message = "继续下一步"
+    state = store.observe_user_turn("owner", "session:repeat", message)
     plan = ResponsePlanner().plan(message, state)
 
+    assert state.dialogue_act == "continue"
+    assert state.last_response_pattern == "technical_long"
     assert plan.dialogue_act == "continue"
     assert plan.primary_goal == "continue_current_thread"
     assert plan.reply_length == "short"
