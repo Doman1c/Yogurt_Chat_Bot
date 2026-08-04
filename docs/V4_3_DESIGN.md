@@ -51,28 +51,39 @@ V4.3 不负责：
 
 ### OutboundResult
 
-描述实际发送结果：
+描述同一父级 Turn 的实际发送结果：
 
 ```json
 {
-  "actualBubbleCount": 3,
+  "actualBubbleCount": 2,
   "textChars": 88,
   "outcome": "split",
-  "stickerOutcome": "unknown"
+  "stickerOutcome": "sent",
+  "stickerReason": "media_sent"
 }
 ```
 
-`textChars` 只保存长度，不保存正文。
+`stickerOutcome` 只允许：
+
+- `pending`：已选中并安排发送，等待媒体适配器结果；
+- `sent`：媒体适配器确认发送；
+- `skipped`：Finalizer 或策略明确决定不发；
+- `failed`：已经进入选择/发送链路，但最终失败；
+- `unknown`：仅作为内部构造阶段占位，不应出现在最终 V4.3 日志中。
+
+`textChars` 只保存长度，不保存正文；`stickerReason` 是经过截断和字符白名单处理的有限原因码。
 
 ### OutboundComparison
 
 ```json
 {
-  "bubbleDelta": 2,
-  "bubbleTargetMatched": false,
-  "reasons": ["actual_bubbles_exceeded_target"]
+  "bubbleDelta": 0,
+  "bubbleTargetMatched": true,
+  "reasons": ["bubble_target_matched"]
 }
 ```
+
+Sticker 终态会额外附加 `sticker_pending`、`sticker_skipped` 或 `sticker_failed`。
 
 ## 实施阶段
 
@@ -99,8 +110,39 @@ V4.3 不负责：
 - 代码块、长技术回复、媒体消息和发送失败可以安全降级；
 - 降级必须记录明确原因；
 - 当旧 V3 对降级消息没有返回修改或取消结果时，Coordinator 显式返回 `{ content, cancel: false }`，确保宿主继续投递原父消息；
-- 日志增加 `hostAction=explicit_passthrough|legacy_result|coordinator_delivery`，用于实机确认最终投递路径；
-- Sticker finalizer 与文本发送共享同一 Turn。
+- 日志增加 `hostAction=explicit_passthrough|legacy_result|coordinator_delivery`，用于实机确认最终投递路径。
+
+### V4.3d：Sticker Finalizer 终态关联
+
+- 不改 V2.1 的候选、评分、阈值、选图或媒体发送代码；
+- V4.3 外层捕获现有的 `selected / scheduled / sent / rejected / failed` 有限日志；
+- 使用 `AsyncLocalStorage` 保留 Finalizer 定时器所属父 Turn 的 aliases；
+- 把 Sticker 状态写回同一个父级 `OutboundResult`；
+- 已安排发送时先记录 `sticker=pending`；
+- 媒体发送完成后追加一条 `v4.3 outbound finalized ... finalStage=sticker`；
+- Finalizer 明确不发时，父级结果直接记录 `sticker=skipped`；
+- 媒体适配器、文件或决策异常记录 `sticker=failed` 与有限原因码；
+- 45 秒仍未获得已安排媒体的终态时，记录 `delivery_outcome_timeout`；
+- 所有关联 Store 均为 TTL/容量有界，且不保存用户或助手正文。
+
+示例：
+
+```text
+yogurt-social-injector: v4.3 outbound enforced ... sticker=pending stickerReason=delivery_scheduled ...
+yogurt-social-injector: v4.3 outbound finalized mode=enforced ... sticker=sent stickerReason=media_sent ... finalStage=sticker
+```
+
+明确跳过：
+
+```text
+yogurt-social-injector: v4.3 outbound enforced ... sticker=skipped stickerReason=below_threshold ...
+```
+
+明确失败：
+
+```text
+yogurt-social-injector: v4.3 outbound finalized mode=enforced ... sticker=failed stickerReason=weixin_send_media_unavailable ... finalStage=sticker
+```
 
 ## 关键验收
 
@@ -119,12 +161,20 @@ V4.3 不负责：
 
 所有例外必须 fail-open，并记录结构化原因。对于单条原文回退，日志还必须显示 `hostAction=explicit_passthrough`，且微信端收到完整原文而不是空响应提示。
 
+Sticker 验收要求：
+
+- V4.3 父级日志不再以 `sticker=unknown` 作为最终结果；
+- 成功发送必须出现 `sticker=sent`；
+- 明确不发必须出现 `sticker=skipped`；
+- 失败必须出现 `sticker=failed` 和 `stickerReason`；
+- 子气泡和媒体子发送不得创建第二个父级 OutboundResult。
+
 ## 安全边界
 
 - 新功能默认关闭；
-- Turn Store 只保存枚举、数字和会话别名；
+- Turn Store 只保存枚举、数字、有限原因码和会话别名；
 - TTL 默认 15 分钟；
 - 每个计划只能消费一次；
 - 子气泡不得再次消费父级计划；
 - 任何协调失败都保留原始 V3 文本链路；
-- 不覆盖本地 Sticker 阈值或运行配置。
+- 不覆盖本地 Sticker 阈值、素材或运行配置。
