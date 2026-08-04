@@ -213,21 +213,23 @@ api.pluginConfig.unifiedOutboundShadowEnabled = false;
 api.pluginConfig.unifiedOutboundEnforceEnabled = true;
 logs.length = 0;
 const callsBeforeSingle = api.legacyCalls;
+const singleText = "第一句会保留。第二句不会再被旧系统拆开。";
 await dispatch("before_prompt_build", { prompt: "one" }, ctx);
 const singleResult = await dispatch(
   "message_sending",
   {
-    content: "第一句会保留。第二句不会再被旧系统拆开。",
+    content: singleText,
     to: "wx-owner@im.wechat",
     metadata: { channel: "openclaw-weixin" },
   },
   ctx,
 );
-assert.equal(singleResult, undefined);
+assert.deepEqual(singleResult, { content: singleText, cancel: false });
 assert.equal(api.legacyCalls, callsBeforeSingle);
 assert.ok(logs.some((value) => value.includes("outbound enforced")));
 assert.ok(logs.some((value) => value.includes("actualBubbles=1")));
 assert.ok(logs.some((value) => value.includes("enforced_target_applied")));
+assert.ok(logs.some((value) => value.includes("hostAction=explicit_passthrough")));
 
 logs.length = 0;
 sent.length = 0;
@@ -247,6 +249,7 @@ assert.deepEqual(sent, ["第一句足够自然。", "第二句也足够自然。
 assert.ok(logs.some((value) => value.includes("targetBubbles=2")));
 assert.ok(logs.some((value) => value.includes("actualBubbles=2")));
 assert.ok(logs.some((value) => value.includes("matched=true")));
+assert.ok(logs.some((value) => value.includes("hostAction=coordinator_delivery")));
 assert.equal(
   logs.filter((value) => value.includes("v4.3 outbound enforced")).length,
   1,
@@ -269,6 +272,32 @@ assert.ok(
   logs.some((value) => value.includes("enforcement_fallback:code_block_passthrough")),
 );
 assert.ok(logs.some((value) => value.includes("actualBubbles=3")));
+assert.ok(logs.some((value) => value.includes("hostAction=legacy_result")));
+
+logs.length = 0;
+const naturalFallbackText =
+  "这是一段长度足够但是没有句号也没有任何可以安全拆分边界的完整回复文本";
+await dispatch("before_prompt_build", { prompt: "two" }, ctx);
+const naturalFallbackResult = await dispatch(
+  "message_sending",
+  {
+    content: naturalFallbackText,
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  ctx,
+);
+assert.deepEqual(naturalFallbackResult, {
+  content: naturalFallbackText,
+  cancel: false,
+});
+assert.ok(
+  logs.some((value) =>
+    value.includes("enforcement_fallback:natural_boundary_count_mismatch"),
+  ),
+);
+assert.ok(logs.some((value) => value.includes("hostAction=explicit_passthrough")));
+assert.ok(logs.some((value) => value.includes("actualBubbles=1")));
 
 logs.length = 0;
 sent.length = 0;
