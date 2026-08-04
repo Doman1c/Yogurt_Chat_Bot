@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MODULE="$REPO_ROOT/integrations/openclaw/outbound-coordinator.ts"
+
+node --experimental-strip-types --check "$MODULE"
+
+node --experimental-strip-types --input-type=module - "$MODULE" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const modulePath = process.argv[2];
+const {
+  OutboundTurnStore,
+  compareOutboundResult,
+  formatOutboundComparison,
+  outboundIntentFromResponsePlan,
+} = await import(pathToFileURL(modulePath));
+
+const intent = outboundIntentFromResponsePlan({
+  plan_version: "4.1",
+  bubble_target: 9,
+  sticker_preference: "celebration",
+  reply_length: "short",
+  state_version: 12,
+  raw_message: "must not be copied",
+});
+assert.deepEqual(intent, {
+  planVersion: "4.1",
+  bubbleTarget: 3,
+  stickerPreference: "celebration",
+  replyLength: "short",
+  stateVersion: 12,
+  source: "response_planner",
+});
+assert.equal("raw_message" in intent, false);
+
+let now = 1_000;
+const store = new OutboundTurnStore(500, 4, () => now);
+const registered = store.register(
+  ["session:owner", "peer:wechat:owner", "session:owner"],
+  { bubble_target: 1, sticker_preference: "none", state_version: 4 },
+);
+assert.equal(registered?.bubbleTarget, 1);
+assert.equal(store.size(), 1);
+assert.equal(store.peek(["peer:wechat:owner"])?.stateVersion, 4);
+assert.equal(store.consume(["session:owner"])?.bubbleTarget, 1);
+assert.equal(store.consume(["peer:wechat:owner"]), undefined);
+assert.equal(store.size(), 0);
+
+store.register(["session:expired"], { bubble_target: 2, state_version: 5 });
+now += 501;
+assert.equal(store.peek(["session:expired"]), undefined);
+assert.equal(store.size(), 0);
+
+const mismatch = compareOutboundResult(
+  outboundIntentFromResponsePlan({ bubble_target: 1, state_version: 11 }),
+  {
+    actualBubbleCount: 3,
+    textChars: 88,
+    outcome: "split",
+    stickerOutcome: "unknown",
+  },
+);
+assert.equal(mismatch.bubbleTargetMatched, false);
+assert.equal(mismatch.bubbleDelta, 2);
+assert.ok(mismatch.reasons.includes("actual_bubbles_exceeded_target"));
+assert.ok(formatOutboundComparison(mismatch).includes("targetBubbles=1"));
+assert.ok(formatOutboundComparison(mismatch).includes("actualBubbles=3"));
+
+const matched = compareOutboundResult(
+  outboundIntentFromResponsePlan({ bubble_target: 2, state_version: 12 }),
+  {
+    actualBubbleCount: 2,
+    textChars: 45,
+    outcome: "split",
+    stickerOutcome: "selected",
+  },
+);
+assert.equal(matched.bubbleTargetMatched, true);
+assert.equal(matched.bubbleDelta, 0);
+assert.deepEqual(matched.reasons, ["bubble_target_matched"]);
+
+const partial = compareOutboundResult(
+  outboundIntentFromResponsePlan({ bubble_target: 3, state_version: 13 }),
+  {
+    actualBubbleCount: 1,
+    textChars: 72,
+    outcome: "partial",
+    stickerOutcome: "failed",
+  },
+);
+assert.ok(partial.reasons.includes("actual_bubbles_below_target"));
+assert.ok(partial.reasons.includes("partial_delivery"));
+
+console.log("v4.3 outbound coordinator model: ok");
+JS
