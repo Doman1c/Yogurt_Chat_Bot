@@ -115,12 +115,19 @@ export function formatOutboundComparison(comparison: OutboundComparison): string
 
 export class OutboundTurnStore {
   private readonly byAlias = new Map<string, StoredIntent>();
+  private readonly ttlMs: number;
+  private readonly limit: number;
+  private readonly now: () => number;
 
   constructor(
-    private readonly ttlMs = DEFAULT_TTL_MS,
-    private readonly limit = DEFAULT_LIMIT,
-    private readonly now: () => number = () => Date.now(),
-  ) {}
+    ttlMs = DEFAULT_TTL_MS,
+    limit = DEFAULT_LIMIT,
+    now: () => number = () => Date.now(),
+  ) {
+    this.ttlMs = ttlMs;
+    this.limit = limit;
+    this.now = now;
+  }
 
   register(aliases: string[], responsePlan: unknown): OutboundIntent | undefined {
     this.prune();
