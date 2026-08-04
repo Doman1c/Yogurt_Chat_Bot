@@ -62,6 +62,7 @@ if len(extensions) != 1 or extensions[0] not in {
     "./index-v2.ts",
     "./index-v3.ts",
     "./index-v4.ts",
+    "./index-v43.ts",
 }:
     raise SystemExit("package.json must expose exactly one supported Yogurt entry")
 entry_filename = extensions[0].removeprefix("./")
@@ -73,10 +74,12 @@ required = {
     "sticker-turn.ts",
     "sticker-v21-utils.ts",
 }
-if entry_filename in {"index-v3.ts", "index-v4.ts"}:
+if entry_filename in {"index-v3.ts", "index-v4.ts", "index-v43.ts"}:
     required.update({"index-v3.ts", "v3-runtime.ts", "multi-bubble.ts"})
-if entry_filename == "index-v4.ts":
+if entry_filename in {"index-v4.ts", "index-v43.ts"}:
     required.add("index-v4.ts")
+if entry_filename == "index-v43.ts":
+    required.update({"index-v43.ts", "outbound-coordinator.ts"})
 
 package_files = set(package.get("files", []))
 for filename in sorted(required):
@@ -160,6 +163,7 @@ patch = {
                     "memoryRecallCooldownTurns": 8,
                     "memoryRecallSameMemoryCooldownTurns": 20,
                     "memoryRecallMaxCandidates": 5,
+                    "unifiedOutboundShadowEnabled": False,
                 },
             }
         }
@@ -185,4 +189,4 @@ else
   echo "Gateway restart skipped. Run: openclaw gateway restart"
 fi
 
-echo "Yogurt OpenClaw adapter installed. Stickers, V3 features, V4 state, V4.1 planning, and V4.2 recall gating remain disabled until explicitly enabled."
+echo "Yogurt OpenClaw adapter installed. Stickers, V3 features, V4 state, V4.1 planning, V4.2 recall gating, and V4.3 outbound coordination remain disabled until explicitly enabled."
