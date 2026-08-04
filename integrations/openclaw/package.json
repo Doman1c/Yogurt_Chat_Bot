@@ -8,6 +8,7 @@
     "index-v2.ts",
     "index-v3.ts",
     "index-v4.ts",
+    "index-v43.ts",
     "outbound-coordinator.ts",
     "sticker-plugin-utils.ts",
     "sticker-selection.ts",
@@ -28,7 +29,7 @@
   },
   "openclaw": {
     "extensions": [
-      "./index-v4.ts"
+      "./index-v43.ts"
     ],
     "compat": {
       "pluginApi": ">=2026.7.1-0"
