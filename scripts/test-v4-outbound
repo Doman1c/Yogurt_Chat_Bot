@@ -152,6 +152,35 @@ assert.equal(generic.peek(["run:a", "session:s"])?.marker, "a");
 assert.equal(generic.peek(["run:b", "session:s"])?.marker, "b");
 assert.equal(generic.peek(["run:x", "session:s"]), undefined);
 
+// If an earlier hook had no strong id, a later strong-id hook may use the
+// single unambiguous weak candidate. This is the only allowed strong miss fallback.
+const legacyOnly = new CorrelationStore(5_000, 16, () => now);
+legacyOnly.register(["session:legacy", "peer:wechat:legacy"], { marker: "legacy" });
+assert.equal(
+  legacyOnly.peek(["run:later", "session:legacy"])?.marker,
+  "legacy",
+  "one weak-only legacy entry may be correlated when a later hook gains runId",
+);
+
+// Even one stored entry with a different strong id is a hard mismatch.
+const differentStrong = new CorrelationStore(5_000, 16, () => now);
+differentStrong.register(["run:old", "session:one"], { marker: "old" });
+assert.equal(
+  differentStrong.peek(["run:new", "session:one"]),
+  undefined,
+  "a different stored strong id must never be accepted through session fallback",
+);
+
+// Weak-only lookup must refuse to guess when more than one live turn shares it.
+const ambiguousWeak = new CorrelationStore(5_000, 16, () => now);
+ambiguousWeak.register(["run:one", "session:ambiguous"], { marker: "one" });
+ambiguousWeak.register(["run:two", "session:ambiguous"], { marker: "two" });
+assert.equal(
+  ambiguousWeak.peek(["session:ambiguous"]),
+  undefined,
+  "weak-only hooks must refuse ambiguous concurrent turns",
+);
+
 const expiring = new OutboundTurnStore(500, 4, () => now);
 expiring.register(["session:expired"], { bubble_target: 2, state_version: 5 });
 now += 501;
