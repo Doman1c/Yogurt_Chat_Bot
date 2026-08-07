@@ -33,6 +33,21 @@ _EXPLICIT_PROGRESS_MARKERS = (
     "现在是v",
     "目前是v",
 )
+_PROGRESS_QUERY_MARKERS = (
+    "做到哪里",
+    "做到哪",
+    "到哪里了",
+    "到哪了",
+    "什么进度",
+    "进度怎么样",
+    "现在是什么版本",
+    "现在是哪个版本",
+    "目前是什么版本",
+    "接下来是什么",
+    "下一步是什么",
+    "进行到哪里",
+    "进行到哪",
+)
 _CORRECTION_MARKERS = (
     "不对",
     "更正",
@@ -106,8 +121,10 @@ _STAGE_MARKERS = (
     "当前阶段",
     "现在在做",
     "现在正在做",
+    "现在做",
     "目前在做",
     "目前正在做",
+    "目前做",
     "现在进行",
     "目前进行",
     "现在进入",
@@ -149,11 +166,8 @@ def _strip_prefix(clause: str, markers: Iterable[str]) -> str:
     result = clause.strip()
     compact = _compact(result)
     for marker in markers:
-        index = compact.find(marker)
-        if index < 0:
+        if marker not in compact:
             continue
-        # Markers used here are mostly Chinese/ASCII without spaces. Slice the
-        # original conservatively by searching case-insensitively as well.
         match = re.search(re.escape(marker), result, re.IGNORECASE)
         if match:
             result = result[match.end() :]
@@ -189,6 +203,8 @@ def _next_items(clauses: list[str], active_project: bool) -> tuple[str, ...]:
         compact = _compact(clause)
         if not _contains_any(compact, _NEXT_MARKERS):
             continue
+        if _contains_any(compact, _PROGRESS_QUERY_MARKERS):
+            continue
         if not active_project and not _projectish(clause):
             continue
         text = _strip_prefix(clause, _NEXT_MARKERS)
@@ -201,6 +217,8 @@ def _stage(clauses: list[str], active_project: bool) -> str | None:
     for clause in clauses:
         compact = _compact(clause)
         if not _contains_any(compact, _STAGE_MARKERS):
+            continue
+        if _contains_any(compact, _PROGRESS_QUERY_MARKERS):
             continue
         if not active_project and not _projectish(clause):
             continue
@@ -224,19 +242,25 @@ def parse_project_state_update(
 ) -> ParsedProjectStateUpdate | None:
     """Parse only explicit/confirmed current-project updates.
 
-    Hypothetical future ideas are intentionally ignored. This parser never calls
-    a model and returns only bounded structured fields, not the full chat turn.
+    Questions about current progress are always read-only. Hypothetical future
+    ideas are intentionally ignored. This parser never calls a model and returns
+    only bounded structured fields, not the full chat turn.
     """
 
     if not isinstance(message, str) or not message.strip():
         return None
     compact = _compact(message)
     correction = _contains_any(compact, _CORRECTION_MARKERS)
+    progress_query = _contains_any(compact, _PROGRESS_QUERY_MARKERS)
+    if progress_query and not correction and not _contains_any(compact, _COMPLETION_MARKERS):
+        return None
+
     explicit_progress = _contains_any(compact, _EXPLICIT_PROGRESS_MARKERS)
     clauses = _clauses(message)
 
     has_confirmed_action = any(
         _contains_any(_compact(clause), _COMPLETION_MARKERS + _NEXT_MARKERS + _STAGE_MARKERS)
+        and not _contains_any(_compact(clause), _PROGRESS_QUERY_MARKERS)
         and (active_project or _projectish(clause))
         for clause in clauses
     )
@@ -260,8 +284,6 @@ def parse_project_state_update(
     next_items = _next_items(clauses, active_project)
     stage = _stage(clauses, active_project)
 
-    # A bare version mentioned in a hypothetical proposal is not enough. A
-    # version attached to an explicit current-progress marker is authoritative.
     if not explicit_progress and not correction:
         if current_version and not has_confirmed_action:
             current_version = None
