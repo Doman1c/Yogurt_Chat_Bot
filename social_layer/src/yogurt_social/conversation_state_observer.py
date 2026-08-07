@@ -13,6 +13,8 @@ from .response_planner import ResponsePlanner
 
 
 _CONTINUITY_CONTEXT_MAX_CHARS = 1750
+_PROJECT_STATUS_MAX_ITEMS = 5
+_PROJECT_STATUS_MAX_ITEM_CHARS = 220
 
 
 def _request(stream: Any) -> Mapping[str, Any]:
@@ -25,11 +27,53 @@ def _request(stream: Any) -> Mapping[str, Any]:
     return payload
 
 
+def _bounded_text(value: Any, limit: int) -> str:
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def _load_project_status(project_root: Optional[Path]) -> dict[str, Any] | None:
+    """Load a tiny versioned project snapshot; failure is always fail-open."""
+
+    if project_root is None:
+        return None
+    path = project_root / "social_layer" / "config" / "project_status.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        return None
+
+    completed = raw.get("completed") if isinstance(raw.get("completed"), list) else []
+    next_items = raw.get("next") if isinstance(raw.get("next"), list) else []
+    return {
+        "project": _bounded_text(raw.get("project"), 80),
+        "current_version": _bounded_text(raw.get("current_version"), 40),
+        "plugin_version": _bounded_text(raw.get("plugin_version"), 40),
+        "current_stage": _bounded_text(raw.get("current_stage"), 180),
+        "current_topic": _bounded_text(raw.get("current_topic"), 80),
+        "completed": [
+            _bounded_text(item, _PROJECT_STATUS_MAX_ITEM_CHARS)
+            for item in completed[:_PROJECT_STATUS_MAX_ITEMS]
+            if _bounded_text(item, _PROJECT_STATUS_MAX_ITEM_CHARS)
+        ],
+        "next": [
+            _bounded_text(item, _PROJECT_STATUS_MAX_ITEM_CHARS)
+            for item in next_items[:_PROJECT_STATUS_MAX_ITEMS]
+            if _bounded_text(item, _PROJECT_STATUS_MAX_ITEM_CHARS)
+        ],
+        "historical_versions_are_background_only": (
+            raw.get("historical_versions_are_background_only") is True
+        ),
+    }
+
+
 def _with_current_continuity_context(
     base_context: str,
     state: ConversationState,
+    project_status: Mapping[str, Any] | None = None,
 ) -> str:
-    """Put bounded current-session state ahead of long-term milestone memories."""
+    """Put bounded current-session/project state ahead of old milestone memories."""
 
     base_lines = base_context.splitlines()
     if not base_lines:
@@ -38,17 +82,42 @@ def _with_current_continuity_context(
     continuity = ["[Yogurt Current Continuity]"]
     if state.current_topic:
         continuity.append(f"当前阶段：{state.current_topic}")
+
+    status_topic = _bounded_text(project_status.get("current_topic"), 80) if project_status else ""
+    use_project_status = bool(project_status) and (
+        not status_topic or not state.current_topic or status_topic == state.current_topic
+    )
+    if use_project_status and project_status is not None:
+        version = _bounded_text(project_status.get("current_version"), 40)
+        plugin_version = _bounded_text(project_status.get("plugin_version"), 40)
+        stage = _bounded_text(project_status.get("current_stage"), 180)
+        if version:
+            continuity.append(f"权威项目版本：{version}")
+        if plugin_version:
+            continuity.append(f"当前插件版本：{plugin_version}")
+        if stage:
+            continuity.append(f"当前工程阶段：{stage}")
+        completed = project_status.get("completed")
+        if isinstance(completed, list) and completed:
+            continuity.append("仓库已确认进展：")
+            continuity.extend(f"- {item}" for item in completed[-3:] if isinstance(item, str))
+        next_items = project_status.get("next")
+        if isinstance(next_items, list) and next_items:
+            continuity.append("仓库下一步：")
+            continuity.extend(f"- {item}" for item in next_items[:3] if isinstance(item, str))
+
     if state.open_threads:
-        continuity.append(f"当前待办：{state.open_threads[-1]}")
+        continuity.append(f"当前会话待办：{state.open_threads[-1]}")
     if state.recent_actions:
-        continuity.append("最近已确认进展：")
+        continuity.append("当前会话最近已确认进展：")
         continuity.extend(f"- {item}" for item in state.recent_actions[-3:])
     continuity.extend(
         [
             "连续性规则：",
-            "- 这里描述的是当前会话的最新项目状态，优先于长期记忆中的旧项目版本或旧阶段里程碑。",
+            "- 仓库 Project Status 是工程进度的权威来源；当前会话状态用于补充本轮上下文。",
+            "- 这里描述的是当前最新项目状态，优先于长期记忆中的旧项目版本或旧阶段里程碑。",
             "- 如果长期记忆提到 V1、V4.0 等已被当前阶段取代的版本，只能作为历史背景，绝不能说成“刚刚完成”或当前进度。",
-            "- 回答“刚才/现在/接下来/进行到哪”时，优先依据当前阶段、当前待办、最近已确认进展和最近对话。",
+            "- 回答“刚才/现在/接下来/进行到哪”时，只能依据权威项目状态、当前会话状态和最近对话；信息不足时不要自行回退到旧版本里程碑。",
         ]
     )
     combined = "\n".join([base_lines[0], *continuity, *base_lines[1:]])
@@ -63,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--db", type=Path, required=True)
+    parser.add_argument("--project-root", type=Path)
     parser.add_argument("--topic-ttl-minutes", type=int, default=60)
     parser.add_argument("--mood-ttl-minutes", type=int, default=30)
     parser.add_argument("--thread-ttl-minutes", type=int, default=1440)
@@ -123,6 +193,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 response_plan_context = _with_current_continuity_context(
                     planner.build_context_block(response_plan),
                     state,
+                    _load_project_status(args.project_root),
                 )
             if include_memory_recall:
                 recall_gate = MemoryRecallGate(
