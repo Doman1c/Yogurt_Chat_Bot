@@ -46,3 +46,4 @@ jobs:
           bash scripts/test-v4-outbound
           bash scripts/test-v4-outbound-runtime
           bash scripts/test-v4-cross-hook-correlation
+          bash scripts/test-v43-weak-parent-correlation
