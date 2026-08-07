@@ -66,14 +66,12 @@ process.stdin.on("end", () => {
     request = JSON.parse(input);
   } catch {
     console.error("invalid bridge request json");
-    process.exitCode = 3;
-    return;
+    process.exit(3);
   }
 
   if (request?.explicit_sticker_request !== true) {
     console.error("explicit_sticker_request was not forwarded");
-    process.exitCode = 2;
-    return;
+    process.exit(2);
   }
 
   const noCandidates =
@@ -114,7 +112,7 @@ process.stdin.on("end", () => {
         },
       };
 
-  process.stdout.write(JSON.stringify(result));
+  process.stdout.write(JSON.stringify(result), () => process.exit(0));
 });
 process.stdin.resume();
 JS
