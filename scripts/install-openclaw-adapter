@@ -77,9 +77,16 @@ required = {
 if entry_filename in {"index-v3.ts", "index-v4.ts", "index-v43.ts"}:
     required.update({"index-v3.ts", "v3-runtime.ts", "multi-bubble.ts"})
 if entry_filename in {"index-v4.ts", "index-v43.ts"}:
-    required.add("index-v4.ts")
+    required.update({"index-v4.ts", "response-plan-store.ts"})
 if entry_filename == "index-v43.ts":
-    required.update({"index-v43.ts", "outbound-coordinator.ts"})
+    required.update(
+        {
+            "index-v43.ts",
+            "outbound-coordinator.ts",
+            "sticker-lifecycle.ts",
+            "turn-correlation.ts",
+        }
+    )
 
 package_files = set(package.get("files", []))
 for filename in sorted(required):
@@ -164,6 +171,7 @@ patch = {
                     "memoryRecallSameMemoryCooldownTurns": 20,
                     "memoryRecallMaxCandidates": 5,
                     "unifiedOutboundShadowEnabled": False,
+                    "unifiedOutboundEnforceEnabled": False,
                 },
             }
         }
@@ -189,4 +197,4 @@ else
   echo "Gateway restart skipped. Run: openclaw gateway restart"
 fi
 
-echo "Yogurt OpenClaw adapter installed. Stickers, V3 features, V4 state, V4.1 planning, V4.2 recall gating, and V4.3 outbound coordination remain disabled until explicitly enabled."
+echo "Yogurt OpenClaw adapter installed. Stickers, V3 features, V4 state, V4.1 planning, V4.2 recall gating, and V4.3.1 outbound coordination remain disabled until explicitly enabled."
