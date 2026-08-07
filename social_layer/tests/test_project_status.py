@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from yogurt_social.conversation_state_observer import (
     _load_project_status,
@@ -66,10 +67,7 @@ def test_project_status_is_injected_ahead_of_historical_progress(tmp_path):
 
 
 def test_project_status_does_not_leak_into_unrelated_topic(tmp_path):
-    state = _state(tmp_path)
-    state = state.__class__(
-        **{**state.to_dict(), "current_topic": "日常对话"}
-    )
+    state = replace(_state(tmp_path), current_topic="日常对话")
     planner = ResponsePlanner()
     context = _with_current_continuity_context(
         planner.build_context_block(planner.plan("今天天气怎么样", state)),
