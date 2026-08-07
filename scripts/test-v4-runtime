@@ -8,6 +8,8 @@ TEST_ROOT="$TMP_DIR/plugin-test"
 PYTHON_BIN="$(command -v python3)"
 mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
 cp "$REPO_ROOT/integrations/openclaw/index-v4.ts" "$TEST_ROOT/index-v4.ts"
+cp "$REPO_ROOT/integrations/openclaw/response-plan-store.ts" "$TEST_ROOT/response-plan-store.ts"
+cp "$REPO_ROOT/integrations/openclaw/turn-correlation.ts" "$TEST_ROOT/turn-correlation.ts"
 
 cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
 {
@@ -53,42 +55,26 @@ export function asRecord(value: unknown): Record<string, unknown> {
     ? value as Record<string, unknown>
     : {};
 }
-
 export function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
-
 export function senderIdFromContext(ctx: any): string | undefined {
   return optionalString(ctx?.senderId);
 }
-
 export function channelFromContext(ctx: any): string {
   return optionalString(ctx?.channelId) || "unknown";
 }
-
-export function channelIsAllowed(): boolean {
-  return true;
-}
-
-export function contextAliases(
-  ctx: any,
-  channel: string,
-  senderId?: string,
-): string[] {
+export function channelIsAllowed(): boolean { return true; }
+export function contextAliases(ctx: any, channel: string, senderId?: string): string[] {
   const values: string[] = [];
   if (ctx?.sessionKey) values.push(`session:${ctx.sessionKey}`);
   if (senderId) values.push(`sender:${channel}:${senderId}`);
   return values;
 }
-
 export function preferredPolicyKey(aliases: string[]): string {
   return aliases.find((value) => value.startsWith("session:")) || aliases[0] || "unknown";
 }
-
-export function resolveUserId(): string {
-  return "owner";
-}
-
+export function resolveUserId(): string { return "owner"; }
 export function readConfig(api: any): any {
   return {
     enabled: true,
@@ -188,6 +174,7 @@ import { pathToFileURL } from "node:url";
 
 const testRoot = process.argv[2];
 const plugin = (await import(pathToFileURL(`${testRoot}/index-v4.ts`))).default;
+const { responsePlanTurns } = await import(pathToFileURL(`${testRoot}/response-plan-store.ts`));
 const hooks = new Map();
 const logs = [];
 const trace = [];
@@ -215,20 +202,14 @@ const api = {
     hooks.set(name, items);
   },
 };
-
 plugin.register(api);
 assert.deepEqual(
-  (hooks.get("message_sending") || [])
-    .map((item) => item.priority)
-    .sort((a, b) => b - a),
+  (hooks.get("message_sending") || []).map((item) => item.priority).sort((a, b) => b - a),
   [75, 70],
 );
-
 async function dispatch(name, event, ctx) {
   let result;
-  const ordered = [...(hooks.get(name) || [])].sort(
-    (left, right) => right.priority - left.priority,
-  );
+  const ordered = [...(hooks.get(name) || [])].sort((left, right) => right.priority - left.priority);
   for (const item of ordered) {
     const current = await item.handler(event, ctx);
     if (current !== undefined) result = current;
@@ -240,17 +221,21 @@ const inboundCtx = {
   channelId: "openclaw-weixin",
   senderId: "wx-owner@im.wechat",
   sessionKey: "session-v42",
+  runId: "run-v4-runtime",
 };
 const promptResult = await dispatch(
   "before_prompt_build",
-  { prompt: "开始 V4.2 Memory Recall Gate" },
+  { prompt: "开始 V4.2 Memory Recall Gate", runId: inboundCtx.runId },
   inboundCtx,
 );
 assert.ok(promptResult?.prependContext?.startsWith("[Yogurt Response Plan V4.1]"));
 assert.ok(promptResult.prependContext.includes("主动追问：否"));
 assert.ok(!promptResult.prependContext.includes("source_id"));
 assert.ok(!promptResult.prependContext.includes("memory_key"));
-assert.ok(!promptResult.prependContext.includes("qwen"));
+const structuredPlan = responsePlanTurns.peek(["run:run-v4-runtime", "session:session-v42"]);
+assert.equal(structuredPlan?.bubble_target, 2);
+assert.equal(structuredPlan?.state_version, 1);
+assert.equal(structuredPlan?.primary_goal, "advance_current_project");
 
 const fullReply = "召回门控的影子模式已经准备好了，我们开始测试。";
 const result = await dispatch(
@@ -258,9 +243,11 @@ const result = await dispatch(
   {
     content: fullReply,
     to: "wx-owner@im.wechat",
+    kind: "final",
+    runId: inboundCtx.runId,
     metadata: { channel: "openclaw-weixin" },
   },
-  { channelId: "openclaw-weixin" },
+  inboundCtx,
 );
 assert.equal(result.cancel, true);
 assert.deepEqual(trace, [{ step: "multi-bubble", text: fullReply }]);
@@ -270,15 +257,14 @@ await dispatch(
   {
     content: "开始测试。",
     to: "wx-owner@im.wechat",
+    kind: "final",
+    runId: inboundCtx.runId,
     metadata: { channel: "openclaw-weixin" },
   },
-  { channelId: "openclaw-weixin" },
+  inboundCtx,
 );
 
-assert.ok(
-  existsSync(process.env.V4_OBSERVER_LOG),
-  `observer log missing; runtime logs: ${logs.join(" | ")}`,
-);
+assert.ok(existsSync(process.env.V4_OBSERVER_LOG), `observer log missing; runtime logs: ${logs.join(" | ")}`);
 const observerLog = readFileSync(process.env.V4_OBSERVER_LOG, "utf8")
   .trim()
   .split("\n")
@@ -298,7 +284,7 @@ assert.ok(logs.some((message) => message.includes("phase=assistant")));
 assert.equal(
   logs.filter((message) => message.includes("phase=assistant")).length,
   1,
-  "child bubbles must not create another assistant observation",
+  "child/follow-on payloads must not create another assistant observation",
 );
-console.log("v4.2 shadow recall runtime: ok");
+console.log("v4.3.1 structured planner handoff and V4 observer runtime: ok");
 JS
