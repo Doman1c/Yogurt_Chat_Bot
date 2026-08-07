@@ -15,6 +15,7 @@ from .response_planner import ResponsePlanner
 _CONTINUITY_CONTEXT_MAX_CHARS = 1750
 _PROJECT_STATUS_MAX_ITEMS = 5
 _PROJECT_STATUS_MAX_ITEM_CHARS = 220
+_DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _request(stream: Any) -> Mapping[str, Any]:
@@ -132,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument("--db", type=Path, required=True)
-    parser.add_argument("--project-root", type=Path)
+    parser.add_argument("--project-root", type=Path, default=_DEFAULT_PROJECT_ROOT)
     parser.add_argument("--topic-ttl-minutes", type=int, default=60)
     parser.add_argument("--mood-ttl-minutes", type=int, default=30)
     parser.add_argument("--thread-ttl-minutes", type=int, default=1440)
