@@ -2,21 +2,22 @@
   "schema_version": 1,
   "project": "Yogurt Chat Bot",
   "current_version": "V4.3.3",
-  "plugin_version": "0.6.3-alpha.7",
-  "current_stage": "persistent ProjectState real-device validation before resuming outbound acceptance",
+  "plugin_version": "0.6.3-alpha.8",
+  "current_stage": "weak-only final-parent correlation and project-routing real-device validation before resuming full outbound acceptance",
   "current_topic": "统一发送协调",
   "completed": [
     "V4.3.1 structured Planner handoff is validated on the real WeChat bot with matching nonzero stateVersion",
     "V4.3.2 cross-hook strong correlation and alpha.6 local/CI regression are passing",
     "V4.3.3 persistent ProjectState Store, revision log, deterministic explicit-progress parser, and continuity resolver are implemented",
-    "ProjectState CI #184 passes Python 3.9-3.12 plus Node.js 22, including read-only protection for progress questions"
+    "alpha.8 adds explicit top-level weak-parent recovery without relaxing strict child correlation globally, plus bounded alias-kind diagnostics",
+    "ProjectState and Outbound follow-up prompts now stay in the project planning route and the Planner explicitly forbids unconfirmed sticker-delivery narration"
   ],
   "next": [
-    "sync alpha.7 to the Mac while preserving local assets/config and local sticker threshold edits",
-    "tell Yogurt the current version/stage in WeChat and verify the explicit ProjectState update is persisted and acknowledged",
-    "ask the current progress again and verify the read-only question does not create another ProjectState revision",
-    "resume real-device Shadow recheck so Planner target 2 and legacy actual 2 are observed as matched=true",
-    "then run rapid two-turn, Sticker interleaving, Enforced sanity, and both-flags-disabled rollback validation"
+    "sync alpha.8 to the Mac while preserving local assets/config and local sticker threshold edits",
+    "repeat the real-device Shadow prompt and verify V3 logs weak_parent only when needed, multi bubble count=2, and V4.3 Shadow actualBubbles=2 matched=true",
+    "repeat the ProjectState/Outbound summary prompt and verify topic=统一发送协调, act=plan, sticker=neutral, with no narration about automatic sticker sending",
+    "then run rapid two-turn and Sticker interleaving validation",
+    "finish with quick Enforced target-1/target-2 sanity and both-flags-disabled rollback"
   ],
   "historical_versions_are_background_only": true
 }
