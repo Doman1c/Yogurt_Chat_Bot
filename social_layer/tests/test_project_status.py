@@ -57,13 +57,14 @@ def test_project_status_is_injected_ahead_of_historical_progress(tmp_path):
         status,
     )
 
-    assert "权威项目版本：V4.3.2" in context
+    assert "当前项目版本：V4.3.2" in context
     assert "当前插件版本：0.6.3-alpha.6" in context
     assert "当前工程阶段：real-device Shadow validation" in context
     assert "alpha.6 local regression passed" in context
     assert "verify matched=true on the real WeChat bot" in context
-    assert "仓库 Project Status 是工程进度的权威来源" in context
-    assert context.index("权威项目版本：V4.3.2") < context.index("连续性规则：")
+    assert "仓库 Project Status 是代码基线" in context
+    assert "用户明确确认的 ProjectState 优先级最高" in context
+    assert context.index("当前项目版本：V4.3.2") < context.index("连续性规则：")
 
 
 def test_project_status_does_not_leak_into_unrelated_topic(tmp_path):
@@ -81,7 +82,7 @@ def test_project_status_does_not_leak_into_unrelated_topic(tmp_path):
             "next": [],
         },
     )
-    assert "权威项目版本：V4.3.2" not in context
+    assert "当前项目版本：V4.3.2" not in context
 
 
 def test_invalid_project_status_fails_open(tmp_path):
