@@ -71,7 +71,7 @@ def test_user_explicit_progress_persists_and_beats_repository(monkeypatch, capsy
     assert first["project_state"]["current_version"] == "V4.3.3"
     assert first["project_state"]["plugin_version"] == "alpha.7"
     assert first["project_state"]["current_stage"] == "SQLite 持久化验证"
-    assert first["project_state"]["next"] == ["测试微信里直接更新进度"]
+    assert first["project_state"]["next"] == ["微信里直接更新进度"]
     assert "当前项目版本：V4.3.3" in first["response_plan_context"]
     assert "当前插件版本：alpha.7" in first["response_plan_context"]
     assert "项目状态来源：用户明确确认（最高优先级）" in first["response_plan_context"]
