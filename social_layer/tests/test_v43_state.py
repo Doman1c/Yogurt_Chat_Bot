@@ -87,6 +87,29 @@ def test_v43_followups_inherit_active_phase_without_version_marker(tmp_path):
     assert "V4.0 测试已通过" not in completed.recent_actions
 
 
+def test_projectstate_outbound_completion_plus_next_is_project_plan(tmp_path):
+    store = ConversationStateRuntimeStore(tmp_path / "state.sqlite3")
+    message = "总结一下刚刚完成的 ProjectState 实机验证，然后告诉我接下来 Outbound 要验证什么。"
+    state = store.observe_user_turn(
+        "owner",
+        "session:projectstate-outbound",
+        message,
+    )
+
+    assert state.current_topic == "统一发送协调"
+    assert state.dialogue_act == "plan"
+
+    planner = ResponsePlanner()
+    plan = planner.plan(message, state)
+    assert plan.dialogue_act == "plan"
+    assert plan.primary_goal == "advance_current_project"
+    assert plan.sticker_preference == "neutral"
+
+    context = planner.build_context_block(plan)
+    assert "自动表情/气泡发送流程" in context
+    assert "绝不能说“系统会/将自动发送表情包”" in context
+
+
 def test_current_continuity_context_precedes_old_project_versions(tmp_path):
     store = ConversationStateRuntimeStore(tmp_path / "state.sqlite3")
     key = "session:v43-context"
