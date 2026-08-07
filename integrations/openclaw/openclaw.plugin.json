@@ -1,8 +1,8 @@
 {
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
-  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, V4.1 response planning, V4.2 shadow recall gating, and opt-in V4.3.1 outbound coordination with structured turn/sticker correlation.",
-  "version": "0.6.3-alpha.5",
+  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, V4.1 response planning, V4.2 shadow recall gating, and opt-in V4.3.2 outbound coordination with structured lifecycle and cross-hook turn correlation.",
+  "version": "0.6.3-alpha.6",
   "activation": {
     "onStartup": true
   },
@@ -15,217 +15,45 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "enabled": {
-        "type": "boolean",
-        "default": true
-      },
-      "pythonPath": {
-        "type": "string",
-        "default": "python3"
-      },
-      "repoPath": {
-        "type": "string"
-      },
-      "dbPath": {
-        "type": "string",
-        "default": "~/.openclaw/yogurt-social/memory.sqlite3"
-      },
-      "defaultUserId": {
-        "type": "string",
-        "default": "owner"
-      },
-      "senderMap": {
-        "type": "object",
-        "additionalProperties": {
-          "type": "string"
-        },
-        "default": {}
-      },
-      "ownerSenderIds": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "default": []
-      },
-      "unknownSenderPolicy": {
-        "type": "string",
-        "enum": [
-          "default",
-          "pseudonymous",
-          "skip"
-        ],
-        "default": "default"
-      },
-      "allowedChannels": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
-        "default": []
-      },
-      "onlyUserTurns": {
-        "type": "boolean",
-        "default": true
-      },
-      "timeoutMs": {
-        "type": "integer",
-        "minimum": 250,
-        "maximum": 10000,
-        "default": 2500
-      },
-      "maxMemories": {
-        "type": "integer",
-        "minimum": 0,
-        "maximum": 10,
-        "default": 3
-      },
-      "stickerEnabled": {
-        "type": "boolean",
-        "default": false
-      },
-      "stickerConfigPath": {
-        "type": "string",
-        "default": "social_layer/config/stickers.json"
-      },
-      "stickerSelectionMode": {
-        "type": "string",
-        "enum": [
-          "auto",
-          "tool"
-        ],
-        "default": "auto"
-      },
-      "autoMemoryEnabled": {
-        "type": "boolean",
-        "default": false
-      },
-      "autoMemoryPromotionThreshold": {
-        "type": "number",
-        "minimum": 0.5,
-        "maximum": 1.0,
-        "default": 0.78
-      },
-      "autoMemoryTimeoutMs": {
-        "type": "integer",
-        "minimum": 500,
-        "maximum": 10000,
-        "default": 2500
-      },
-      "multiBubbleEnabled": {
-        "type": "boolean",
-        "default": false
-      },
-      "multiBubbleMinChars": {
-        "type": "integer",
-        "minimum": 8,
-        "maximum": 200,
-        "default": 24
-      },
-      "multiBubbleMaxChars": {
-        "type": "integer",
-        "minimum": 80,
-        "maximum": 2000,
-        "default": 360
-      },
-      "multiBubbleMaxBubbles": {
-        "type": "integer",
-        "minimum": 2,
-        "maximum": 4,
-        "default": 3
-      },
-      "multiBubbleDelayMs": {
-        "type": "integer",
-        "minimum": 0,
-        "maximum": 3000,
-        "default": 420
-      },
-      "conversationStateEnabled": {
-        "type": "boolean",
-        "default": false
-      },
-      "conversationStateTimeoutMs": {
-        "type": "integer",
-        "minimum": 500,
-        "maximum": 10000,
-        "default": 2500
-      },
-      "conversationStateTopicTtlMinutes": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 10080,
-        "default": 60
-      },
-      "conversationStateMoodTtlMinutes": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 1440,
-        "default": 30
-      },
-      "conversationStateThreadTtlMinutes": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 43200,
-        "default": 1440
-      },
-      "conversationStateMaxOpenThreads": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 20,
-        "default": 5
-      },
-      "conversationStateMaxRecentActions": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 20,
-        "default": 6
-      },
-      "responsePlannerEnabled": {
-        "type": "boolean",
-        "default": false
-      },
-      "responsePlannerMaxContextChars": {
-        "type": "integer",
-        "minimum": 300,
-        "maximum": 1800,
-        "default": 1600
-      },
-      "memoryRecallGateEnabled": {
-        "type": "boolean",
-        "default": false
-      },
-      "memoryRecallMinScore": {
-        "type": "number",
-        "minimum": 0.2,
-        "maximum": 0.95,
-        "default": 0.48
-      },
-      "memoryRecallCooldownTurns": {
-        "type": "integer",
-        "minimum": 0,
-        "maximum": 100,
-        "default": 8
-      },
-      "memoryRecallSameMemoryCooldownTurns": {
-        "type": "integer",
-        "minimum": 0,
-        "maximum": 300,
-        "default": 20
-      },
-      "memoryRecallMaxCandidates": {
-        "type": "integer",
-        "minimum": 1,
-        "maximum": 20,
-        "default": 5
-      },
-      "unifiedOutboundShadowEnabled": {
-        "type": "boolean",
-        "default": false
-      },
-      "unifiedOutboundEnforceEnabled": {
-        "type": "boolean",
-        "default": false
-      }
+      "enabled": { "type": "boolean", "default": true },
+      "pythonPath": { "type": "string", "default": "python3" },
+      "repoPath": { "type": "string" },
+      "dbPath": { "type": "string", "default": "~/.openclaw/yogurt-social/memory.sqlite3" },
+      "defaultUserId": { "type": "string", "default": "owner" },
+      "senderMap": { "type": "object", "additionalProperties": { "type": "string" }, "default": {} },
+      "ownerSenderIds": { "type": "array", "items": { "type": "string" }, "default": [] },
+      "unknownSenderPolicy": { "type": "string", "enum": ["default", "pseudonymous", "skip"], "default": "default" },
+      "allowedChannels": { "type": "array", "items": { "type": "string" }, "default": [] },
+      "onlyUserTurns": { "type": "boolean", "default": true },
+      "timeoutMs": { "type": "integer", "minimum": 250, "maximum": 10000, "default": 2500 },
+      "maxMemories": { "type": "integer", "minimum": 0, "maximum": 10, "default": 3 },
+      "stickerEnabled": { "type": "boolean", "default": false },
+      "stickerConfigPath": { "type": "string", "default": "social_layer/config/stickers.json" },
+      "stickerSelectionMode": { "type": "string", "enum": ["auto", "tool"], "default": "auto" },
+      "autoMemoryEnabled": { "type": "boolean", "default": false },
+      "autoMemoryPromotionThreshold": { "type": "number", "minimum": 0.5, "maximum": 1.0, "default": 0.78 },
+      "autoMemoryTimeoutMs": { "type": "integer", "minimum": 500, "maximum": 10000, "default": 2500 },
+      "multiBubbleEnabled": { "type": "boolean", "default": false },
+      "multiBubbleMinChars": { "type": "integer", "minimum": 8, "maximum": 200, "default": 24 },
+      "multiBubbleMaxChars": { "type": "integer", "minimum": 80, "maximum": 2000, "default": 360 },
+      "multiBubbleMaxBubbles": { "type": "integer", "minimum": 2, "maximum": 4, "default": 3 },
+      "multiBubbleDelayMs": { "type": "integer", "minimum": 0, "maximum": 3000, "default": 420 },
+      "conversationStateEnabled": { "type": "boolean", "default": false },
+      "conversationStateTimeoutMs": { "type": "integer", "minimum": 500, "maximum": 10000, "default": 2500 },
+      "conversationStateTopicTtlMinutes": { "type": "integer", "minimum": 1, "maximum": 10080, "default": 60 },
+      "conversationStateMoodTtlMinutes": { "type": "integer", "minimum": 1, "maximum": 1440, "default": 30 },
+      "conversationStateThreadTtlMinutes": { "type": "integer", "minimum": 1, "maximum": 43200, "default": 1440 },
+      "conversationStateMaxOpenThreads": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 },
+      "conversationStateMaxRecentActions": { "type": "integer", "minimum": 1, "maximum": 20, "default": 6 },
+      "responsePlannerEnabled": { "type": "boolean", "default": false },
+      "responsePlannerMaxContextChars": { "type": "integer", "minimum": 300, "maximum": 1800, "default": 1600 },
+      "memoryRecallGateEnabled": { "type": "boolean", "default": false },
+      "memoryRecallMinScore": { "type": "number", "minimum": 0.2, "maximum": 0.95, "default": 0.48 },
+      "memoryRecallCooldownTurns": { "type": "integer", "minimum": 0, "maximum": 100, "default": 8 },
+      "memoryRecallSameMemoryCooldownTurns": { "type": "integer", "minimum": 0, "maximum": 300, "default": 20 },
+      "memoryRecallMaxCandidates": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 },
+      "unifiedOutboundShadowEnabled": { "type": "boolean", "default": false },
+      "unifiedOutboundEnforceEnabled": { "type": "boolean", "default": false }
     }
   }
 }
