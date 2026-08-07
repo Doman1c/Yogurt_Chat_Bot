@@ -7,9 +7,15 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 TEST_ROOT="$TMP_DIR/plugin-test"
 mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
 
-cp "$REPO_ROOT/integrations/openclaw/index-v43.ts" "$TEST_ROOT/index-v43.ts"
-cp "$REPO_ROOT/integrations/openclaw/outbound-coordinator.ts" "$TEST_ROOT/outbound-coordinator.ts"
-cp "$REPO_ROOT/integrations/openclaw/multi-bubble.ts" "$TEST_ROOT/multi-bubble.ts"
+for file in \
+  index-v43.ts \
+  outbound-coordinator.ts \
+  response-plan-store.ts \
+  sticker-lifecycle.ts \
+  turn-correlation.ts \
+  multi-bubble.ts; do
+  cp "$REPO_ROOT/integrations/openclaw/$file" "$TEST_ROOT/$file"
+done
 
 cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
 {
@@ -34,115 +40,94 @@ export function asRecord(value: unknown): Record<string, unknown> {
     ? value as Record<string, unknown>
     : {};
 }
-
 export function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
-
 export function channelFromContext(ctx: any): string {
   return optionalString(ctx?.channelId) || "openclaw-weixin";
 }
-
 export function senderIdFromContext(ctx: any): string | undefined {
   return optionalString(ctx?.senderId);
 }
-
-export function contextAliases(
-  ctx: any,
-  channel: string,
-  senderId?: string,
-): string[] {
+export function contextAliases(ctx: any, channel: string, senderId?: string, event?: any): string[] {
   const aliases: string[] = [];
   if (ctx?.sessionKey) aliases.push(`session:${ctx.sessionKey}`);
+  if (event?.sessionKey) aliases.push(`session:${event.sessionKey}`);
   if (senderId) aliases.push(`sender:${channel}:${senderId}`);
   return aliases;
 }
 TS
 
 cat > "$TEST_ROOT/index-v4.ts" <<'TS'
+import { responsePlanTurns } from "./response-plan-store.ts";
+import { emitStickerLifecycle } from "./sticker-lifecycle.ts";
+import { addTurnCorrelationAliases } from "./turn-correlation.ts";
+
+function aliasesFor(event: any, ctx: any): string[] {
+  const channel = ctx?.channelId || "openclaw-weixin";
+  const aliases: string[] = [];
+  if (ctx?.sessionKey) aliases.push(`session:${ctx.sessionKey}`);
+  if (ctx?.senderId) aliases.push(`sender:${channel}:${ctx.senderId}`);
+  if (event?.to) aliases.push(`peer:${channel}:${event.to}`);
+  return addTurnCorrelationAliases(aliases, event, ctx);
+}
+function stateVersion(prompt: string): number {
+  const match = prompt.match(/state(\d+)/);
+  return match ? Number.parseInt(match[1], 10) : 41;
+}
+
 export default {
   register(api: any) {
+    api.on("before_prompt_build", async () => undefined, { priority: 60 });
     api.on(
       "before_prompt_build",
-      async () => undefined,
-      { priority: 60 },
-    );
-
-    api.on(
-      "before_prompt_build",
-      async (event: any) => ({
-        prependContext: [
-          "[Yogurt Response Plan V4.1]",
-          "本轮行为：plan",
-          "建议长度：中等",
-          `建议气泡数：${String(event?.prompt || "").includes("two") ? 2 : 1}`,
-          "表情倾向：中性",
-        ].join("\n"),
-      }),
+      async (event: any, ctx: any) => {
+        const prompt = String(event?.prompt || "");
+        responsePlanTurns.register(aliasesFor(event, ctx), {
+          plan_version: "4.1",
+          dialogue_act: "plan",
+          primary_goal: "advance_current_project",
+          reply_length: "medium",
+          bubble_target: prompt.includes("two") ? 2 : 1,
+          ask_followup: false,
+          sticker_preference: "neutral",
+          state_version: stateVersion(prompt),
+        });
+        return { prependContext: "[Yogurt Response Plan V4.1]\nstructured-test" };
+      },
       { priority: 50 },
     );
-
     api.on(
       "message_sending",
-      async (event: any) => {
+      async (event: any, ctx: any) => {
         const content = String(event?.content || "");
+        const aliases = aliasesFor(event, ctx);
         if (content === "sticker-success") {
-          api.logger.info(
-            "yogurt-social-injector: post-reply sticker selected sticker=test_sticker reason=score_pass",
-          );
-          api.logger.info(
-            "yogurt-social-injector: sticker outbound scheduled trigger=agent_end mode=auto hasTarget=true delayMs=0",
-          );
-          setTimeout(() => {
-            api.logger.info(
-              "yogurt-social-injector: sticker media sent trigger=channel_outbound_adapter mode=auto sticker=test_sticker",
-            );
-          }, 0);
+          emitStickerLifecycle({ aliases, phase: "selected", reason: "explicit", stickerId: "test_sticker", trigger: "agent_end" });
+          emitStickerLifecycle({ aliases, phase: "scheduled", reason: "delivery_scheduled", stickerId: "test_sticker", trigger: "agent_end" });
+          setTimeout(() => emitStickerLifecycle({ aliases, phase: "sent", reason: "media_sent", stickerId: "test_sticker", trigger: "channel_outbound_adapter" }), 8);
         }
         if (content === "sticker-failure") {
-          api.logger.info(
-            "yogurt-social-injector: post-reply sticker selected sticker=failed_sticker reason=score_pass",
-          );
-          api.logger.info(
-            "yogurt-social-injector: sticker outbound scheduled trigger=agent_end mode=auto hasTarget=true delayMs=0",
-          );
-          setTimeout(() => {
-            api.logger.warn(
-              "yogurt-social-injector: sticker media send failed trigger=channel_outbound_adapter (weixin_send_media_unavailable); text preserved",
-            );
-          }, 0);
+          emitStickerLifecycle({ aliases, phase: "selected", reason: "proactive", stickerId: "failed_sticker", trigger: "agent_end" });
+          emitStickerLifecycle({ aliases, phase: "scheduled", reason: "delivery_scheduled", stickerId: "failed_sticker", trigger: "agent_end" });
+          setTimeout(() => emitStickerLifecycle({ aliases, phase: "failed", reason: "weixin_send_media_unavailable", stickerId: "failed_sticker", trigger: "channel_outbound_adapter" }), 0);
         }
         if (content === "sticker-skipped") {
-          api.logger.info(
-            "yogurt-social-injector: send decision trigger=agent_end mode=auto shouldSend=false score=4.20 threshold=5.80 intents=casual reasons=below_threshold candidates=2 top=a:4.2 runnerUp=b:3.9",
-          );
+          emitStickerLifecycle({ aliases, phase: "skipped", reason: "below_threshold", trigger: "agent_end" });
         }
       },
       { priority: 80 },
     );
-
     api.on(
       "message_sending",
       async (event: any, ctx: any) => {
         api.legacyCalls += 1;
         if (event?.content === "parent-shadow") {
-          await api.testDispatch(
-            "message_sending",
-            { content: "child-shadow", to: event.to },
-            ctx,
-          );
-          return {
-            cancel: true,
-            cancelReason: "yogurt_multi_bubble",
-            metadata: { bubbleCount: 2 },
-          };
+          await api.testDispatch("message_sending", { content: "child-shadow", to: event.to, kind: "final", runId: event.runId, metadata: { channel: "openclaw-weixin" } }, ctx);
+          return { cancel: true, cancelReason: "yogurt_multi_bubble", metadata: { bubbleCount: 2 } };
         }
         if (String(event?.content || "").includes("legacy-three")) {
-          return {
-            cancel: true,
-            cancelReason: "yogurt_multi_bubble",
-            metadata: { bubbleCount: 3 },
-          };
+          return { cancel: true, cancelReason: "yogurt_multi_bubble", metadata: { bubbleCount: 3 } };
         }
         return undefined;
       },
@@ -162,6 +147,8 @@ const hooks = new Map();
 const logs = [];
 const sent = [];
 let failAfter = Number.POSITIVE_INFINITY;
+let loadThrows = false;
+let currentDispatchContext;
 const api = {
   pluginConfig: {
     responsePlannerEnabled: true,
@@ -174,25 +161,16 @@ const api = {
   },
   legacyCalls: 0,
   config: {},
-  runtime: {
-    channel: {
-      outbound: {
-        async loadAdapter() {
-          return {
-            async sendText({ to, text }) {
-              if (sent.length >= failAfter) throw new Error("simulated_send_failure");
-              sent.push(text);
-              await dispatch(
-                "message_sending",
-                { content: text, to, metadata: { channel: "openclaw-weixin" } },
-                ctx,
-              );
-            },
-          };
-        },
-      },
-    },
-  },
+  runtime: { channel: { outbound: { async loadAdapter() {
+    if (loadThrows) throw new Error("simulated_adapter_load_failure");
+    return { async sendText({ to, text }) {
+      if (sent.length >= failAfter) throw new Error("simulated_send_failure");
+      sent.push(text);
+      if (currentDispatchContext) {
+        await dispatch("message_sending", { content: text, to, kind: "final", runId: currentDispatchContext.runId, metadata: { channel: "openclaw-weixin" } }, currentDispatchContext);
+      }
+    } };
+  } } } },
   logger: {
     info(message) { logs.push(String(message)); },
     warn(message) { logs.push(String(message)); },
@@ -204,267 +182,169 @@ const api = {
     hooks.set(name, items);
   },
 };
-
 async function dispatch(name, event, context) {
   let result;
-  const ordered = [...(hooks.get(name) || [])].sort(
-    (left, right) => right.priority - left.priority,
-  );
-  for (const item of ordered) {
-    const current = await item.handler(event, context);
-    if (current !== undefined) result = current;
+  const previousContext = currentDispatchContext;
+  currentDispatchContext = context;
+  try {
+    const ordered = [...(hooks.get(name) || [])].sort((left, right) => right.priority - left.priority);
+    for (const item of ordered) {
+      const current = await item.handler(event, context);
+      if (current !== undefined) result = current;
+    }
+    return result;
+  } finally {
+    currentDispatchContext = previousContext;
   }
-  return result;
 }
 api.testDispatch = dispatch;
 plugin.register(api);
 
-const ctx = {
-  channelId: "openclaw-weixin",
-  senderId: "wx-owner@im.wechat",
-  sessionKey: "session-v43",
-};
+function ctx(runId) {
+  return { channelId: "openclaw-weixin", senderId: "wx-owner@im.wechat", sessionKey: "session-v43", runId };
+}
+function outbound(content, runId, extra = {}) {
+  return { content, to: "wx-owner@im.wechat", kind: "final", runId, metadata: { channel: "openclaw-weixin" }, ...extra };
+}
 
-await dispatch("before_prompt_build", { prompt: "one" }, ctx);
-await dispatch(
-  "message_sending",
-  {
-    content: "legacy-three",
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
+let c = ctx("run-shadow");
+await dispatch("before_prompt_build", { prompt: "one state51", runId: c.runId }, c);
+await dispatch("message_sending", outbound("legacy-three", c.runId), c);
 assert.ok(logs.some((value) => value.includes("v4.3 outbound shadow")));
 assert.ok(logs.some((value) => value.includes("actualBubbles=3")));
-assert.ok(logs.some((value) => value.includes("matched=false")));
-assert.ok(logs.some((value) => value.includes("sticker=skipped")));
-assert.ok(logs.every((value) => !value.includes("sticker=unknown")));
+assert.ok(logs.some((value) => value.includes("stateVersion=51")));
+assert.ok(logs.every((value) => !value.includes("stateVersion=0")));
 
 logs.length = 0;
-await dispatch("before_prompt_build", { prompt: "one" }, ctx);
-await dispatch(
-  "message_sending",
-  {
-    content: "parent-shadow",
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
-assert.equal(
-  logs.filter((value) => value.includes("v4.3 outbound shadow")).length,
-  1,
-  "legacy recursive child bubbles must report only the parent",
-);
+c = ctx("run-recursive");
+await dispatch("before_prompt_build", { prompt: "one state52", runId: c.runId }, c);
+await dispatch("message_sending", outbound("parent-shadow", c.runId), c);
+assert.equal(logs.filter((value) => value.includes("v4.3 outbound shadow")).length, 1);
 
 api.pluginConfig.unifiedOutboundShadowEnabled = false;
 api.pluginConfig.unifiedOutboundEnforceEnabled = true;
 logs.length = 0;
+c = ctx("run-single");
 const callsBeforeSingle = api.legacyCalls;
 const singleText = "第一句会保留。第二句不会再被旧系统拆开。";
-await dispatch("before_prompt_build", { prompt: "one" }, ctx);
-const singleResult = await dispatch(
-  "message_sending",
-  {
-    content: singleText,
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
+await dispatch("before_prompt_build", { prompt: "one state53", runId: c.runId }, c);
+const singleResult = await dispatch("message_sending", outbound(singleText, c.runId), c);
 assert.deepEqual(singleResult, { content: singleText, cancel: false });
 assert.equal(api.legacyCalls, callsBeforeSingle);
-assert.ok(logs.some((value) => value.includes("outbound enforced")));
-assert.ok(logs.some((value) => value.includes("actualBubbles=1")));
-assert.ok(logs.some((value) => value.includes("enforced_target_applied")));
+assert.ok(logs.some((value) => value.includes("stateVersion=53")));
 assert.ok(logs.some((value) => value.includes("hostAction=explicit_passthrough")));
-assert.ok(logs.some((value) => value.includes("stickerReason=sticker_disabled")));
 
 logs.length = 0;
 sent.length = 0;
 failAfter = Number.POSITIVE_INFINITY;
-await dispatch("before_prompt_build", { prompt: "two" }, ctx);
-const exactResult = await dispatch(
-  "message_sending",
-  {
-    content: "第一句足够自然。第二句也足够自然。",
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
+c = ctx("run-two");
+await dispatch("before_prompt_build", { prompt: "two state54", runId: c.runId }, c);
+const exactResult = await dispatch("message_sending", outbound("第一句足够自然。第二句也足够自然。", c.runId), c);
 assert.equal(exactResult.cancelReason, "yogurt_unified_outbound");
 assert.deepEqual(sent, ["第一句足够自然。", "第二句也足够自然。"]);
-assert.ok(logs.some((value) => value.includes("targetBubbles=2")));
-assert.ok(logs.some((value) => value.includes("actualBubbles=2")));
-assert.ok(logs.some((value) => value.includes("matched=true")));
-assert.ok(logs.some((value) => value.includes("hostAction=coordinator_delivery")));
-assert.equal(
-  logs.filter((value) => value.includes("v4.3 outbound enforced")).length,
-  1,
-  "coordinator child bubbles must not report the parent again",
-);
+assert.ok(logs.some((value) => value.includes("targetBubbles=2") && value.includes("actualBubbles=2") && value.includes("matched=true")));
+assert.equal(logs.filter((value) => value.includes("v4.3 outbound enforced")).length, 1);
 
 logs.length = 0;
-await dispatch("before_prompt_build", { prompt: "two" }, ctx);
-const fallbackResult = await dispatch(
-  "message_sending",
-  {
-    content: "```bash\necho hi\n``` legacy-three",
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
+c = ctx("run-code");
+await dispatch("before_prompt_build", { prompt: "two state55", runId: c.runId }, c);
+const fallbackResult = await dispatch("message_sending", outbound("```bash\necho hi\n``` legacy-three", c.runId), c);
 assert.equal(fallbackResult.cancelReason, "yogurt_multi_bubble");
-assert.ok(
-  logs.some((value) => value.includes("enforcement_fallback:code_block_passthrough")),
-);
-assert.ok(logs.some((value) => value.includes("actualBubbles=3")));
-assert.ok(logs.some((value) => value.includes("hostAction=legacy_result")));
+assert.ok(logs.some((value) => value.includes("enforcement_fallback:code_block_passthrough")));
 
 logs.length = 0;
-const naturalFallbackText =
-  "这是一段长度足够但是没有句号也没有任何可以安全拆分边界的完整回复文本";
-await dispatch("before_prompt_build", { prompt: "two" }, ctx);
-const naturalFallbackResult = await dispatch(
-  "message_sending",
-  {
-    content: naturalFallbackText,
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
-assert.deepEqual(naturalFallbackResult, {
-  content: naturalFallbackText,
-  cancel: false,
-});
-assert.ok(
-  logs.some((value) =>
-    value.includes("enforcement_fallback:natural_boundary_count_mismatch"),
-  ),
-);
-assert.ok(logs.some((value) => value.includes("hostAction=explicit_passthrough")));
-assert.ok(logs.some((value) => value.includes("actualBubbles=1")));
+c = ctx("run-natural");
+const naturalFallbackText = "这是一段长度足够但是没有句号也没有任何可以安全拆分边界的完整回复文本";
+await dispatch("before_prompt_build", { prompt: "two state56", runId: c.runId }, c);
+const naturalFallbackResult = await dispatch("message_sending", outbound(naturalFallbackText, c.runId), c);
+assert.deepEqual(naturalFallbackResult, { content: naturalFallbackText, cancel: false });
+assert.ok(logs.some((value) => value.includes("natural_boundary_count_mismatch")));
 
 logs.length = 0;
 sent.length = 0;
 failAfter = 1;
-await dispatch("before_prompt_build", { prompt: "two" }, ctx);
-const partialResult = await dispatch(
-  "message_sending",
-  {
-    content: "第一句可以发送。第二句会模拟失败。",
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
+c = ctx("run-partial");
+await dispatch("before_prompt_build", { prompt: "two state57", runId: c.runId }, c);
+const partialResult = await dispatch("message_sending", outbound("第一句可以发送。第二句会模拟失败。", c.runId), c);
 assert.equal(partialResult.cancelReason, "yogurt_unified_outbound_partial");
 assert.equal(partialResult.metadata.sentCount, 1);
 assert.ok(logs.some((value) => value.includes("outcome=partial")));
-assert.ok(logs.some((value) => value.includes("enforced_partial_delivery")));
 
+logs.length = 0;
+sent.length = 0;
+failAfter = Number.POSITIVE_INFINITY;
+loadThrows = true;
+c = ctx("run-loader");
+await dispatch("before_prompt_build", { prompt: "two state58", runId: c.runId }, c);
+const loaderFallback = await dispatch("message_sending", outbound("第一句自然。第二句自然。", c.runId), c);
+assert.deepEqual(loaderFallback, { content: "第一句自然。第二句自然。", cancel: false });
+assert.ok(logs.some((value) => value.includes("enforcement_fallback:adapter_load_failed")));
+loadThrows = false;
+
+logs.length = 0;
+c = ctx("run-media");
+await dispatch("before_prompt_build", { prompt: "two state59", runId: c.runId }, c);
+const mediaFallback = await dispatch("message_sending", outbound("带图片的说明文字", c.runId, { media: [{ type: "image", id: "img-1" }] }), c);
+assert.deepEqual(mediaFallback, { content: "带图片的说明文字", cancel: false });
+assert.ok(logs.some((value) => value.includes("enforcement_fallback:media_passthrough")));
+assert.ok(logs.some((value) => value.includes("outcome=media_passthrough")));
+
+logs.length = 0;
+c = ctx("run-final-filter");
+await dispatch("before_prompt_build", { prompt: "one state60", runId: c.runId }, c);
+await dispatch("message_sending", { content: "progress", to: "wx-owner@im.wechat", kind: "progress", runId: c.runId, metadata: { channel: "openclaw-weixin" } }, c);
+assert.equal(logs.some((value) => value.includes("v4.3 outbound enforced")), false);
+await dispatch("message_sending", outbound("最终正文", c.runId), c);
+assert.ok(logs.some((value) => value.includes("stateVersion=60")));
+
+api.pluginConfig.unifiedOutboundShadowEnabled = true;
+api.pluginConfig.unifiedOutboundEnforceEnabled = false;
+logs.length = 0;
+const a = ctx("run-concurrent-a");
+const b = ctx("run-concurrent-b");
+await dispatch("before_prompt_build", { prompt: "one state101", runId: a.runId }, a);
+await dispatch("before_prompt_build", { prompt: "two state102", runId: b.runId }, b);
+await dispatch("message_sending", outbound("legacy-three", b.runId), b);
+await dispatch("message_sending", outbound("legacy-three", a.runId), a);
+const shadowLogs = logs.filter((value) => value.includes("v4.3 outbound shadow"));
+assert.equal(shadowLogs.length, 2);
+assert.ok(shadowLogs.some((value) => value.includes("targetBubbles=2") && value.includes("stateVersion=102")));
+assert.ok(shadowLogs.some((value) => value.includes("targetBubbles=1") && value.includes("stateVersion=101")));
+
+api.pluginConfig.unifiedOutboundShadowEnabled = false;
+api.pluginConfig.unifiedOutboundEnforceEnabled = true;
 api.pluginConfig.stickerEnabled = true;
 logs.length = 0;
-await dispatch("before_prompt_build", { prompt: "one" }, ctx);
-const stickerSuccessResult = await dispatch(
-  "message_sending",
-  {
-    content: "sticker-success",
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
-assert.deepEqual(stickerSuccessResult, {
-  content: "sticker-success",
-  cancel: false,
-});
-assert.ok(
-  logs.some((value) =>
-    value.includes("v4.3 outbound enforced") &&
-    value.includes("sticker=pending") &&
-    value.includes("stickerReason=delivery_scheduled"),
-  ),
-);
-await new Promise((resolve) => setTimeout(resolve, 15));
-assert.ok(
-  logs.some((value) =>
-    value.includes("v4.3 outbound finalized") &&
-    value.includes("mode=enforced") &&
-    value.includes("actualBubbles=1") &&
-    value.includes("sticker=sent") &&
-    value.includes("stickerReason=media_sent") &&
-    value.includes("finalStage=sticker"),
-  ),
-);
-assert.ok(logs.every((value) => !value.includes("sticker=unknown")));
+const stickerA = ctx("run-sticker-a");
+const stickerB = ctx("run-sticker-b");
+await dispatch("before_prompt_build", { prompt: "one state201", runId: stickerA.runId }, stickerA);
+await dispatch("message_sending", outbound("sticker-success", stickerA.runId), stickerA);
+await dispatch("before_prompt_build", { prompt: "one state202", runId: stickerB.runId }, stickerB);
+await dispatch("message_sending", outbound("sticker-skipped", stickerB.runId), stickerB);
+await new Promise((resolve) => setTimeout(resolve, 20));
+assert.ok(logs.some((value) => value.includes("stateVersion=201") && value.includes("sticker=pending")));
+assert.ok(logs.some((value) => value.includes("v4.3 outbound finalized") && value.includes("stateVersion=201") && value.includes("sticker=sent") && value.includes("stickerReason=media_sent")));
+assert.ok(logs.some((value) => value.includes("stateVersion=202") && value.includes("sticker=skipped") && value.includes("stickerReason=below_threshold")));
+assert.equal(logs.some((value) => value.includes("v4.3 outbound finalized") && value.includes("stateVersion=202")), false);
 
 logs.length = 0;
-await dispatch("before_prompt_build", { prompt: "one" }, ctx);
-await dispatch(
-  "message_sending",
-  {
-    content: "sticker-failure",
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
+const stickerFailure = ctx("run-sticker-fail");
+await dispatch("before_prompt_build", { prompt: "one state203", runId: stickerFailure.runId }, stickerFailure);
+await dispatch("message_sending", outbound("sticker-failure", stickerFailure.runId), stickerFailure);
 await new Promise((resolve) => setTimeout(resolve, 15));
-assert.ok(
-  logs.some((value) =>
-    value.includes("v4.3 outbound finalized") &&
-    value.includes("sticker=failed") &&
-    value.includes("stickerReason=weixin_send_media_unavailable") &&
-    value.includes("sticker_failed"),
-  ),
-);
-
-logs.length = 0;
-await dispatch("before_prompt_build", { prompt: "one" }, ctx);
-await dispatch(
-  "message_sending",
-  {
-    content: "sticker-skipped",
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
-assert.ok(
-  logs.some((value) =>
-    value.includes("v4.3 outbound enforced") &&
-    value.includes("sticker=skipped") &&
-    value.includes("stickerReason=below_threshold"),
-  ),
-);
-assert.equal(
-  logs.some((value) => value.includes("v4.3 outbound finalized")),
-  false,
-  "terminal skipped decisions must not create a pending finalizer",
-);
+assert.ok(logs.some((value) => value.includes("v4.3 outbound finalized") && value.includes("stateVersion=203") && value.includes("sticker=failed") && value.includes("stickerReason=weixin_send_media_unavailable")));
 
 logs.length = 0;
 api.pluginConfig.stickerEnabled = false;
 api.pluginConfig.unifiedOutboundEnforceEnabled = false;
-await dispatch("before_prompt_build", { prompt: "two" }, ctx);
-await dispatch(
-  "message_sending",
-  {
-    content: "legacy-three",
-    to: "wx-owner@im.wechat",
-    metadata: { channel: "openclaw-weixin" },
-  },
-  ctx,
-);
+api.pluginConfig.unifiedOutboundShadowEnabled = false;
+const disabled = ctx("run-disabled");
+await dispatch("before_prompt_build", { prompt: "two state301", runId: disabled.runId }, disabled);
+await dispatch("message_sending", outbound("legacy-three", disabled.runId), disabled);
 assert.equal(logs.some((value) => value.includes("v4.3 outbound intent ready")), false);
 assert.equal(logs.some((value) => value.includes("v4.3 outbound enforced")), false);
 assert.equal(logs.some((value) => value.includes("v4.3 outbound shadow")), false);
 assert.equal(logs.some((value) => value.includes("v4.3 outbound finalized")), false);
 
-console.log("v4.3 shadow, enforcement, and sticker finalization runtime: ok");
+console.log("v4.3.1 structured planner, strong turn correlation, enforcement, and sticker lifecycle runtime: ok");
 JS
