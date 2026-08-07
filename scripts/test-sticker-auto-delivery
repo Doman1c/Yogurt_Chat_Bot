@@ -24,7 +24,9 @@ for source in \
   sticker-plugin-utils.ts \
   sticker-selection.ts \
   sticker-turn.ts \
-  sticker-v21-utils.ts; do
+  sticker-v21-utils.ts \
+  sticker-lifecycle.ts \
+  turn-correlation.ts; do
   cp "$REPO_ROOT/integrations/openclaw/$source" "$TEST_ROOT/$source"
 done
 
@@ -132,23 +134,13 @@ const pluginConfig = {
 plugin.register({
   config: openclawConfig,
   pluginConfig,
-  resolvePath(value) {
-    return value;
-  },
+  resolvePath(value) { return value; },
   logger: {
-    info(message) {
-      logs.push(String(message));
-    },
-    warn(message) {
-      logs.push(String(message));
-    },
+    info(message) { logs.push(String(message)); },
+    warn(message) { logs.push(String(message)); },
   },
-  registerTool(definition) {
-    toolFactory = definition;
-  },
-  on(name, handler) {
-    hooks[name] = handler;
-  },
+  registerTool(definition) { toolFactory = definition; },
+  on(name, handler) { hooks[name] = handler; },
   runtime: {
     channel: {
       outbound: {
@@ -180,10 +172,7 @@ const context = {
   accountId: "weixin-account",
 };
 const promptResult = await hooks.before_prompt_build(
-  {
-    prompt: "酸奶，发一个卖萌的表情包过来",
-    context: { pluginConfig },
-  },
+  { prompt: "酸奶，发一个卖萌的表情包过来", context: { pluginConfig } },
   context,
 );
 if (!promptResult?.prependContext) {
@@ -193,20 +182,14 @@ if (!promptResult?.prependContext) {
   console.error(logs.length > 0 ? logs.join("\n") : "(no plugin logs captured)");
   console.error("===============================================");
 }
-assert.ok(
-  promptResult?.prependContext,
-  "before_prompt_build returned no context; see diagnostic logs above",
-);
+assert.ok(promptResult?.prependContext, "before_prompt_build returned no context; see diagnostic logs above");
 assert.match(promptResult.prependContext, /\[Yogurt Sticker Delivery\]/);
 assert.doesNotMatch(promptResult.prependContext, /\[Yogurt Sticker Candidates\]/);
 assert.doesNotMatch(promptResult.prependContext, /一只猫咪正在卖萌/);
 assert.match(promptResult.prependContext, /不要描述、解释或虚构表情包画面/);
 
 await hooks.agent_end(
-  {
-    success: true,
-    messages: [{ role: "assistant", content: "来啦～" }],
-  },
+  { success: true, messages: [{ role: "assistant", content: "来啦～" }] },
   context,
 );
 await new Promise((resolve) => setTimeout(resolve, 80));
@@ -221,48 +204,30 @@ assert.match(
   sentMedia[0].mediaUrl,
   /assets\/stickers\/images\/sticker-test123\.webp$/,
 );
-assert.ok(
-  logs.some((message) => message.includes("send decision trigger=agent_end")),
-);
+assert.ok(logs.some((message) => message.includes("send decision trigger=agent_end")));
 assert.ok(
   logs.some((message) =>
     message.includes("sticker media sent trigger=channel_outbound_adapter mode=auto"),
   ),
 );
 
-const fallbackContext = {
-  ...context,
-  sessionKey: "session-message-sent",
-};
+const fallbackContext = { ...context, sessionKey: "session-message-sent" };
 await hooks.before_prompt_build(
-  {
-    prompt: "酸奶，再发一个卖萌的表情包",
-    context: { pluginConfig },
-  },
+  { prompt: "酸奶，再发一个卖萌的表情包", context: { pluginConfig } },
   fallbackContext,
 );
 await hooks.agent_end({ success: true }, fallbackContext);
 await hooks.message_sent(
-  {
-    success: true,
-    content: "再来一张～",
-    to: "wx-owner",
-    accountId: "weixin-account",
-  },
+  { success: true, content: "再来一张～", to: "wx-owner", accountId: "weixin-account" },
   fallbackContext,
 );
 await new Promise((resolve) => setTimeout(resolve, 80));
 assert.equal(sentMedia.length, 2, "message_sent must provide final-text fallback");
 
+const unavailableContext = { ...context, sessionKey: "session-unavailable" };
 const unavailableResult = await hooks.before_prompt_build(
-  {
-    prompt: "酸奶，发一个表情包，模拟无候选",
-    context: { pluginConfig },
-  },
-  {
-    ...context,
-    sessionKey: "session-unavailable",
-  },
+  { prompt: "酸奶，发一个表情包，模拟无候选", context: { pluginConfig } },
+  unavailableContext,
 );
 assert.match(unavailableResult.prependContext, /\[Yogurt Sticker Request\]/);
 assert.match(unavailableResult.prependContext, /没有找到足够相关且安全的候选/);
@@ -271,10 +236,7 @@ assert.doesNotMatch(unavailableResult.prependContext, /一只猫咪正在卖萌/
 
 await hooks.agent_end(
   { success: true, messages: [{ role: "assistant", content: "这次没发出来。" }] },
-  {
-    ...context,
-    sessionKey: "session-unavailable",
-  },
+  unavailableContext,
 );
 await new Promise((resolve) => setTimeout(resolve, 30));
 assert.equal(sentMedia.length, 2, "no candidate must not send media");
