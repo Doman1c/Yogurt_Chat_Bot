@@ -101,6 +101,7 @@ class ResponsePlanner:
         "overcelebrate": "不要把普通进展夸张成庆祝场景",
         "excessive_roleplay": "技术内容中只保留轻微角色语气",
         "repeat_acknowledgement": "不要连续使用相同的确认句式",
+        "mention_internal_delivery": "不要在正文中预告、承诺或解释自动表情/气泡发送流程",
     }
 
     @staticmethod
@@ -130,6 +131,32 @@ class ResponsePlanner:
         )
 
     @classmethod
+    def _project_followup_request(cls, message: str) -> bool:
+        text = cls._compact(message)
+        project_markers = (
+            "projectstate",
+            "outbound",
+            "openclaw",
+            "yogurt",
+            "v4.3",
+            "统一发送",
+            "发送协调",
+            "实机验证",
+        )
+        planning_markers = (
+            "接下来",
+            "下一步",
+            "然后告诉我",
+            "要验证什么",
+            "要测试什么",
+            "继续验证",
+            "继续测试",
+        )
+        return cls._contains_any(text, project_markers) and cls._contains_any(
+            text, planning_markers
+        )
+
+    @classmethod
     def _needs_clarification(cls, message: str, state: ConversationState) -> bool:
         text = cls._compact(message)
         if len(text) > 18:
@@ -140,6 +167,12 @@ class ResponsePlanner:
 
     @classmethod
     def _effective_act(cls, message: str, state: ConversationState) -> str:
+        # A project turn can contain a completed milestone and still primarily ask
+        # for the next engineering step. Planning takes precedence over celebration
+        # so a phrase like “刚完成 ProjectState，接下来 Outbound 验证什么” does
+        # not become a sticker-oriented celebration reply.
+        if cls._project_followup_request(message):
+            return "plan"
         if cls._completion_signal(message):
             return "celebrate"
         if cls._needs_clarification(message, state):
@@ -158,7 +191,7 @@ class ResponsePlanner:
 
         act = self._effective_act(message, state)
         tones: list[str] = ["natural"]
-        avoid: list[str] = ["generic_followup_offer"]
+        avoid: list[str] = ["generic_followup_offer", "mention_internal_delivery"]
         reasons: list[str] = [f"dialogue_act:{act}"]
         goal = "respond_to_latest_message"
         reply_length = "medium"
@@ -324,7 +357,9 @@ class ResponsePlanner:
                 "执行规则：",
                 "- 该计划只约束表达方式，不得覆盖用户最新消息的事实或要求。",
                 "- 不要在回复中提及 Response Plan、状态字段、评分或内部流程。",
-                "- 气泡数和表情仅为倾向，最终发送仍由本地发送层决定。",
+                "- 气泡数和表情仅为不可见的内部倾向，最终发送仍由本地发送层独立决定。",
+                "- 除非用户当前消息明确询问发送机制，否则绝不能说“系统会/将自动发送表情包”、预告某张图片、候选、评分或自动气泡行为。",
+                "- 即使用户明确询问发送机制，也不能把尚未产生的发送倾向描述成已经发送或必定发送。",
             ]
         )
         context = "\n".join(lines)
