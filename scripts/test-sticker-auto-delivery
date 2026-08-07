@@ -95,6 +95,25 @@ const openclawConfig = { channels: { "openclaw-weixin": {} } };
 let toolFactory;
 let loadedChannel;
 
+async function waitFor(predicate, timeoutMs = 1500) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return predicate();
+}
+
+function printDiagnostic(label) {
+  console.error(`========== ${label} ==========`);
+  console.error(`node=${process.version}`);
+  console.error(`fakeBridge=${fakeBridge}`);
+  console.error(`loadedChannel=${loadedChannel || "none"}`);
+  console.error(`sentMedia=${sentMedia.length}`);
+  console.error(logs.length > 0 ? logs.join("\n") : "(no plugin logs captured)");
+  console.error("===============================================");
+}
+
 const pluginConfig = {
   enabled: true,
   pythonPath: fakeBridge,
@@ -157,13 +176,7 @@ const promptResult = await hooks.before_prompt_build(
   { prompt: "酸奶，发一个卖萌的表情包过来", context: { pluginConfig } },
   context,
 );
-if (!promptResult?.prependContext) {
-  console.error("========== sticker adapter diagnostic ==========");
-  console.error(`node=${process.version}`);
-  console.error(`fakeBridge=${fakeBridge}`);
-  console.error(logs.length > 0 ? logs.join("\n") : "(no plugin logs captured)");
-  console.error("===============================================");
-}
+if (!promptResult?.prependContext) printDiagnostic("sticker adapter pre-reply diagnostic");
 assert.ok(promptResult?.prependContext, "before_prompt_build returned no context; see diagnostic logs above");
 assert.match(promptResult.prependContext, /\[Yogurt Sticker Delivery\]/);
 assert.doesNotMatch(promptResult.prependContext, /\[Yogurt Sticker Candidates\]/);
@@ -174,8 +187,9 @@ await hooks.agent_end(
   { success: true, messages: [{ role: "assistant", content: "来啦～" }] },
   context,
 );
-await new Promise((resolve) => setTimeout(resolve, 80));
-
+const firstDelivered = await waitFor(() => sentMedia.length >= 1);
+if (!firstDelivered) printDiagnostic("sticker adapter agent_end delivery diagnostic");
+assert.equal(firstDelivered, true, "agent_end sticker delivery did not complete in time");
 assert.equal(loadedChannel, "openclaw-weixin");
 assert.equal(sentMedia.length, 1);
 assert.equal(sentMedia[0].cfg, openclawConfig);
@@ -203,7 +217,9 @@ await hooks.message_sent(
   { success: true, content: "再来一张～", to: "wx-owner", accountId: "weixin-account" },
   fallbackContext,
 );
-await new Promise((resolve) => setTimeout(resolve, 80));
+const secondDelivered = await waitFor(() => sentMedia.length >= 2);
+if (!secondDelivered) printDiagnostic("sticker adapter message_sent delivery diagnostic");
+assert.equal(secondDelivered, true, "message_sent sticker delivery did not complete in time");
 assert.equal(sentMedia.length, 2, "message_sent must provide final-text fallback");
 
 const unavailableContext = { ...context, sessionKey: "session-unavailable" };
@@ -220,7 +236,7 @@ await hooks.agent_end(
   { success: true, messages: [{ role: "assistant", content: "这次没发出来。" }] },
   unavailableContext,
 );
-await new Promise((resolve) => setTimeout(resolve, 30));
+await new Promise((resolve) => setTimeout(resolve, 50));
 assert.equal(sentMedia.length, 2, "no candidate must not send media");
 
 console.log("sticker outbound adapter v2.1: ok");
