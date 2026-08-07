@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  CorrelationStore,
+  normalizeCorrelationAliases,
+} from "./turn-correlation.ts";
+
 export type StickerCandidate = {
   id: string;
   file: string;
@@ -14,6 +19,7 @@ type CandidateSnapshot = {
   createdAt: number;
   expiresAt: number;
   candidates: Map<string, StickerCandidate>;
+  pending?: PendingStickerSelection;
 };
 
 export type StickerSelectionMode = "auto" | "tool";
@@ -54,14 +60,15 @@ export type StickerSelectionResult =
 
 export class StickerSelectionStore {
   private readonly ttlMs: number;
-  private readonly maxSnapshots: number;
-  private readonly aliases = new Map<string, string>();
-  private readonly snapshots = new Map<string, CandidateSnapshot>();
-  private readonly pending = new Map<string, PendingStickerSelection>();
+  private readonly snapshots: CorrelationStore<CandidateSnapshot>;
+  private readonly snapshotEntryIds = new Map<string, number>();
 
   constructor({ ttlMs = 5 * 60_000, maxSnapshots = 256 } = {}) {
     this.ttlMs = Math.max(1_000, ttlMs);
-    this.maxSnapshots = Math.max(8, maxSnapshots);
+    this.snapshots = new CorrelationStore<CandidateSnapshot>(
+      this.ttlMs,
+      Math.max(8, maxSnapshots),
+    );
   }
 
   register(
@@ -69,37 +76,33 @@ export class StickerSelectionStore {
     candidates: StickerCandidate[],
     now = Date.now(),
   ): string | undefined {
-    const normalizedAliases = uniqueNonEmpty(aliases);
+    const normalizedAliases = normalizeCorrelationAliases(aliases);
     if (normalizedAliases.length === 0 || candidates.length === 0) {
       this.clear(normalizedAliases);
       return undefined;
     }
 
-    this.prune(now);
+    this.cleanupStaleIds();
     this.clear(normalizedAliases);
-
-    const snapshotId = randomUUID();
     const snapshot: CandidateSnapshot = {
-      id: snapshotId,
+      id: randomUUID(),
       aliases: normalizedAliases,
       createdAt: now,
       expiresAt: now + this.ttlMs,
       candidates: new Map(candidates.map((candidate) => [candidate.id, candidate])),
     };
-    this.snapshots.set(snapshotId, snapshot);
-    for (const alias of normalizedAliases) {
-      this.aliases.set(alias, snapshotId);
-    }
-    this.trimToLimit();
-    return snapshotId;
+    const entry = this.snapshots.register(normalizedAliases, snapshot);
+    if (!entry) return undefined;
+    this.snapshotEntryIds.set(snapshot.id, entry.id);
+    this.cleanupStaleIds();
+    return snapshot.id;
   }
 
   clear(aliases: string[]): void {
-    for (const alias of uniqueNonEmpty(aliases)) {
-      const snapshotId = this.aliases.get(alias);
-      this.aliases.delete(alias);
-      if (snapshotId) this.deleteSnapshotIfUnreferenced(snapshotId);
-    }
+    const entry = this.snapshots.findEntry(aliases);
+    if (!entry) return;
+    this.snapshotEntryIds.delete(entry.value.id);
+    this.snapshots.remove(entry);
   }
 
   select(
@@ -108,12 +111,12 @@ export class StickerSelectionStore {
     now = Date.now(),
     context: SelectionContext = {},
   ): StickerSelectionResult {
-    const normalizedAliases = uniqueNonEmpty(aliases);
+    const normalizedAliases = normalizeCorrelationAliases(aliases);
     if (normalizedAliases.length === 0) {
       return { status: "rejected", reason: "missing_context" };
     }
 
-    this.prune(now);
+    this.cleanupStaleIds();
     const snapshot = this.findSnapshot(normalizedAliases);
     if (!snapshot) {
       return { status: "rejected", reason: "snapshot_missing" };
@@ -128,7 +131,7 @@ export class StickerSelectionStore {
       return { status: "rejected", reason: "not_in_candidates" };
     }
 
-    const existing = this.pending.get(snapshot.id);
+    const existing = snapshot.pending;
     if (existing) {
       if (existing.sticker.id === stickerId) {
         return {
@@ -150,7 +153,7 @@ export class StickerSelectionStore {
       mode: context.mode || "tool",
       explicit: context.explicit === true,
     };
-    this.pending.set(snapshot.id, pending);
+    snapshot.pending = pending;
     return {
       status: "selected",
       sticker: candidate,
@@ -160,19 +163,37 @@ export class StickerSelectionStore {
   }
 
   getPending(aliases: string[], now = Date.now()): PendingStickerSelection | undefined {
-    this.prune(now);
-    const snapshot = this.findSnapshot(uniqueNonEmpty(aliases));
-    return snapshot ? this.pending.get(snapshot.id) : undefined;
+    this.cleanupStaleIds();
+    const snapshot = this.findSnapshot(normalizeCorrelationAliases(aliases));
+    if (!snapshot) return undefined;
+    if (snapshot.expiresAt <= now) {
+      this.deleteSnapshot(snapshot.id);
+      return undefined;
+    }
+    return snapshot.pending;
   }
 
   consumePendingBySnapshot(
     snapshotId: string,
     now = Date.now(),
   ): PendingStickerSelection | undefined {
-    this.prune(now);
-    const pending = this.pending.get(snapshotId);
+    this.cleanupStaleIds();
+    const entryId = this.snapshotEntryIds.get(snapshotId);
+    if (!entryId) return undefined;
+    const entry = this.snapshots.getById(entryId);
+    if (!entry) {
+      this.snapshotEntryIds.delete(snapshotId);
+      return undefined;
+    }
+    const snapshot = entry.value;
+    if (snapshot.expiresAt <= now) {
+      this.deleteSnapshot(snapshotId);
+      return undefined;
+    }
+    const pending = snapshot.pending;
     if (!pending) return undefined;
-    this.deleteSnapshot(snapshotId);
+    this.snapshotEntryIds.delete(snapshotId);
+    this.snapshots.remove(entry);
     return pending;
   }
 
@@ -180,52 +201,26 @@ export class StickerSelectionStore {
     aliases: string[],
     now = Date.now(),
   ): PendingStickerSelection | undefined {
-    this.prune(now);
-    const snapshot = this.findSnapshot(uniqueNonEmpty(aliases));
+    const snapshot = this.findSnapshot(normalizeCorrelationAliases(aliases));
     return snapshot ? this.consumePendingBySnapshot(snapshot.id, now) : undefined;
   }
 
   private findSnapshot(aliases: string[]): CandidateSnapshot | undefined {
-    for (const alias of aliases) {
-      const snapshotId = this.aliases.get(alias);
-      if (!snapshotId) continue;
-      const snapshot = this.snapshots.get(snapshotId);
-      if (snapshot) return snapshot;
-    }
-    return undefined;
-  }
-
-  private prune(now: number): void {
-    for (const snapshot of [...this.snapshots.values()]) {
-      if (snapshot.expiresAt <= now) this.deleteSnapshot(snapshot.id);
-    }
-  }
-
-  private trimToLimit(): void {
-    if (this.snapshots.size <= this.maxSnapshots) return;
-    const oldest = [...this.snapshots.values()].sort(
-      (left, right) => left.createdAt - right.createdAt,
-    );
-    for (const snapshot of oldest.slice(0, this.snapshots.size - this.maxSnapshots)) {
-      this.deleteSnapshot(snapshot.id);
-    }
+    return this.snapshots.peek(aliases);
   }
 
   private deleteSnapshot(snapshotId: string): void {
-    const snapshot = this.snapshots.get(snapshotId);
-    if (!snapshot) return;
-    this.snapshots.delete(snapshotId);
-    this.pending.delete(snapshotId);
-    for (const alias of snapshot.aliases) {
-      if (this.aliases.get(alias) === snapshotId) this.aliases.delete(alias);
-    }
+    const entryId = this.snapshotEntryIds.get(snapshotId);
+    this.snapshotEntryIds.delete(snapshotId);
+    if (!entryId) return;
+    const entry = this.snapshots.getById(entryId);
+    if (entry) this.snapshots.remove(entry);
   }
 
-  private deleteSnapshotIfUnreferenced(snapshotId: string): void {
-    for (const currentSnapshotId of this.aliases.values()) {
-      if (currentSnapshotId === snapshotId) return;
+  private cleanupStaleIds(): void {
+    for (const [snapshotId, entryId] of this.snapshotEntryIds) {
+      if (!this.snapshots.getById(entryId)) this.snapshotEntryIds.delete(snapshotId);
     }
-    this.deleteSnapshot(snapshotId);
   }
 }
 
@@ -373,8 +368,4 @@ function preferredPolicyKey(aliases: string[]): string {
     aliases[0] ||
     "unknown"
   );
-}
-
-function uniqueNonEmpty(values: string[]): string[] {
-  return [...new Set(values.filter((value) => value.trim().length > 0))];
 }
