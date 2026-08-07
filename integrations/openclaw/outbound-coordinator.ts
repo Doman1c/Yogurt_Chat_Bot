@@ -132,8 +132,16 @@ export class OutboundTurnStore {
     return this.store.peek(aliases);
   }
 
+  peekParent(aliases: string[]): OutboundIntent | undefined {
+    return this.store.peekParent(aliases);
+  }
+
   consume(aliases: string[]): OutboundIntent | undefined {
-    return this.store.consume(aliases);
+    // index-v43 calls this only for the top-level final assistant delivery after
+    // its AsyncLocalStorage child guard. This parent-specific fallback is what
+    // allows a final hook that lost trace/run/message IDs to recover one unique
+    // stored Turn without relaxing CorrelationStore's strict default globally.
+    return this.store.consumeParent(aliases);
   }
 
   size(): number {
