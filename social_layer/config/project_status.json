@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "project": "Yogurt Chat Bot",
+  "current_version": "V4.3.2",
+  "plugin_version": "0.6.3-alpha.6",
+  "current_stage": "real-device Shadow validation after cross-hook correlation hardening",
+  "current_topic": "统一发送协调",
+  "completed": [
+    "V4.3.1 structured Planner handoff is validated on the real WeChat bot with matching nonzero stateVersion",
+    "V4.3.2 local regression suite passes, including trace-to-run cross-hook parent correlation",
+    "V3 multi-bubble pending turns and memory pending turns now use strong bounded correlation",
+    "typed Sticker lifecycle and alpha.6 automated CI matrix are passing"
+  ],
+  "next": [
+    "recheck real-device Shadow so Planner target 2 and legacy actual 2 are observed as matched=true",
+    "run rapid two-turn real-device anti-cross-talk validation",
+    "run interleaved Sticker pending/sent validation across two turns",
+    "run quick Enforced target-1 and target-2 sanity checks",
+    "disable both V4.3 flags and reconfirm legacy rollback before merge review"
+  ],
+  "historical_versions_are_background_only": true
+}
