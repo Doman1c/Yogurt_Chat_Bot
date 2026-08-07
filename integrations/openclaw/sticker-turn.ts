@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  CorrelationStore,
+  normalizeCorrelationAliases,
+} from "./turn-correlation.ts";
+
 export type StickerTurn = {
   id: string;
   aliases: string[];
@@ -15,13 +20,14 @@ export type StickerTurn = {
 
 export class StickerTurnStore {
   private readonly ttlMs: number;
-  private readonly maxTurns: number;
-  private readonly aliases = new Map<string, string>();
-  private readonly turns = new Map<string, StickerTurn>();
+  private readonly turns: CorrelationStore<StickerTurn>;
 
   constructor({ ttlMs = 10 * 60_000, maxTurns = 256 } = {}) {
     this.ttlMs = Math.max(30_000, ttlMs);
-    this.maxTurns = Math.max(8, maxTurns);
+    this.turns = new CorrelationStore<StickerTurn>(
+      this.ttlMs,
+      Math.max(8, maxTurns),
+    );
   }
 
   register(
@@ -29,10 +35,8 @@ export class StickerTurnStore {
     input: Omit<StickerTurn, "id" | "aliases" | "createdAt" | "expiresAt">,
     now = Date.now(),
   ): StickerTurn | undefined {
-    const normalized = uniqueNonEmpty(aliases);
+    const normalized = normalizeCorrelationAliases(aliases);
     if (normalized.length === 0) return undefined;
-    this.prune(now);
-    this.clear(normalized);
     const turn: StickerTurn = {
       ...input,
       id: randomUUID(),
@@ -40,67 +44,29 @@ export class StickerTurnStore {
       createdAt: now,
       expiresAt: now + this.ttlMs,
     };
-    this.turns.set(turn.id, turn);
-    for (const alias of normalized) this.aliases.set(alias, turn.id);
-    this.trim();
-    return turn;
+    return this.turns.register(normalized, turn)?.value;
   }
 
   get(aliases: string[], now = Date.now()): StickerTurn | undefined {
-    this.prune(now);
-    for (const alias of uniqueNonEmpty(aliases)) {
-      const id = this.aliases.get(alias);
-      if (!id) continue;
-      const turn = this.turns.get(id);
-      if (turn) return turn;
+    const turn = this.turns.peek(aliases);
+    if (!turn) return undefined;
+    if (turn.expiresAt <= now) {
+      this.clear(turn.aliases);
+      return undefined;
     }
-    return undefined;
+    return turn;
   }
 
   consume(aliases: string[], now = Date.now()): StickerTurn | undefined {
     const turn = this.get(aliases, now);
     if (!turn) return undefined;
-    this.delete(turn.id);
+    const entry = this.turns.findEntry(turn.aliases);
+    if (entry) this.turns.remove(entry);
     return turn;
   }
 
   clear(aliases: string[]): void {
-    for (const alias of uniqueNonEmpty(aliases)) {
-      const id = this.aliases.get(alias);
-      this.aliases.delete(alias);
-      if (id) this.deleteIfUnreferenced(id);
-    }
+    const entry = this.turns.findEntry(aliases);
+    if (entry) this.turns.remove(entry);
   }
-
-  private prune(now: number): void {
-    for (const turn of [...this.turns.values()]) {
-      if (turn.expiresAt <= now) this.delete(turn.id);
-    }
-  }
-
-  private trim(): void {
-    if (this.turns.size <= this.maxTurns) return;
-    const oldest = [...this.turns.values()].sort((a, b) => a.createdAt - b.createdAt);
-    for (const turn of oldest.slice(0, this.turns.size - this.maxTurns)) this.delete(turn.id);
-  }
-
-  private delete(id: string): void {
-    const turn = this.turns.get(id);
-    if (!turn) return;
-    this.turns.delete(id);
-    for (const alias of turn.aliases) {
-      if (this.aliases.get(alias) === id) this.aliases.delete(alias);
-    }
-  }
-
-  private deleteIfUnreferenced(id: string): void {
-    for (const current of this.aliases.values()) {
-      if (current === id) return;
-    }
-    this.delete(id);
-  }
-}
-
-function uniqueNonEmpty(values: string[]): string[] {
-  return [...new Set(values.filter((value) => value.trim().length > 0))];
 }
