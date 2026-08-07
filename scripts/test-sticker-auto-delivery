@@ -49,35 +49,75 @@ JS
 
 printf 'fake-webp' > "$FAKE_REPO/assets/stickers/images/sticker-test123.webp"
 
-# Keep this fixture independent from local Python cold-start / shim latency.
-# runBridge only requires an executable that accepts stdin JSON and emits stdout JSON;
-# the real Python bridge is covered by the adapter/Python tests elsewhere in the suite.
-cat > "$TMP_DIR/fake-bridge" <<'SH'
-#!/bin/sh
-set -eu
+# Keep this fixture independent from local Python cold-start / shim latency and
+# from shell-command-substitution stdin behavior on macOS. runBridge only
+# requires an executable that accepts stdin JSON and emits stdout JSON; the
+# real Python bridge is covered by the adapter/Python tests elsewhere.
+cat > "$TMP_DIR/fake-bridge" <<'JS'
+#!/usr/bin/env node
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+});
+process.stdin.on("end", () => {
+  let request;
+  try {
+    request = JSON.parse(input);
+  } catch {
+    console.error("invalid bridge request json");
+    process.exitCode = 3;
+    return;
+  }
 
-request="$(cat)"
-case "$request" in
-  *'"explicit_sticker_request":true'*) ;;
-  *)
-    echo "explicit_sticker_request was not forwarded" >&2
-    exit 2
-    ;;
-esac
+  if (request?.explicit_sticker_request !== true) {
+    console.error("explicit_sticker_request was not forwarded");
+    process.exitCode = 2;
+    return;
+  }
 
-case "$request" in
-  *"模拟无候选"*)
-    cat <<'JSON'
-{"social_context":"[Yogurt Social State]\nscene: playful","sticker_candidates":[],"sticker_decision":{"should_send":false,"mode":"explicit_specific","score":0,"threshold":5,"intents":[],"reasons":["no_candidates"],"deferred":false}}
-JSON
-    ;;
-  *)
-    cat <<'JSON'
-{"social_context":"[Yogurt Social State]\nscene: playful","sticker_candidates":[{"id":"sticker-test123","file":"images/sticker-test123.webp","description":"一只猫咪正在卖萌","score":9,"scenes":["playful"]}],"sticker_decision":{"should_send":true,"mode":"explicit_specific","score":9,"threshold":5,"intents":["playful"],"reasons":["explicit_request"],"deferred":false}}
-JSON
-    ;;
-esac
-SH
+  const noCandidates =
+    typeof request?.message === "string" && request.message.includes("模拟无候选");
+  const result = noCandidates
+    ? {
+        social_context: "[Yogurt Social State]\nscene: playful",
+        sticker_candidates: [],
+        sticker_decision: {
+          should_send: false,
+          mode: "explicit_specific",
+          score: 0,
+          threshold: 5,
+          intents: [],
+          reasons: ["no_candidates"],
+          deferred: false,
+        },
+      }
+    : {
+        social_context: "[Yogurt Social State]\nscene: playful",
+        sticker_candidates: [
+          {
+            id: "sticker-test123",
+            file: "images/sticker-test123.webp",
+            description: "一只猫咪正在卖萌",
+            score: 9,
+            scenes: ["playful"],
+          },
+        ],
+        sticker_decision: {
+          should_send: true,
+          mode: "explicit_specific",
+          score: 9,
+          threshold: 5,
+          intents: ["playful"],
+          reasons: ["explicit_request"],
+          deferred: false,
+        },
+      };
+
+  process.stdout.write(JSON.stringify(result));
+});
+process.stdin.resume();
+JS
 chmod +x "$TMP_DIR/fake-bridge"
 
 YOGURT_STICKER_AGENT_END_DELAY_MS=10 \
