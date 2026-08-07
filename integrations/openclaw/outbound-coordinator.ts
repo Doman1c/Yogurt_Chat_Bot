@@ -1,6 +1,7 @@
+import { CorrelationStore } from "./turn-correlation.ts";
+
 const DEFAULT_TTL_MS = 15 * 60_000;
 const DEFAULT_LIMIT = 200;
-const STRONG_ALIAS_PREFIXES = ["run:", "message:", "trace:"] as const;
 
 export type OutboundIntent = {
   planVersion: string;
@@ -34,13 +35,6 @@ export type OutboundComparison = {
   reasons: string[];
 };
 
-type StoredIntent = {
-  id: number;
-  aliases: string[];
-  intent: OutboundIntent;
-  createdAt: number;
-};
-
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -60,19 +54,6 @@ function integerValue(
   return typeof value === "number" && Number.isInteger(value)
     ? Math.min(maximum, Math.max(minimum, value))
     : fallback;
-}
-
-function normalizeAliases(aliases: string[]): string[] {
-  return [...new Set(
-    aliases
-      .filter((item): item is string => typeof item === "string")
-      .map((item) => item.trim())
-      .filter(Boolean),
-  )];
-}
-
-function isStrongAlias(alias: string): boolean {
-  return STRONG_ALIAS_PREFIXES.some((prefix) => alias.startsWith(prefix));
 }
 
 export function outboundIntentFromResponsePlan(value: unknown): OutboundIntent {
@@ -132,118 +113,31 @@ export function formatOutboundComparison(comparison: OutboundComparison): string
 }
 
 export class OutboundTurnStore {
-  private readonly byAlias = new Map<string, Set<StoredIntent>>();
-  private readonly byId = new Map<number, StoredIntent>();
-  private nextId = 1;
-  private readonly ttlMs: number;
-  private readonly limit: number;
-  private readonly now: () => number;
+  private readonly store: CorrelationStore<OutboundIntent>;
 
   constructor(
     ttlMs = DEFAULT_TTL_MS,
     limit = DEFAULT_LIMIT,
     now: () => number = () => Date.now(),
   ) {
-    this.ttlMs = ttlMs;
-    this.limit = limit;
-    this.now = now;
+    this.store = new CorrelationStore<OutboundIntent>(ttlMs, limit, now);
   }
 
   register(aliases: string[], responsePlan: unknown): OutboundIntent | undefined {
-    this.prune();
-    const normalized = normalizeAliases(aliases);
-    if (normalized.length === 0) return undefined;
-    const strong = normalized.filter(isStrongAlias);
-
-    // A repeated registration with the same strong turn id replaces only that
-    // turn. Shared session/peer aliases are allowed to point at multiple live
-    // turns, so a newer turn cannot delete an older pending turn by accident.
-    if (strong.length > 0) {
-      const duplicates = new Set<StoredIntent>();
-      for (const alias of strong) {
-        for (const entry of this.byAlias.get(alias) || []) duplicates.add(entry);
-      }
-      for (const entry of duplicates) this.delete(entry);
-    } else {
-      const existing = this.find(normalized);
-      if (existing) this.delete(existing);
-    }
-
     const intent = outboundIntentFromResponsePlan(responsePlan);
-    const entry: StoredIntent = {
-      id: this.nextId++,
-      aliases: normalized,
-      intent,
-      createdAt: this.now(),
-    };
-    for (const alias of normalized) {
-      const bucket = this.byAlias.get(alias) || new Set<StoredIntent>();
-      bucket.add(entry);
-      this.byAlias.set(alias, bucket);
-    }
-    this.byId.set(entry.id, entry);
-    if (this.byId.size > this.limit) this.prune(true);
-    return intent;
+    return this.store.register(aliases, intent)?.value;
   }
 
   peek(aliases: string[]): OutboundIntent | undefined {
-    this.prune();
-    return this.find(normalizeAliases(aliases))?.intent;
+    return this.store.peek(aliases);
   }
 
   consume(aliases: string[]): OutboundIntent | undefined {
-    this.prune();
-    const entry = this.find(normalizeAliases(aliases));
-    if (!entry) return undefined;
-    this.delete(entry);
-    return entry.intent;
+    return this.store.consume(aliases);
   }
 
   size(): number {
-    this.prune();
-    return this.byId.size;
-  }
-
-  private find(aliases: string[]): StoredIntent | undefined {
-    const strong = aliases.filter(isStrongAlias);
-    const searchAliases = strong.length > 0 ? strong : aliases;
-    let newest: StoredIntent | undefined;
-    for (const alias of searchAliases) {
-      for (const entry of this.byAlias.get(alias) || []) {
-        if (
-          !newest ||
-          entry.createdAt > newest.createdAt ||
-          (entry.createdAt === newest.createdAt && entry.id > newest.id)
-        ) {
-          newest = entry;
-        }
-      }
-    }
-    // If a caller supplies a strong id, never fall back to a weak session/peer
-    // alias. A correlation miss is safer than consuming another turn's plan.
-    return newest;
-  }
-
-  private delete(entry: StoredIntent): void {
-    for (const alias of entry.aliases) {
-      const bucket = this.byAlias.get(alias);
-      if (!bucket) continue;
-      bucket.delete(entry);
-      if (bucket.size === 0) this.byAlias.delete(alias);
-    }
-    this.byId.delete(entry.id);
-  }
-
-  private prune(force = false): void {
-    const cutoff = this.now() - this.ttlMs;
-    const entries = [...this.byId.values()].sort(
-      (left, right) => left.createdAt - right.createdAt || left.id - right.id,
-    );
-    for (const entry of entries) {
-      if (!force && entry.createdAt >= cutoff) continue;
-      this.delete(entry);
-      if (force && this.byId.size <= Math.max(1, Math.floor(this.limit / 2))) break;
-    }
+    return this.store.size();
   }
 }
 
