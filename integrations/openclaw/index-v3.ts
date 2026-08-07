@@ -1,6 +1,16 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 import v21Plugin from "./index-v2.ts";
+import {
+  asRecord,
+  contextAliases,
+  optionalString,
+  senderIdFromContext,
+} from "./sticker-plugin-utils.ts";
+import {
+  addTurnCorrelationAliases,
+  CorrelationStore,
+} from "./turn-correlation.ts";
 import { registerExtendedMemoryRuntime } from "./v3-memory-extended.ts";
 import { registerV3Runtime } from "./v3-runtime.ts";
 
@@ -13,9 +23,7 @@ const basePlugin = v21Plugin as any;
 type HookHandler = (event: any, ctx: any) => unknown | Promise<unknown>;
 
 type FinalizerContext = {
-  keys: string[];
   ctx: any;
-  createdAt: number;
 };
 
 function optionalText(value: unknown): string | undefined {
@@ -23,16 +31,19 @@ function optionalText(value: unknown): string | undefined {
 }
 
 function eventMetadata(event: any): Record<string, unknown> {
-  return event?.metadata && typeof event.metadata === "object" && !Array.isArray(event.metadata)
-    ? event.metadata
-    : {};
+  return asRecord(event?.metadata);
 }
 
 function eventHasMedia(event: any): boolean {
   const metadata = eventMetadata(event);
+  const payload = asRecord(event?.payload);
   return Boolean(
-    optionalText(event?.mediaUrl) ||
+    (Array.isArray(event?.media) && event.media.length > 0) ||
+      (Array.isArray(payload.media) && payload.media.length > 0) ||
+      optionalText(event?.mediaUrl) ||
       (Array.isArray(event?.mediaUrls) && event.mediaUrls.length > 0) ||
+      optionalText(payload.mediaUrl) ||
+      (Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0) ||
       optionalText(metadata.mediaUrl) ||
       (Array.isArray(metadata.mediaUrls) && metadata.mediaUrls.length > 0),
   );
@@ -75,76 +86,17 @@ function messageAccountId(event: any, ctx: any): string | undefined {
 }
 
 function finalizerContextKeys(event: any, ctx: any): string[] {
+  const channel = messageChannel(event, ctx);
+  const senderId = senderIdFromContext(ctx);
+  const target = messageTarget(event, ctx);
   const accountId = messageAccountId(event, ctx);
-  const values = [
-    event?.to,
-    event?.conversationId,
-    event?.sessionKey,
-    ctx?.senderId,
-    ctx?.to,
-    ctx?.chatId,
-    ctx?.conversationId,
-    ctx?.sessionKey,
-    ctx?.nativeChannelId,
-    ctx?.channelContext?.chat?.id,
-    ctx?.deliveryContext?.to,
-    ctx?.deliveryContext?.conversationId,
-    ctx?.deliveryContext?.chatId,
-  ]
-    .map(optionalText)
-    .filter((value): value is string => Boolean(value));
-  const keys: string[] = [];
-  for (const value of [...new Set(values)]) {
-    keys.push(`value:${value}`);
-    if (accountId) keys.push(`account:${accountId}:${value}`);
+  const aliases = contextAliases(ctx, channel, senderId, event);
+  if (target) {
+    aliases.push(`peer:${channel}:${target}`);
+    aliases.push(`value:${target}`);
+    if (accountId) aliases.push(`account:${accountId}:${target}`);
   }
-  return [...new Set(keys)];
-}
-
-class FinalizerContextStore {
-  private readonly byKey = new Map<string, FinalizerContext>();
-
-  register(event: any, ctx: any): void {
-    this.prune();
-    const keys = finalizerContextKeys(event, ctx);
-    if (keys.length === 0) return;
-    const entry: FinalizerContext = {
-      keys,
-      ctx,
-      createdAt: Date.now(),
-    };
-    for (const key of keys) this.byKey.set(key, entry);
-    if (this.byKey.size > FINALIZER_CONTEXT_LIMIT) this.prune(true);
-  }
-
-  consume(event: any, ctx: any): FinalizerContext | undefined {
-    this.prune();
-    for (const key of finalizerContextKeys(event, ctx)) {
-      const entry = this.byKey.get(key);
-      if (!entry) continue;
-      this.delete(entry);
-      return entry;
-    }
-    return undefined;
-  }
-
-  private delete(entry: FinalizerContext): void {
-    for (const key of entry.keys) {
-      if (this.byKey.get(key) === entry) this.byKey.delete(key);
-    }
-  }
-
-  private prune(force = false): void {
-    const cutoff = Date.now() - FINALIZER_CONTEXT_TTL_MS;
-    const entries = [...new Set(this.byKey.values())].sort(
-      (left, right) => left.createdAt - right.createdAt,
-    );
-    for (const entry of entries) {
-      if (!force && entry.createdAt >= cutoff) continue;
-      this.delete(entry);
-      if (force && this.byKey.size <= FINALIZER_CONTEXT_LIMIT / 2) break;
-    }
-  }
+  return addTurnCorrelationAliases(aliases, event, ctx);
 }
 
 export default definePluginEntry({
@@ -154,11 +106,11 @@ export default definePluginEntry({
     "Injects Yogurt social context, delivers bounded V2.1 stickers, and provides opt-in V3 memory and multi-bubble experiments.",
   register(api: any) {
     let stickerAgentEnd: HookHandler | undefined;
-    const finalizerContexts = new FinalizerContextStore();
+    const finalizerContexts = new CorrelationStore<FinalizerContext>(
+      FINALIZER_CONTEXT_TTL_MS,
+      FINALIZER_CONTEXT_LIMIT,
+    );
 
-    // Keep the original API as prototype and override only typed-hook capture.
-    // The wrapped before_prompt_build stores the exact inbound context used by
-    // V2.1, so the later message_sending finalizer can reuse identical aliases.
     const baseApi = Object.create(api);
     Object.defineProperty(baseApi, "on", {
       configurable: true,
@@ -176,7 +128,7 @@ export default definePluginEntry({
               prompt &&
               (channel === WEIXIN_CHANNEL || Boolean(target?.endsWith("@im.wechat")))
             ) {
-              finalizerContexts.register(event, ctx);
+              finalizerContexts.register(finalizerContextKeys(event, ctx), { ctx });
             }
             return result;
           };
@@ -191,21 +143,18 @@ export default definePluginEntry({
       `${PLUGIN_ID}: V3 sticker finalizer captured=${stickerAgentEnd ? "true" : "false"}`,
     );
 
-    // V2.1 normally finalizes WeChat sticker selection in agent_end/message_sent.
-    // Multi-bubble delivery cancels the original outbound message before message_sent,
-    // and this channel does not reliably expose final assistant text in agent_end.
-    // Reuse the exact inbound context once for the complete reply, then remove it;
-    // recursively sent child bubbles therefore skip this finalizer automatically.
     api.on(
       "message_sending",
       async (event: any, ctx: any) => {
         if (!stickerAgentEnd || eventHasMedia(event)) return;
+        const kind = optionalText(event?.kind) || optionalText(eventMetadata(event).kind);
+        if (kind && kind !== "final") return;
         const text = optionalText(event?.content) || optionalText(event?.text);
         const target = messageTarget(event, ctx);
         if (!text || !target) return;
         const channel = messageChannel(event, ctx);
         if (channel !== WEIXIN_CHANNEL && !target.endsWith("@im.wechat")) return;
-        const stored = finalizerContexts.consume(event, ctx);
+        const stored = finalizerContexts.consume(finalizerContextKeys(event, ctx));
         if (!stored) return;
         const accountId = messageAccountId(event, ctx) || messageAccountId({}, stored.ctx);
         const finalizerCtx = {
@@ -227,6 +176,9 @@ export default definePluginEntry({
             content: text,
             messages: [{ role: "assistant", content: text }],
             to: target,
+            runId: ctx?.runId || stored.ctx?.runId,
+            messageId: ctx?.messageId || stored.ctx?.messageId,
+            traceId: ctx?.traceId || stored.ctx?.traceId,
             ...(accountId ? { accountId } : {}),
           },
           finalizerCtx,
