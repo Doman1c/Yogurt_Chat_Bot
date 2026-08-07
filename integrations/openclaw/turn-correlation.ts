@@ -59,13 +59,20 @@ export function addTurnCorrelationAliases(
 export class CorrelationStore<T> {
   private readonly byAlias = new Map<string, Set<CorrelatedEntry<T>>>();
   private readonly byId = new Map<number, CorrelatedEntry<T>>();
+  private readonly ttlMs: number;
+  private readonly limit: number;
+  private readonly now: () => number;
   private nextId = 1;
 
   constructor(
-    private readonly ttlMs = DEFAULT_TTL_MS,
-    private readonly limit = DEFAULT_LIMIT,
-    private readonly now: () => number = () => Date.now(),
-  ) {}
+    ttlMs = DEFAULT_TTL_MS,
+    limit = DEFAULT_LIMIT,
+    now: () => number = () => Date.now(),
+  ) {
+    this.ttlMs = ttlMs;
+    this.limit = limit;
+    this.now = now;
+  }
 
   register(aliases: string[], value: T): CorrelatedEntry<T> | undefined {
     this.prune();
