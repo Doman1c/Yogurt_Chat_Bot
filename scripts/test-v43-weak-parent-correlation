@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+TEST_ROOT="$TMP_DIR/plugin-test"
+mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
+
+for file in \
+  v3-runtime.ts \
+  multi-bubble.ts \
+  turn-correlation.ts \
+  outbound-coordinator.ts; do
+  cp "$REPO_ROOT/integrations/openclaw/$file" "$TEST_ROOT/$file"
+done
+
+cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
+{
+  "name": "openclaw",
+  "version": "0.0.0-test",
+  "type": "module",
+  "exports": {
+    "./plugin-sdk/plugin-entry": "./plugin-sdk/plugin-entry.js"
+  }
+}
+JSON
+
+cat > "$TEST_ROOT/node_modules/openclaw/plugin-sdk/plugin-entry.js" <<'JS'
+export function definePluginEntry(definition) {
+  return definition;
+}
+JS
+
+cat > "$TEST_ROOT/sticker-v21-utils.ts" <<'TS'
+export function assistantTextFromEvent(event: any): string | undefined {
+  return typeof event?.content === "string" ? event.content : undefined;
+}
+TS
+
+cat > "$TEST_ROOT/sticker-plugin-utils.ts" <<'TS'
+export function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+export function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+export function channelFromContext(ctx: any): string {
+  return optionalString(ctx?.channelId) || "openclaw-weixin";
+}
+export function channelIsAllowed(): boolean {
+  return true;
+}
+export function senderIdFromContext(ctx: any): string | undefined {
+  return optionalString(ctx?.senderId);
+}
+export function contextAliases(ctx: any, channel: string, senderId?: string, event?: any): string[] {
+  const aliases: string[] = [];
+  if (ctx?.sessionKey) aliases.push(`session:${ctx.sessionKey}`);
+  if (event?.sessionKey) aliases.push(`session:${event.sessionKey}`);
+  if (senderId) aliases.push(`sender:${channel}:${senderId}`);
+  return aliases;
+}
+export function readConfig(api: any): any {
+  return {
+    enabled: true,
+    pythonPath: "python3",
+    repoPath: api.repoPath || ".",
+    dbPath: "/tmp/unused.sqlite3",
+  };
+}
+export function resolveUserId(): string {
+  return "owner";
+}
+TS
+
+node --experimental-strip-types --input-type=module - "$TEST_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const testRoot = process.argv[2];
+const {
+  CorrelationStore,
+  summarizeCorrelationAliases,
+} = await import(pathToFileURL(`${testRoot}/turn-correlation.ts`));
+const { OutboundTurnStore } = await import(pathToFileURL(`${testRoot}/outbound-coordinator.ts`));
+const { registerV3Runtime } = await import(pathToFileURL(`${testRoot}/v3-runtime.ts`));
+
+// Strict correlation remains unchanged: a weak-only callback cannot consume a
+// strong Turn unless the caller explicitly identifies itself as the parent path.
+const strictStore = new CorrelationStore(5_000, 16);
+strictStore.register(["trace:trace-parent", "session:shared"], { marker: "parent" });
+assert.equal(strictStore.peek(["session:shared"]), undefined);
+assert.equal(strictStore.peekParent(["session:shared"])?.marker, "parent");
+
+const summary = summarizeCorrelationAliases([
+  "trace:secret-trace-value",
+  "session:secret-session-value",
+  "sender:openclaw-weixin:secret-user",
+]);
+assert.deepEqual(summary.strongKinds, ["trace"]);
+assert.deepEqual(summary.weakKinds, ["sender", "session"]);
+assert.equal(summary.aliasCount, 3);
+assert.equal(JSON.stringify(summary).includes("secret"), false, "diagnostics must never expose alias values");
+
+// A true top-level final callback may arrive weak-only. OutboundTurnStore may
+// recover the one unique parent while CorrelationStore itself stays strict.
+const outbound = new OutboundTurnStore(5_000, 16);
+outbound.register(
+  ["trace:trace-outbound", "session:outbound", "peer:wechat:owner"],
+  { bubble_target: 2, state_version: 501 },
+);
+const weakParent = outbound.consumeWithMatch([
+  "session:outbound",
+  "peer:wechat:owner",
+]);
+assert.equal(weakParent.match, "weak_parent");
+assert.equal(weakParent.intent?.bubbleTarget, 2);
+assert.equal(weakParent.intent?.stateVersion, 501);
+
+// If a final callback carries an explicitly conflicting strong ID, refuse it
+// and block a subsequent weak recursive child from stealing the old parent.
+const conflict = new OutboundTurnStore(5_000, 16);
+conflict.register(["run:run-old", "session:conflict"], {
+  bubble_target: 1,
+  state_version: 601,
+});
+const strongMiss = conflict.consumeWithMatch(["run:run-new", "session:conflict"]);
+assert.equal(strongMiss.match, "miss");
+const weakChild = conflict.consumeWithMatch(["session:conflict"]);
+assert.equal(weakChild.match, "miss");
+assert.equal(conflict.peek(["run:run-old"])?.stateVersion, 601);
+
+// Real V3 regression: registration has traceId, but the final top-level
+// message_sending callback exposes only weak aliases. It must still split into
+// two bubbles, while recursive child callbacks pass through exactly once.
+const hooks = new Map();
+const logs = [];
+const sent = [];
+const api = {
+  repoPath: testRoot,
+  pluginConfig: {
+    autoMemoryEnabled: false,
+    multiBubbleEnabled: true,
+    multiBubbleMinChars: 8,
+    multiBubbleMaxChars: 360,
+    multiBubbleMaxBubbles: 3,
+    multiBubbleDelayMs: 0,
+  },
+  config: {},
+  logger: {
+    info(message) { logs.push(String(message)); },
+    warn(message) { logs.push(String(message)); },
+  },
+  on(name, handler, options = {}) {
+    const values = hooks.get(name) || [];
+    values.push({ handler, priority: options.priority || 0 });
+    hooks.set(name, values);
+  },
+  runtime: {
+    channel: {
+      outbound: {
+        async loadAdapter() {
+          return {
+            async sendText({ to, text }) {
+              sent.push(text);
+              await dispatch(
+                "message_sending",
+                {
+                  content: text,
+                  to,
+                  metadata: { channel: "openclaw-weixin" },
+                },
+                {
+                  channelId: "openclaw-weixin",
+                  senderId: "wx-owner@im.wechat",
+                  sessionKey: "session-v3-weak-parent",
+                },
+              );
+            },
+          };
+        },
+      },
+    },
+  },
+};
+
+async function dispatch(name, event, ctx) {
+  let result;
+  const ordered = [...(hooks.get(name) || [])].sort(
+    (left, right) => right.priority - left.priority,
+  );
+  for (const item of ordered) {
+    const current = await item.handler(event, ctx);
+    if (current !== undefined) result = current;
+  }
+  return result;
+}
+
+registerV3Runtime(api);
+const inboundCtx = {
+  channelId: "openclaw-weixin",
+  senderId: "wx-owner@im.wechat",
+  sessionKey: "session-v3-weak-parent",
+};
+await dispatch(
+  "before_prompt_build",
+  {
+    prompt: "测试弱 parent 最终回调",
+    traceId: "trace-v3-parent",
+  },
+  inboundCtx,
+);
+
+const parentText = "第一句足够自然。第二句也足够自然。";
+const result = await dispatch(
+  "message_sending",
+  {
+    content: parentText,
+    to: "wx-owner@im.wechat",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  inboundCtx,
+);
+
+assert.equal(result?.cancel, true);
+assert.equal(result?.cancelReason, "yogurt_multi_bubble");
+assert.deepEqual(sent, ["第一句足够自然。", "第二句也足够自然。"]);
+assert.ok(
+  logs.some((value) =>
+    value.includes("multi bubble correlation") &&
+    value.includes("strongKinds=none") &&
+    value.includes("match=weak_parent")
+  ),
+);
+assert.ok(logs.some((value) => value.includes("multi bubble sent count=2")));
+assert.equal(logs.some((value) => value.includes("trace-v3-parent")), false);
+assert.equal(logs.some((value) => value.includes("wx-owner")), false);
+
+console.log("v4.3 weak-only parent correlation, child guard, and bounded diagnostics: ok");
+JS
