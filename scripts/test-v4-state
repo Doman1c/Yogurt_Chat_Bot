@@ -11,7 +11,10 @@ python3 -m pytest -q \
   "$REPO_ROOT/social_layer/tests/test_conversation_state.py" \
   "$REPO_ROOT/social_layer/tests/test_response_planner.py" \
   "$REPO_ROOT/social_layer/tests/test_memory_recall_gate.py" \
-  "$REPO_ROOT/social_layer/tests/test_v43_state.py"
+  "$REPO_ROOT/social_layer/tests/test_v43_state.py" \
+  "$REPO_ROOT/social_layer/tests/test_project_status.py" \
+  "$REPO_ROOT/social_layer/tests/test_project_state_store.py" \
+  "$REPO_ROOT/social_layer/tests/test_project_state_observer.py"
 
 printf '%s' '{"user_id":"owner","conversation_key":"session:v4-test","phase":"user","message":"开始编写 V4 代码，然后本地同步，再开始测试"}' \
   | python3 -m yogurt_social.conversation_state_observer --db "$DB_PATH" \
@@ -134,4 +137,4 @@ node --experimental-strip-types --check \
 node --experimental-strip-types --check \
   "$REPO_ROOT/integrations/openclaw/index-v43.ts"
 
-echo "v4 state, v4.1 planner, v4.2 recall gate, and v4.3 phase migration: ok"
+echo "v4 state, planner, recall gate, project state continuity, and v4.3 phase migration: ok"
