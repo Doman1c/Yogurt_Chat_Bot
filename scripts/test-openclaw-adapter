@@ -76,7 +76,9 @@ if command -v node >/dev/null 2>&1; then
     sticker-plugin-utils.ts \
     sticker-selection.ts \
     sticker-turn.ts \
-    sticker-v21-utils.ts; do
+    sticker-v21-utils.ts \
+    sticker-lifecycle.ts \
+    turn-correlation.ts; do
     cp "$REPO_ROOT/integrations/openclaw/$source" "$NODE_TEST_ROOT/$source"
   done
 
