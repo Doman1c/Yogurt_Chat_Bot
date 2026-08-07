@@ -7,14 +7,14 @@
 ## 当前开发版本
 
 ```text
-Yogurt Chat Bot: V4.3.1 hardening
-OpenClaw plugin: yogurt-social-injector 0.6.3-alpha.5
+Yogurt Chat Bot: V4.3.2 hardening
+OpenClaw plugin: yogurt-social-injector 0.6.3-alpha.6
 Plugin entry: integrations/openclaw/index-v43.ts
 Sticker Runtime: V2.1
 Catalog Schema: 1.0
 ```
 
-当前 V4.3.1 仍在 Draft PR 中，Feature Flags 默认关闭；在实机回归完成前不应直接开启为默认行为。
+当前 V4.3.2 仍在 Draft PR 中，Feature Flags 默认关闭；在实机回归完成前不应直接开启为默认行为。
 
 ## 核心能力
 
@@ -25,7 +25,8 @@ Catalog Schema: 1.0
 - V4.1：Response Planner；
 - V4.2：记忆召回 Shadow Gate；
 - V4.3：统一 Outbound Intent / Result、Shadow 与 Enforced Coordinator；
-- V4.3.1：强 Turn Correlation、结构化 Planner 交接、类型化 Sticker Lifecycle、typed media / final payload 保护。
+- V4.3.1：强 Turn Correlation、结构化 Planner 交接、类型化 Sticker Lifecycle、typed media / final payload 保护；
+- V4.3.2：跨 Hook 强 ID 命名空间兼容、弱 child 防抢占、V3 pending Turn 强关联。
 
 ## 当前架构
 
@@ -57,8 +58,8 @@ Yogurt Social Injector
   │   ├── ResponsePlan Prompt Context
   │   └── Structured ResponsePlan Snapshot
   │
-  └── V4.3.1 Outbound Coordinator
-      ├── strong Turn correlation
+  └── V4.3.2 Outbound Coordinator
+      ├── cross-hook strong Turn correlation
       ├── Shadow comparison
       ├── optional Enforced bubble target
       ├── typed media / final reply guard
@@ -71,7 +72,7 @@ OpenClaw outbound hooks
 微信 sendText / sendMedia
 ```
 
-## 为什么 V4.3.1 需要 Turn Correlation
+## 为什么 V4.3.2 需要 Turn Correlation
 
 同一微信会话可能在前一轮 Sticker 还没发送时立刻进入下一轮。如果只用：
 
@@ -81,7 +82,7 @@ session / sender / peer
 
 作为单值 key，后一轮会覆盖前一轮。
 
-V4.3.1 优先使用：
+V4.3.1 开始优先使用：
 
 ```text
 runId / messageId / traceId
@@ -89,13 +90,17 @@ runId / messageId / traceId
 
 并保留 session/sender/peer/account 作为弱兼容别名。
 
-规则是：
+V4.3.2 增加一条关键规则：不同 Hook 可能暴露不同强 ID 命名空间，例如早期只有 `traceId`，发送阶段才出现 `runId`。不同命名空间本身不是冲突；只有同一命名空间明确不一致，例如 `run:A` 对 `run:B`，才是硬冲突。
 
-- 不同强 Turn ID 可以共享同一 session 而同时存在；
+当前规则是：
+
 - 强 ID 精确命中优先；
-- 不同强 ID 之间绝不弱回退；
+- 不同强 ID 命名空间可在唯一弱父级身份下兼容关联；
+- 同一强 ID 命名空间不一致绝不弱回退；
+- 已带强身份的父 Turn 不允许被只有 session/peer 的弱 child 抢走；
 - 只有早期 Hook 没有强 ID、且弱别名只有唯一候选时才兼容回退；
-- 一旦存在歧义就放弃关联，而不是猜测另一个 Turn。
+- 一旦存在歧义就放弃关联，而不是猜测另一个 Turn；
+- V3 自动记忆、多气泡和扩展记忆 pending Turn 使用同一 CorrelationStore。
 
 ## Response Planner 与 Outbound Coordinator
 
@@ -114,7 +119,7 @@ V4.1 Planner 输出：
 }
 ```
 
-V4.3.1 不再从中文 Prompt Context 反向正则解析这些字段，而是通过结构化 Store 直接交给 Coordinator。因此 V4.3 日志中的 `stateVersion` 应与 Planner 的真实版本一致，不再固定为 `0`。
+V4.3.1 起不再从中文 Prompt Context 反向正则解析这些字段，而是通过结构化 Store 直接交给 Coordinator。因此 V4.3 日志中的 `stateVersion` 应与 Planner 的真实版本一致，不再固定为 `0`。
 
 Coordinator 当前主要执行 `bubble_target`，其余 Planner 字段暂时用于观测和后续扩展。
 
@@ -321,6 +326,7 @@ bash scripts/test-v4-state
 bash scripts/test-v4-runtime
 bash scripts/test-v4-outbound
 bash scripts/test-v4-outbound-runtime
+bash scripts/test-v4-cross-hook-correlation
 
 openclaw config validate
 openclaw plugins doctor
@@ -333,7 +339,7 @@ openclaw gateway restart
 
 CI 覆盖 Python 3.9–3.12 和 Node.js 22。
 
-V4.3.1 新增验证包括：
+V4.3.2 当前新增验证包括：
 
 - 两个 run 在同一 session 同时 pending；
 - 逆序完成不串 Planner target/stateVersion；
@@ -344,11 +350,15 @@ V4.3.1 新增验证包括：
 - partial direct delivery 防重复；
 - structured Planner 不携带原始用户/助手文本；
 - typed Sticker sent/skipped/failed；
+- `traceId` 注册的父 Turn 可在 `runId` 发送阶段唯一关联；
+- 同强 ID 命名空间不一致仍为硬冲突；
+- 弱 child 不能抢走已有强身份的父 Turn；
+- V3 memory/multi-bubble/extended-memory pending Store 使用统一强关联；
 - 两个 V4.3 Flags 都关闭时 legacy V3 保持不变。
 
 ## 已知下一阶段工作
 
-V4.3.1 完成的是“合并前安全加固”，尚未解决：
+V4.3.2 仍未解决：
 
 1. 真实 Text Delivery Barrier：Sticker 现在仍主要依赖发送延迟保证文字在前；
 2. `message_sent` 级别的 delivered bubble 终态统计；
@@ -358,7 +368,7 @@ V4.3.1 完成的是“合并前安全加固”，尚未解决：
 6. 通用 ConversationState 与当前项目版本词典进一步解耦；
 7. 可选的轻量管理/观测页面。
 
-这些工作应在 V4.3.1 实机回归稳定后继续，而不是一次性叠加到同一验证批次。
+这些工作应在 V4.3.2 实机回归稳定后继续，而不是一次性叠加到同一验证批次。
 
 ## 设计文档
 
