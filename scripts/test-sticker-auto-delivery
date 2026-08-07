@@ -95,7 +95,7 @@ const openclawConfig = { channels: { "openclaw-weixin": {} } };
 let toolFactory;
 let loadedChannel;
 
-async function waitFor(predicate, timeoutMs = 1500) {
+async function waitFor(predicate, timeoutMs = 3000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     if (predicate()) return true;
