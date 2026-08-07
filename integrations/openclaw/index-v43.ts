@@ -12,6 +12,11 @@ import {
   type OutboundResult,
   type StickerOutcome,
 } from "./outbound-coordinator.ts";
+import { responsePlanTurns } from "./response-plan-store.ts";
+import {
+  onStickerLifecycle,
+  type StickerLifecycleEvent,
+} from "./sticker-lifecycle.ts";
 import {
   asRecord,
   channelFromContext,
@@ -19,10 +24,14 @@ import {
   optionalString,
   senderIdFromContext,
 } from "./sticker-plugin-utils.ts";
+import {
+  addTurnCorrelationAliases,
+  CorrelationStore,
+  type CorrelatedEntry,
+} from "./turn-correlation.ts";
 
 const PLUGIN_ID = "yogurt-social-injector";
 const WEIXIN_CHANNEL = "openclaw-weixin";
-const RESPONSE_PLAN_MARKER = "[Yogurt Response Plan V4.1]";
 const CORRELATION_TTL_MS = 15 * 60_000;
 const CORRELATION_LIMIT = 256;
 const STICKER_FINALIZE_TIMEOUT_MS = 45_000;
@@ -51,28 +60,19 @@ type DirectDeliveryResult = {
   fallbackReason?: string;
 };
 
-type HookCorrelation = {
-  aliases: string[];
-};
-
 type StickerSignal = {
-  aliases: string[];
-  outcome: "selected" | "sent" | "skipped" | "failed";
+  outcome: "selected" | "scheduled" | "sent" | "skipped" | "failed";
   reason: string;
   stickerId?: string;
-  createdAt: number;
 };
 
 type PendingOutbound = {
-  id: number;
-  aliases: string[];
   intent: OutboundIntent;
   result: OutboundResult;
   mode: OutboundMode;
   comparisonReason: string;
   hostAction?: string;
   stickerId?: string;
-  createdAt: number;
   timer?: NodeJS.Timeout;
 };
 
@@ -153,21 +153,26 @@ function accountIdFromContext(event: any, ctx: any): string | undefined {
 
 function eventHasMedia(event: any): boolean {
   const metadata = eventMetadata(event);
+  const payload = asRecord(event?.payload);
   return Boolean(
-    optionalString(event?.mediaUrl) ||
+    (Array.isArray(event?.media) && event.media.length > 0) ||
+      (Array.isArray(payload.media) && payload.media.length > 0) ||
+      optionalString(event?.mediaUrl) ||
       (Array.isArray(event?.mediaUrls) && event.mediaUrls.length > 0) ||
+      optionalString(payload.mediaUrl) ||
+      (Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0) ||
       optionalString(metadata.mediaUrl) ||
       (Array.isArray(metadata.mediaUrls) && metadata.mediaUrls.length > 0),
   );
 }
 
-function normalizeAliases(aliases: string[]): string[] {
-  return [...new Set(
-    aliases
-      .filter((value): value is string => typeof value === "string")
-      .map((value) => value.trim())
-      .filter(Boolean),
-  )];
+function isFinalAssistantEvent(event: any): boolean {
+  const metadata = eventMetadata(event);
+  const kind = optionalString(event?.kind) || optionalString(metadata.kind);
+  if (kind && kind !== "final") return false;
+  const role = optionalString(event?.role) || optionalString(metadata.role);
+  if (role && !["assistant", "ai", "bot"].includes(role.toLowerCase())) return false;
+  return true;
 }
 
 function aliasesFor(event: any, ctx: any): string[] {
@@ -181,38 +186,7 @@ function aliasesFor(event: any, ctx: any): string[] {
     aliases.push(`value:${target}`);
     if (accountId) aliases.push(`account:${accountId}:${target}`);
   }
-  return normalizeAliases(aliases);
-}
-
-function parseReplyLength(value: string): string {
-  if (value.includes("很短")) return "very_short";
-  if (value.includes("简短")) return "short";
-  if (value.includes("详细")) return "detailed";
-  return "medium";
-}
-
-function parseStickerPreference(value: string): string {
-  if (value.includes("不建议")) return "none";
-  if (value.includes("庆祝")) return "celebration";
-  if (value.includes("安慰")) return "comfort";
-  if (value.includes("轻松")) return "playful";
-  return "neutral";
-}
-
-function responsePlanFromHookResult(value: unknown): Record<string, unknown> | undefined {
-  const result = asRecord(value);
-  const context = optionalString(result.prependContext);
-  if (!context || !context.startsWith(RESPONSE_PLAN_MARKER)) return undefined;
-  const bubbleMatch = context.match(/建议气泡数：(\d+)/);
-  const lengthMatch = context.match(/建议长度：([^\n]+)/);
-  const stickerMatch = context.match(/表情倾向：([^\n]+)/);
-  return {
-    plan_version: "4.1",
-    bubble_target: bubbleMatch ? Number.parseInt(bubbleMatch[1], 10) : 1,
-    reply_length: parseReplyLength(lengthMatch?.[1] || ""),
-    sticker_preference: parseStickerPreference(stickerMatch?.[1] || ""),
-    state_version: 0,
-  };
+  return addTurnCorrelationAliases(aliases, event, ctx);
 }
 
 function outboundResult(event: any, hookResult: unknown): OutboundResult {
@@ -326,242 +300,6 @@ function explicitPassthrough(text: string): Record<string, unknown> {
   };
 }
 
-function boundedReason(value: unknown, fallback: string): string {
-  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
-  const normalized = raw
-    .replace(/[^a-z0-9._:-]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 120);
-  return normalized || fallback;
-}
-
-function logField(message: string, name: string): string | undefined {
-  const match = message.match(new RegExp(`${name}=([^\\s]+)`));
-  return match?.[1];
-}
-
-function parentheticalReason(message: string, fallback: string): string {
-  return boundedReason(message.match(/\(([^()]+)\)/)?.[1], fallback);
-}
-
-function parseStickerSignal(message: string): Omit<StickerSignal, "aliases" | "createdAt"> | undefined {
-  if (!message.includes(`${PLUGIN_ID}:`)) return undefined;
-  const stickerId = optionalString(logField(message, "sticker"));
-
-  if (message.includes("sticker media sent")) {
-    return { outcome: "sent", reason: "media_sent", ...(stickerId ? { stickerId } : {}) };
-  }
-  if (message.includes("sticker media attached")) {
-    return { outcome: "sent", reason: "media_attached", ...(stickerId ? { stickerId } : {}) };
-  }
-  if (message.includes("sticker media send failed")) {
-    return {
-      outcome: "failed",
-      reason: parentheticalReason(message, "media_send_failed"),
-      ...(stickerId ? { stickerId } : {}),
-    };
-  }
-  if (message.includes("sticker media attach failed")) {
-    return {
-      outcome: "failed",
-      reason: parentheticalReason(message, "media_attach_failed"),
-      ...(stickerId ? { stickerId } : {}),
-    };
-  }
-  if (message.includes("sticker outbound delivery skipped")) {
-    return {
-      outcome: "failed",
-      reason: parentheticalReason(message, "delivery_skipped"),
-      ...(stickerId ? { stickerId } : {}),
-    };
-  }
-  if (message.includes("post-reply sticker decision unavailable")) {
-    return {
-      outcome: "failed",
-      reason: parentheticalReason(message, "decision_unavailable"),
-      ...(stickerId ? { stickerId } : {}),
-    };
-  }
-  if (message.includes("post-reply selection rejected")) {
-    return {
-      outcome: "failed",
-      reason: boundedReason(logField(message, "reason"), "selection_rejected"),
-      ...(stickerId ? { stickerId } : {}),
-    };
-  }
-  if (message.includes("sticker outbound scheduled")) {
-    return {
-      outcome: "selected",
-      reason: "delivery_scheduled",
-      ...(stickerId ? { stickerId } : {}),
-    };
-  }
-  if (message.includes("post-reply sticker selected")) {
-    return {
-      outcome: "selected",
-      reason: boundedReason(logField(message, "reason"), "selected"),
-      ...(stickerId ? { stickerId } : {}),
-    };
-  }
-  if (message.includes("send decision rejected by delivery policy")) {
-    return {
-      outcome: "skipped",
-      reason: boundedReason(logField(message, "reason"), "policy_rejected"),
-    };
-  }
-  if (message.includes("send decision trigger=") && message.includes("shouldSend=false")) {
-    const bridgeReason = logField(message, "reasons");
-    return {
-      outcome: "skipped",
-      reason: boundedReason(
-        bridgeReason && bridgeReason !== "none" ? bridgeReason : undefined,
-        "bridge_no_send",
-      ),
-    };
-  }
-  if (message.includes("injection ready")) {
-    const decision = logField(message, "stickerDecision");
-    if (["user_forbid", "no_candidates", "disabled"].includes(decision || "")) {
-      return {
-        outcome: "skipped",
-        reason: boundedReason(decision, "not_selected"),
-      };
-    }
-  }
-  if (message.includes("social layer unavailable")) {
-    return {
-      outcome: "failed",
-      reason: parentheticalReason(message, "social_layer_unavailable"),
-    };
-  }
-  return undefined;
-}
-
-class StickerSignalStore {
-  private readonly byAlias = new Map<string, StickerSignal>();
-
-  record(aliases: string[], signal: Omit<StickerSignal, "aliases" | "createdAt">): StickerSignal | undefined {
-    this.prune();
-    const normalized = normalizeAliases(aliases);
-    if (normalized.length === 0) return undefined;
-    const existing = this.peek(normalized);
-    if (
-      existing &&
-      existing.outcome !== "selected" &&
-      signal.outcome === "selected"
-    ) {
-      return existing;
-    }
-    if (existing) this.delete(existing);
-    const entry: StickerSignal = {
-      ...signal,
-      aliases: normalized,
-      stickerId: signal.stickerId || existing?.stickerId,
-      createdAt: Date.now(),
-    };
-    for (const alias of normalized) this.byAlias.set(alias, entry);
-    if (this.byAlias.size > CORRELATION_LIMIT) this.prune(true);
-    return entry;
-  }
-
-  peek(aliases: string[]): StickerSignal | undefined {
-    this.prune();
-    for (const alias of normalizeAliases(aliases)) {
-      const entry = this.byAlias.get(alias);
-      if (entry) return entry;
-    }
-    return undefined;
-  }
-
-  clear(aliases: string[]): void {
-    const entry = this.peek(aliases);
-    if (entry) this.delete(entry);
-  }
-
-  private delete(entry: StickerSignal): void {
-    for (const alias of entry.aliases) {
-      if (this.byAlias.get(alias) === entry) this.byAlias.delete(alias);
-    }
-  }
-
-  private prune(force = false): void {
-    const cutoff = Date.now() - CORRELATION_TTL_MS;
-    const entries = [...new Set(this.byAlias.values())].sort(
-      (left, right) => left.createdAt - right.createdAt,
-    );
-    for (const entry of entries) {
-      if (!force && entry.createdAt >= cutoff) continue;
-      this.delete(entry);
-      if (force && this.byAlias.size <= CORRELATION_LIMIT / 2) break;
-    }
-  }
-}
-
-class PendingOutboundStore {
-  private readonly byAlias = new Map<string, PendingOutbound>();
-  private readonly byId = new Map<number, PendingOutbound>();
-  private nextId = 1;
-
-  register(
-    aliases: string[],
-    value: Omit<PendingOutbound, "id" | "aliases" | "createdAt">,
-  ): PendingOutbound | undefined {
-    this.prune();
-    const normalized = normalizeAliases(aliases);
-    if (normalized.length === 0) return undefined;
-    const existing = this.peek(normalized);
-    if (existing) this.delete(existing);
-    const entry: PendingOutbound = {
-      ...value,
-      id: this.nextId++,
-      aliases: normalized,
-      createdAt: Date.now(),
-    };
-    for (const alias of normalized) this.byAlias.set(alias, entry);
-    this.byId.set(entry.id, entry);
-    if (this.byAlias.size > CORRELATION_LIMIT) this.prune(true);
-    return entry;
-  }
-
-  peek(aliases: string[]): PendingOutbound | undefined {
-    this.prune();
-    for (const alias of normalizeAliases(aliases)) {
-      const entry = this.byAlias.get(alias);
-      if (entry) return entry;
-    }
-    return undefined;
-  }
-
-  getById(id: number): PendingOutbound | undefined {
-    this.prune();
-    return this.byId.get(id);
-  }
-
-  remove(entry: PendingOutbound): void {
-    this.delete(entry);
-  }
-
-  private delete(entry: PendingOutbound): void {
-    if (entry.timer) clearTimeout(entry.timer);
-    for (const alias of entry.aliases) {
-      if (this.byAlias.get(alias) === entry) this.byAlias.delete(alias);
-    }
-    this.byId.delete(entry.id);
-  }
-
-  private prune(force = false): void {
-    const cutoff = Date.now() - CORRELATION_TTL_MS;
-    const entries = [...this.byId.values()].sort(
-      (left, right) => left.createdAt - right.createdAt,
-    );
-    for (const entry of entries) {
-      if (!force && entry.createdAt >= cutoff) continue;
-      this.delete(entry);
-      if (force && this.byAlias.size <= CORRELATION_LIMIT / 2) break;
-    }
-  }
-}
-
 async function sendPlannedBubbles(
   api: any,
   deliveryScope: AsyncLocalStorage<DeliveryScope>,
@@ -580,10 +318,17 @@ async function sendPlannedBubbles(
   if (typeof loadAdapter !== "function") {
     return { fallbackReason: "adapter_loader_unavailable" };
   }
-  const adapter = await loadAdapter(WEIXIN_CHANNEL);
+
+  let adapter: any;
+  try {
+    adapter = await loadAdapter(WEIXIN_CHANNEL);
+  } catch {
+    return { fallbackReason: "adapter_load_failed" };
+  }
   if (typeof adapter?.sendText !== "function") {
     return { fallbackReason: "adapter_send_text_unavailable" };
   }
+
   const accountId = accountIdFromContext(event, ctx);
   const text = optionalString(event?.content) || optionalString(event?.text) || "";
   let sentCount = 0;
@@ -638,12 +383,17 @@ export default definePluginEntry({
   id: PLUGIN_ID,
   name: "Yogurt Social Injector",
   description:
-    "Adds opt-in V4.3 shadow and enforced outbound coordination on top of V4.0-V4.2 and the V3 delivery path.",
+    "Adds opt-in V4.3.1 shadow/enforced outbound coordination with structured turn and sticker lifecycle correlation.",
   register(api: any) {
     const deliveryScope = new AsyncLocalStorage<DeliveryScope>();
-    const hookCorrelation = new AsyncLocalStorage<HookCorrelation>();
-    const stickerSignals = new StickerSignalStore();
-    const pendingOutbounds = new PendingOutboundStore();
+    const stickerSignals = new CorrelationStore<StickerSignal>(
+      CORRELATION_TTL_MS,
+      CORRELATION_LIMIT,
+    );
+    const pendingOutbounds = new CorrelationStore<PendingOutbound>(
+      CORRELATION_TTL_MS,
+      CORRELATION_LIMIT,
+    );
     const wrappedApi = Object.create(api);
 
     const emitOutbound = (params: {
@@ -663,10 +413,11 @@ export default definePluginEntry({
     };
 
     const finalizePending = (
-      pending: PendingOutbound,
-      signal: Pick<StickerSignal, "outcome" | "reason" | "stickerId">,
+      pendingEntry: CorrelatedEntry<PendingOutbound>,
+      signal: StickerSignal,
     ) => {
-      if (signal.outcome === "selected") return;
+      if (signal.outcome === "selected" || signal.outcome === "scheduled") return;
+      const pending = pendingEntry.value;
       if (
         pending.stickerId &&
         signal.stickerId &&
@@ -674,12 +425,13 @@ export default definePluginEntry({
       ) {
         return;
       }
+      if (pending.timer) clearTimeout(pending.timer);
+      pendingOutbounds.remove(pendingEntry);
       const result: OutboundResult = {
         ...pending.result,
         stickerOutcome: signal.outcome,
         stickerReason: signal.reason,
       };
-      pendingOutbounds.remove(pending);
       api.logger.info(
         `${PLUGIN_ID}: v4.3 outbound finalized mode=${pending.mode} ${appendComparisonReason(
           pending.intent,
@@ -688,6 +440,29 @@ export default definePluginEntry({
         )}${pending.hostAction ? ` hostAction=${pending.hostAction}` : ""} finalStage=sticker`,
       );
     };
+
+    const recordStickerSignal = (event: StickerLifecycleEvent) => {
+      const existingEntry = stickerSignals.findEntry(event.aliases);
+      const existing = existingEntry?.value;
+      const incomingTerminal = ["sent", "skipped", "failed"].includes(event.phase);
+      const existingTerminal = existing
+        ? ["sent", "skipped", "failed"].includes(existing.outcome)
+        : false;
+      if (existingTerminal && !incomingTerminal) return;
+      if (existingEntry) stickerSignals.remove(existingEntry);
+
+      const signal: StickerSignal = {
+        outcome: event.phase,
+        reason: event.reason,
+        stickerId: event.stickerId || existing?.stickerId,
+      };
+      stickerSignals.register(event.aliases, signal);
+      if (!incomingTerminal) return;
+      const pendingEntry = pendingOutbounds.findEntry(event.aliases);
+      if (pendingEntry) finalizePending(pendingEntry, signal);
+    };
+
+    onStickerLifecycle(recordStickerSignal);
 
     const recordOutbound = (params: {
       aliases: string[];
@@ -711,9 +486,10 @@ export default definePluginEntry({
       } else if (!signal) {
         stickerOutcome = "skipped";
         stickerReason = "not_selected";
-      } else if (signal.outcome === "selected") {
+      } else if (signal.outcome === "selected" || signal.outcome === "scheduled") {
         stickerOutcome = "pending";
-        stickerReason = signal.reason;
+        stickerReason =
+          signal.outcome === "scheduled" ? "delivery_scheduled" : signal.reason;
         stickerId = signal.stickerId;
       } else {
         stickerOutcome = signal.outcome;
@@ -735,60 +511,27 @@ export default definePluginEntry({
       });
 
       if (stickerOutcome !== "pending") return;
-      const pending = pendingOutbounds.register(params.aliases, {
+      const pending: PendingOutbound = {
         intent: params.intent,
         result,
         mode: params.mode,
         comparisonReason: params.comparisonReason,
         hostAction: params.hostAction,
         stickerId,
-      });
-      if (!pending) return;
+      };
+      const pendingEntry = pendingOutbounds.register(params.aliases, pending);
+      if (!pendingEntry) return;
       pending.timer = setTimeout(() => {
-        const current = pendingOutbounds.getById(pending.id);
+        const current = pendingOutbounds.getById(pendingEntry.id);
         if (!current) return;
         finalizePending(current, {
           outcome: "failed",
           reason: "delivery_outcome_timeout",
-          stickerId: current.stickerId,
+          stickerId: current.value.stickerId,
         });
       }, STICKER_FINALIZE_TIMEOUT_MS);
       pending.timer.unref?.();
     };
-
-    const captureNestedStickerLog = (value: unknown) => {
-      const message = typeof value === "string" ? value : "";
-      if (!message) return;
-      const parsed = parseStickerSignal(message);
-      if (!parsed) return;
-      const scope = hookCorrelation.getStore();
-      if (!scope || scope.aliases.length === 0) return;
-      const signal = stickerSignals.record(scope.aliases, parsed);
-      if (!signal || signal.outcome === "selected") return;
-      const pending = pendingOutbounds.peek(scope.aliases);
-      if (pending) finalizePending(pending, signal);
-    };
-
-    const nestedLogger = Object.create(api.logger || null);
-    for (const level of ["info", "warn", "error"] as const) {
-      const base = api.logger?.[level];
-      if (typeof base !== "function") continue;
-      Object.defineProperty(nestedLogger, level, {
-        configurable: true,
-        enumerable: true,
-        writable: false,
-        value(...args: unknown[]) {
-          base.apply(api.logger, args);
-          captureNestedStickerLog(args[0]);
-        },
-      });
-    }
-    Object.defineProperty(wrappedApi, "logger", {
-      configurable: true,
-      enumerable: true,
-      writable: false,
-      value: nestedLogger,
-    });
 
     Object.defineProperty(wrappedApi, "on", {
       configurable: true,
@@ -800,140 +543,138 @@ export default definePluginEntry({
         if (name === "before_prompt_build" && priority === 50) {
           const wrapped: HookHandler = async (event, ctx) => {
             const aliases = aliasesFor(event, ctx);
-            return hookCorrelation.run({ aliases }, async () => {
-              const result = await handler(event, ctx);
-              const config = readV43Config(api, event);
-              if (!coordinatorEnabled(config)) return result;
-              const plan = responsePlanFromHookResult(result);
-              if (!plan) return result;
-              const intent = outboundTurns.register(aliases, plan);
-              if (intent) {
-                api.logger.info(
-                  `${PLUGIN_ID}: v4.3 outbound intent ready targetBubbles=${intent.bubbleTarget} replyLength=${intent.replyLength} sticker=${intent.stickerPreference} stateVersion=${intent.stateVersion}`,
-                );
-              }
+            const result = await handler(event, ctx);
+            const structuredPlan = responsePlanTurns.consume(aliases);
+            const config = readV43Config(api, event);
+            if (!coordinatorEnabled(config)) return result;
+            if (!structuredPlan) {
+              api.logger.warn(
+                `${PLUGIN_ID}: v4.3 outbound intent unavailable reason=structured_plan_missing`,
+              );
               return result;
-            });
+            }
+            const intent = outboundTurns.register(aliases, structuredPlan);
+            if (intent) {
+              api.logger.info(
+                `${PLUGIN_ID}: v4.3 outbound intent ready targetBubbles=${intent.bubbleTarget} replyLength=${intent.replyLength} sticker=${intent.stickerPreference} stateVersion=${intent.stateVersion}`,
+              );
+            }
+            return result;
           };
           return api.on(name, wrapped, options);
         }
 
         if (name === "message_sending" && priority === 70) {
           const wrapped: HookHandler = async (event, ctx) => {
+            const scope = deliveryScope.getStore();
+            if (scope === "coordinator_child") return undefined;
+            if (scope === "legacy_child") return handler(event, ctx);
+
+            const config = readV43Config(api, event);
+            if (!coordinatorEnabled(config)) return handler(event, ctx);
+            if (!isFinalAssistantEvent(event)) return handler(event, ctx);
+
             const aliases = aliasesFor(event, ctx);
-            return hookCorrelation.run({ aliases }, async () => {
-              const scope = deliveryScope.getStore();
-              if (scope === "coordinator_child") return undefined;
-              if (scope === "legacy_child") return handler(event, ctx);
+            const intent = outboundTurns.consume(aliases);
+            if (!intent) return handler(event, ctx);
+            const text = optionalString(event?.content) || optionalString(event?.text) || "";
 
-              const config = readV43Config(api, event);
-              if (!coordinatorEnabled(config)) return handler(event, ctx);
-              const intent = outboundTurns.consume(aliases);
-              if (!intent) return handler(event, ctx);
-
-              const text = optionalString(event?.content) || optionalString(event?.text) || "";
-              if (config.unifiedOutboundEnforceEnabled && text) {
-                const planned = planDelivery(event, text, intent, config);
-                if (planned.bubbles) {
-                  if (planned.bubbles.length === 1) {
-                    const result: OutboundResult = {
-                      actualBubbleCount: 1,
-                      textChars: text.length,
-                      outcome: "single",
-                      stickerOutcome: "unknown",
-                    };
-                    recordOutbound({
-                      aliases,
-                      config,
-                      mode: "enforced",
-                      intent,
-                      result,
-                      comparisonReason: "enforced_target_applied",
-                      hostAction: "explicit_passthrough",
-                    });
-                    return explicitPassthrough(text);
-                  }
-                  const direct = await sendPlannedBubbles(
-                    api,
-                    deliveryScope,
-                    event,
-                    ctx,
-                    planned.bubbles,
+            if (config.unifiedOutboundEnforceEnabled && text) {
+              const planned = planDelivery(event, text, intent, config);
+              if (planned.bubbles) {
+                if (planned.bubbles.length === 1) {
+                  const result: OutboundResult = {
+                    actualBubbleCount: 1,
+                    textChars: text.length,
+                    outcome: "single",
+                    stickerOutcome: "unknown",
+                  };
+                  recordOutbound({
+                    aliases,
                     config,
-                  );
-                  if (direct.result && direct.hookResult) {
-                    const reason =
-                      direct.result.outcome === "partial"
-                        ? "enforced_partial_delivery"
-                        : "enforced_target_applied";
-                    recordOutbound({
-                      aliases,
-                      config,
-                      mode: "enforced",
-                      intent,
-                      result: direct.result,
-                      comparisonReason: reason,
-                      hostAction: "coordinator_delivery",
-                    });
-                    return direct.hookResult;
-                  }
-                  planned.fallbackReason = direct.fallbackReason || "direct_delivery_unavailable";
+                    mode: "enforced",
+                    intent,
+                    result,
+                    comparisonReason: "enforced_target_applied",
+                    hostAction: "explicit_passthrough",
+                  });
+                  return explicitPassthrough(text);
                 }
 
-                const legacyResult = await deliveryScope.run("legacy_child", () =>
-                  handler(event, ctx),
-                );
-                const result = outboundResult(event, legacyResult);
-                const useExplicitPassthrough = legacyResult === undefined;
-                recordOutbound({
-                  aliases,
+                const direct = await sendPlannedBubbles(
+                  api,
+                  deliveryScope,
+                  event,
+                  ctx,
+                  planned.bubbles,
                   config,
-                  mode: "enforced",
-                  intent,
-                  result,
-                  comparisonReason: `enforcement_fallback:${planned.fallbackReason || "unknown"}`,
-                  hostAction: useExplicitPassthrough
-                    ? "explicit_passthrough"
-                    : "legacy_result",
-                });
-                return useExplicitPassthrough
-                  ? explicitPassthrough(text)
-                  : legacyResult;
+                );
+                if (direct.result && direct.hookResult) {
+                  const reason =
+                    direct.result.outcome === "partial"
+                      ? "enforced_partial_delivery"
+                      : "enforced_target_applied";
+                  recordOutbound({
+                    aliases,
+                    config,
+                    mode: "enforced",
+                    intent,
+                    result: direct.result,
+                    comparisonReason: reason,
+                    hostAction: "coordinator_delivery",
+                  });
+                  return direct.hookResult;
+                }
+                planned.fallbackReason =
+                  direct.fallbackReason || "direct_delivery_unavailable";
               }
 
-              const result = await deliveryScope.run("legacy_child", () =>
+              const legacyResult = await deliveryScope.run("legacy_child", () =>
                 handler(event, ctx),
               );
-              if (config.unifiedOutboundShadowEnabled) {
-                recordOutbound({
-                  aliases,
-                  config,
-                  mode: "shadow",
-                  intent,
-                  result: outboundResult(event, result),
-                  comparisonReason: "shadow_observed",
-                });
-              }
-              return result;
-            });
+              const result = outboundResult(event, legacyResult);
+              const useExplicitPassthrough = legacyResult === undefined;
+              recordOutbound({
+                aliases,
+                config,
+                mode: "enforced",
+                intent,
+                result,
+                comparisonReason: `enforcement_fallback:${planned.fallbackReason || "unknown"}`,
+                hostAction: useExplicitPassthrough
+                  ? "explicit_passthrough"
+                  : "legacy_result",
+              });
+              return useExplicitPassthrough
+                ? explicitPassthrough(text)
+                : legacyResult;
+            }
+
+            const result = await deliveryScope.run("legacy_child", () =>
+              handler(event, ctx),
+            );
+            if (config.unifiedOutboundShadowEnabled) {
+              recordOutbound({
+                aliases,
+                config,
+                mode: "shadow",
+                intent,
+                result: outboundResult(event, result),
+                comparisonReason: "shadow_observed",
+              });
+            }
+            return result;
           };
           return api.on(name, wrapped, options);
         }
 
-        const scoped: HookHandler = async (event, ctx) => {
-          const aliases = aliasesFor(event, ctx);
-          if (name === "before_prompt_build" && priority === 60) {
-            stickerSignals.clear(aliases);
-          }
-          return hookCorrelation.run({ aliases }, () => handler(event, ctx));
-        };
-        return api.on(name, scoped, options);
+        return api.on(name, handler, options);
       },
     });
 
     (v4Plugin as any).register(wrappedApi);
     api.logger.info(
-      `${PLUGIN_ID}: optional V4.3 shadow and enforced outbound coordinator registered`,
+      `${PLUGIN_ID}: optional V4.3.1 shadow/enforced coordinator registered with structured turn and sticker lifecycle correlation`,
     );
   },
 });
