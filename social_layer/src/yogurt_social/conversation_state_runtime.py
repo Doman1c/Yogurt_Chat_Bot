@@ -65,6 +65,8 @@ class ConversationStateRuntimeStore(ConversationStateStore):
                 "4.3",
                 "unifiedoutbound",
                 "outboundcoordinator",
+                "projectstate",
+                "outbound",
                 "统一发送协调",
                 "统一发送",
                 "发送协调器",
@@ -140,6 +142,19 @@ class ConversationStateRuntimeStore(ConversationStateStore):
     @classmethod
     def classify_dialogue_act(cls, message: str) -> str:
         text = re.sub(r"\s+", "", message.casefold())
+        if cls._is_v43(text) and cls._contains_any(
+            text,
+            (
+                "接下来",
+                "下一步",
+                "要验证什么",
+                "要测试什么",
+                "继续验证",
+                "继续测试",
+                "然后告诉我",
+            ),
+        ):
+            return "plan"
         if cls._contains_any(
             text,
             (
