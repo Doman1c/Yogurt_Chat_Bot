@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+TEST_ROOT="$TMP_DIR/plugin-test"
+mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
+
+for file in \
+  index-v43.ts \
+  outbound-coordinator.ts \
+  response-plan-store.ts \
+  sticker-lifecycle.ts \
+  turn-correlation.ts \
+  multi-bubble.ts; do
+  cp "$REPO_ROOT/integrations/openclaw/$file" "$TEST_ROOT/$file"
+done
+
+cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
+{
+  "name": "openclaw",
+  "version": "0.0.0-test",
+  "type": "module",
+  "exports": {
+    "./plugin-sdk/plugin-entry": "./plugin-sdk/plugin-entry.js"
+  }
+}
+JSON
+
+cat > "$TEST_ROOT/node_modules/openclaw/plugin-sdk/plugin-entry.js" <<'JS'
+export function definePluginEntry(definition) {
+  return definition;
+}
+JS
+
+cat > "$TEST_ROOT/sticker-plugin-utils.ts" <<'TS'
+export function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+export function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+export function channelFromContext(ctx: any): string {
+  return optionalString(ctx?.channelId) || "openclaw-weixin";
+}
+export function senderIdFromContext(ctx: any): string | undefined {
+  return optionalString(ctx?.senderId);
+}
+export function contextAliases(ctx: any, channel: string, senderId?: string, event?: any): string[] {
+  const aliases: string[] = [];
+  if (ctx?.sessionKey) aliases.push(`session:${ctx.sessionKey}`);
+  if (event?.sessionKey) aliases.push(`session:${event.sessionKey}`);
+  if (senderId) aliases.push(`sender:${channel}:${senderId}`);
+  return aliases;
+}
+TS
+
+cat > "$TEST_ROOT/index-v4.ts" <<'TS'
+import { responsePlanTurns } from "./response-plan-store.ts";
+import { addTurnCorrelationAliases } from "./turn-correlation.ts";
+
+function aliasesFor(event: any, ctx: any): string[] {
+  const channel = ctx?.channelId || "openclaw-weixin";
+  const aliases: string[] = [];
+  if (ctx?.sessionKey) aliases.push(`session:${ctx.sessionKey}`);
+  if (ctx?.senderId) aliases.push(`sender:${channel}:${ctx.senderId}`);
+  if (event?.to) aliases.push(`peer:${channel}:${event.to}`);
+  return addTurnCorrelationAliases(aliases, event, ctx);
+}
+
+export default {
+  register(api: any) {
+    api.on(
+      "before_prompt_build",
+      async (event: any, ctx: any) => {
+        responsePlanTurns.register(aliasesFor(event, ctx), {
+          plan_version: "4.1",
+          dialogue_act: "plan",
+          primary_goal: "advance_current_project",
+          reply_length: "medium",
+          bubble_target: 2,
+          ask_followup: false,
+          sticker_preference: "neutral",
+          state_version: 401,
+        });
+        return { prependContext: "[Yogurt Response Plan V4.1]\ncorrelation-test" };
+      },
+      { priority: 50 },
+    );
+
+    api.on(
+      "message_sending",
+      async (event: any, ctx: any) => {
+        if (event?.content === "parent-final") {
+          const childCtx = {
+            channelId: "openclaw-weixin",
+            senderId: ctx?.senderId,
+            sessionKey: ctx?.sessionKey,
+          };
+          await api.testDispatch(
+            "message_sending",
+            {
+              content: "child-one",
+              to: event.to,
+              metadata: { channel: "openclaw-weixin" },
+            },
+            childCtx,
+          );
+          api.logger.info("test: legacy parent complete bubbles=2");
+          return {
+            cancel: true,
+            cancelReason: "yogurt_multi_bubble",
+            metadata: { bubbleCount: 2 },
+          };
+        }
+        return undefined;
+      },
+      { priority: 70 },
+    );
+  },
+};
+TS
+
+node --experimental-strip-types --input-type=module - "$TEST_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const testRoot = process.argv[2];
+const plugin = (await import(pathToFileURL(`${testRoot}/index-v43.ts`))).default;
+const hooks = new Map();
+const logs = [];
+const api = {
+  pluginConfig: {
+    responsePlannerEnabled: true,
+    unifiedOutboundShadowEnabled: true,
+    unifiedOutboundEnforceEnabled: false,
+    stickerEnabled: false,
+    multiBubbleMinChars: 8,
+    multiBubbleMaxChars: 360,
+    multiBubbleDelayMs: 0,
+  },
+  config: {},
+  logger: {
+    info(message) { logs.push(String(message)); },
+    warn(message) { logs.push(String(message)); },
+    error(message) { logs.push(String(message)); },
+  },
+  on(name, handler, options = {}) {
+    const items = hooks.get(name) || [];
+    items.push({ handler, priority: options.priority || 0 });
+    hooks.set(name, items);
+  },
+};
+
+async function dispatch(name, event, context) {
+  let result;
+  const ordered = [...(hooks.get(name) || [])].sort(
+    (left, right) => right.priority - left.priority,
+  );
+  for (const item of ordered) {
+    const current = await item.handler(event, context);
+    if (current !== undefined) result = current;
+  }
+  return result;
+}
+api.testDispatch = dispatch;
+plugin.register(api);
+
+const beforeCtx = {
+  channelId: "openclaw-weixin",
+  senderId: "wx-owner@im.wechat",
+  sessionKey: "session-cross-hook",
+};
+await dispatch(
+  "before_prompt_build",
+  {
+    prompt: "advance project",
+    traceId: "trace-before-prompt",
+  },
+  beforeCtx,
+);
+
+const sendCtx = {
+  channelId: "openclaw-weixin",
+  senderId: "wx-owner@im.wechat",
+  sessionKey: "session-cross-hook",
+  runId: "run-final-delivery",
+};
+await dispatch(
+  "message_sending",
+  {
+    content: "parent-final",
+    to: "wx-owner@im.wechat",
+    kind: "final",
+    runId: "run-final-delivery",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  sendCtx,
+);
+
+const shadow = logs.filter((value) => value.includes("v4.3 outbound shadow"));
+assert.equal(shadow.length, 1, "only the parent delivery may consume the Planner Intent");
+assert.ok(shadow[0].includes("actualBubbles=2"));
+assert.ok(shadow[0].includes("targetBubbles=2"));
+assert.ok(shadow[0].includes("matched=true"));
+assert.ok(shadow[0].includes("stateVersion=401"));
+assert.ok(shadow[0].includes("textChars=12"));
+assert.equal(
+  logs.some((value) => value.includes("v4.3 outbound shadow") && value.includes("textChars=9")),
+  false,
+  "weak-only recursive child must not steal the parent turn",
+);
+
+const legacyIndex = logs.findIndex((value) => value.includes("legacy parent complete bubbles=2"));
+const shadowIndex = logs.findIndex((value) => value.includes("v4.3 outbound shadow"));
+assert.ok(legacyIndex >= 0 && shadowIndex > legacyIndex, "Shadow must observe the legacy terminal result after the parent handler completes");
+
+console.log("v4.3.2 cross-hook trace-to-run parent correlation: ok");
+JS
