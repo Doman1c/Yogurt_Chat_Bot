@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from yogurt_social.continuity_memory import ContinuityAwareMemoryStore
+from yogurt_social.conversation_state_observer import _with_current_continuity_context
 from yogurt_social.conversation_state_runtime import ConversationStateRuntimeStore
+from yogurt_social.response_planner import ResponsePlanner
 
 
 def test_v43_phase_retires_v42_threads(tmp_path):
@@ -83,6 +85,36 @@ def test_v43_followups_inherit_active_phase_without_version_marker(tmp_path):
     assert "运行 V4.3 测试" not in completed.open_threads
     assert "V4.3 统一发送协调器测试已通过" in completed.recent_actions
     assert "V4.0 测试已通过" not in completed.recent_actions
+
+
+def test_current_continuity_context_precedes_old_project_versions(tmp_path):
+    store = ConversationStateRuntimeStore(tmp_path / "state.sqlite3")
+    key = "session:v43-context"
+    store.observe_user_turn(
+        "owner",
+        key,
+        "开始 V4.3.2 统一发送协调器的 alpha.6 回归测试",
+    )
+    store.observe_assistant_turn(
+        "owner",
+        key,
+        "alpha.6 本地自动化回归全部通过。",
+    )
+    message = "刚才解决了什么，接下来要测试什么"
+    state = store.observe_user_turn("owner", key, message)
+    planner = ResponsePlanner()
+    context = _with_current_continuity_context(
+        planner.build_context_block(planner.plan(message, state)),
+        state,
+    )
+
+    assert context.startswith("[Yogurt Response Plan V4.1]")
+    assert "[Yogurt Current Continuity]" in context
+    assert "当前阶段：统一发送协调" in context
+    assert "V4.3 alpha.6 回归已通过" in context
+    assert "运行 V4.3 测试" in context
+    assert "长期记忆中的旧项目版本" in context
+    assert "V4.0 测试已通过" not in context
 
 
 def test_current_project_progress_does_not_inject_old_versioned_episode(tmp_path):
