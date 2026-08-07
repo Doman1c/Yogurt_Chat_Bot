@@ -10,6 +10,8 @@ export type CorrelatedEntry<T> = {
 
 const STRONG_PREFIXES = ["run:", "message:", "trace:"] as const;
 
+type StrongPrefix = (typeof STRONG_PREFIXES)[number];
+
 export function normalizeCorrelationAliases(aliases: string[]): string[] {
   return [...new Set(
     aliases
@@ -21,6 +23,10 @@ export function normalizeCorrelationAliases(aliases: string[]): string[] {
 
 export function isStrongCorrelationAlias(alias: string): boolean {
   return STRONG_PREFIXES.some((prefix) => alias.startsWith(prefix));
+}
+
+function strongPrefix(alias: string): StrongPrefix | undefined {
+  return STRONG_PREFIXES.find((prefix) => alias.startsWith(prefix));
 }
 
 export function addTurnCorrelationAliases(
@@ -72,6 +78,37 @@ function newestEntry<T>(entries: Iterable<CorrelatedEntry<T>>): CorrelatedEntry<
 
 function entryHasStrongAlias<T>(entry: CorrelatedEntry<T>): boolean {
   return entry.aliases.some(isStrongCorrelationAlias);
+}
+
+function strongAliasesByPrefix(aliases: string[]): Map<StrongPrefix, Set<string>> {
+  const grouped = new Map<StrongPrefix, Set<string>>();
+  for (const alias of aliases) {
+    const prefix = strongPrefix(alias);
+    if (!prefix) continue;
+    const values = grouped.get(prefix) || new Set<string>();
+    values.add(alias);
+    grouped.set(prefix, values);
+  }
+  return grouped;
+}
+
+function hasSameNamespaceConflict(left: string[], right: string[]): boolean {
+  const leftStrong = strongAliasesByPrefix(left);
+  const rightStrong = strongAliasesByPrefix(right);
+  for (const prefix of STRONG_PREFIXES) {
+    const leftValues = leftStrong.get(prefix);
+    const rightValues = rightStrong.get(prefix);
+    if (!leftValues || !rightValues) continue;
+    let intersects = false;
+    for (const value of leftValues) {
+      if (rightValues.has(value)) {
+        intersects = true;
+        break;
+      }
+    }
+    if (!intersects) return true;
+  }
+  return false;
 }
 
 export class CorrelationStore<T> {
@@ -140,19 +177,19 @@ export class CorrelationStore<T> {
       const strongMatch = newestEntry(exact);
       if (strongMatch) return strongMatch;
 
-      // Compatibility for hosts that expose a strong id only in a later hook:
-      // fall back only when exactly one weakly-correlated entry exists AND that
-      // stored entry had no strong id of its own. A different strong id is a
-      // hard mismatch, and multiple candidates are always treated as ambiguous.
-      const weakOnlyCandidates = new Set<CorrelatedEntry<T>>();
+      // OpenClaw may expose different strong-id namespaces at different hook
+      // phases (for example traceId before prompt build, then runId during
+      // delivery). Those are compatible unless the same namespace explicitly
+      // disagrees. Use weak aliases only to locate a unique compatible parent.
+      const compatible = new Set<CorrelatedEntry<T>>();
       for (const alias of weak) {
         for (const entry of this.byAlias.get(alias) || []) {
-          if (!entryHasStrongAlias(entry)) weakOnlyCandidates.add(entry);
+          if (!hasSameNamespaceConflict(normalized, entry.aliases)) {
+            compatible.add(entry);
+          }
         }
       }
-      if (weakOnlyCandidates.size === 1) {
-        return weakOnlyCandidates.values().next().value;
-      }
+      if (compatible.size === 1) return compatible.values().next().value;
       return undefined;
     }
 
@@ -160,9 +197,13 @@ export class CorrelationStore<T> {
     for (const alias of weak) {
       for (const entry of this.byAlias.get(alias) || []) candidates.add(entry);
     }
-    // Weak-only hooks are safe when the conversation has one live candidate.
-    // If strong-id turns overlap on the same session/peer, never guess.
-    return candidates.size === 1 ? candidates.values().next().value : undefined;
+    if (candidates.size !== 1) return undefined;
+    const candidate = candidates.values().next().value as CorrelatedEntry<T>;
+
+    // A weak-only child callback must never steal a parent Turn that already
+    // has a run/message/trace identity. Hosts that omit all strong ids remain
+    // supported when the stored Turn is also weak-only.
+    return entryHasStrongAlias(candidate) ? undefined : candidate;
   }
 
   peek(aliases: string[]): T | undefined {
