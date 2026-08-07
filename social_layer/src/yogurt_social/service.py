@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .continuity_memory import ContinuityAwareMemoryStore
 from .conversation_state_runtime import ConversationStateRuntimeStore
-from .memory import MemoryStore
 from .models import MemorySnippet
 from .router import StyleRouter
 
@@ -22,7 +22,7 @@ class SocialLayerService:
         conversation_state_max_open_threads: int = 5,
         conversation_state_max_recent_actions: int = 6,
     ) -> None:
-        self.memory = MemoryStore(db_path)
+        self.memory = ContinuityAwareMemoryStore(db_path)
         self.router = StyleRouter()
         self.max_memories_per_reply = max_memories_per_reply
         self.conversation_state_enabled = conversation_state_enabled
@@ -82,7 +82,7 @@ class SocialLayerService:
             "conversation_state_mode": (
                 "observe_only" if self.conversation_state is not None else "disabled"
             ),
-            # V4.0 deliberately does not inject conversation state into the prompt.
+            # V4.0 deliberately does not inject conversation state into the V1 block.
             "context_block": self.build_context_block(state.to_dict(), memories),
         }
 
