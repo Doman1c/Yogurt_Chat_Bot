@@ -19,6 +19,22 @@ _CONTINUITY_CONTEXT_MAX_CHARS = 1750
 _PROJECT_STATUS_MAX_ITEMS = 5
 _PROJECT_STATUS_MAX_ITEM_CHARS = 220
 _DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_PROJECT_TOPICS = frozenset(
+    {
+        "Yogurt V4 开发",
+        "Yogurt V3 维护",
+        "统一发送协调",
+        "统一发送编排",
+        "回复规划器",
+        "记忆召回门控",
+        "记忆系统",
+        "表情系统",
+        "多气泡回复",
+        "OpenClaw 集成",
+        "微信机器人",
+        "本地模型部署",
+    }
+)
 
 
 def _request(stream: Any) -> Mapping[str, Any]:
@@ -76,14 +92,12 @@ def _project_topic_matches(
     state: ConversationState,
     repository_status: Mapping[str, Any] | None,
 ) -> bool:
+    if state.current_topic in _PROJECT_TOPICS:
+        return True
     if repository_status is None:
-        return state.current_topic not in {None, "日常对话"}
+        return False
     status_topic = _bounded_text(repository_status.get("current_topic"), 80)
-    return bool(
-        not status_topic
-        or not state.current_topic
-        or status_topic == state.current_topic
-    )
+    return bool(status_topic and status_topic == state.current_topic)
 
 
 def _with_current_continuity_context(
@@ -103,7 +117,13 @@ def _with_current_continuity_context(
     if state.current_topic:
         continuity.append(f"当前阶段：{state.current_topic}")
 
-    if project_status is not None:
+    status_topic = _bounded_text(project_status.get("current_topic"), 80) if project_status else ""
+    use_project_status = bool(project_status) and (
+        project_state_updated
+        or state.current_topic in _PROJECT_TOPICS
+        or (status_topic and status_topic == state.current_topic)
+    )
+    if use_project_status and project_status is not None:
         version = _bounded_text(project_status.get("current_version"), 48)
         plugin_version = _bounded_text(project_status.get("plugin_version"), 48)
         stage = _bounded_text(project_status.get("current_stage"), 180)
