@@ -16,6 +16,7 @@ import {
 import {
   addTurnCorrelationAliases,
   CorrelationStore,
+  summarizeCorrelationAliases,
 } from "./turn-correlation.ts";
 
 const PLUGIN_ID = "yogurt-social-injector";
@@ -153,6 +154,15 @@ function aliasesFor(ctx: any, event?: any): string[] {
   return addTurnCorrelationAliases(aliases, event, ctx);
 }
 
+function correlationSummary(aliases: string[]): string {
+  const summary = summarizeCorrelationAliases(aliases);
+  return [
+    `strongKinds=${summary.strongKinds.join(",") || "none"}`,
+    `weakKinds=${summary.weakKinds.join(",") || "none"}`,
+    `aliasCount=${summary.aliasCount}`,
+  ].join(" ");
+}
+
 const memoryTurns = new CorrelationStore<PendingTurn>(
   TURN_TTL_MS,
   MAX_PENDING_TURNS,
@@ -280,7 +290,12 @@ export function registerV3Runtime(api: any): void {
   ): Promise<boolean> => {
     const config = readV3Config(api, event);
     if (!config.autoMemoryEnabled || !assistantReply) return false;
-    const turn = memoryTurns.consume(aliases);
+    const strictTurn = memoryTurns.peek(aliases);
+    const turn = strictTurn
+      ? memoryTurns.consume(aliases)
+      : trigger === "message_sending"
+        ? memoryTurns.consumeParent(aliases)
+        : memoryTurns.consume(aliases);
     if (!turn) return false;
     try {
       const result = await runAutoMemory(api, turn, assistantReply, config);
@@ -354,7 +369,17 @@ export function registerV3Runtime(api: any): void {
       if (consumeBubblePassThrough(fingerprint)) return;
 
       const aliases = aliasesFor(ctx, event);
-      const turn = bubbleTurns.consume(aliases);
+      const pendingBefore = bubbleTurns.size();
+      const strictTurn = bubbleTurns.peek(aliases);
+      const turn = strictTurn
+        ? bubbleTurns.consume(aliases)
+        : bubbleTurns.consumeParent(aliases);
+      const match = strictTurn ? "strict" : turn ? "weak_parent" : "miss";
+      if (match !== "strict") {
+        api.logger.info(
+          `${PLUGIN_ID}: multi bubble correlation ${correlationSummary(aliases)} pendingBefore=${pendingBefore} match=${match}`,
+        );
+      }
       if (!turn) return;
       const bubbles = splitNaturalBubbles(text, {
         minChars: config.multiBubbleMinChars,
