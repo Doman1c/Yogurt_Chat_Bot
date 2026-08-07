@@ -1,3 +1,5 @@
+import { CorrelationStore } from "./turn-correlation.ts";
+
 const DEFAULT_TTL_MS = 15 * 60_000;
 const DEFAULT_LIMIT = 200;
 
@@ -33,12 +35,6 @@ export type OutboundComparison = {
   reasons: string[];
 };
 
-type StoredIntent = {
-  aliases: string[];
-  intent: OutboundIntent;
-  createdAt: number;
-};
-
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -58,15 +54,6 @@ function integerValue(
   return typeof value === "number" && Number.isInteger(value)
     ? Math.min(maximum, Math.max(minimum, value))
     : fallback;
-}
-
-function normalizeAliases(aliases: string[]): string[] {
-  return [...new Set(
-    aliases
-      .filter((item): item is string => typeof item === "string")
-      .map((item) => item.trim())
-      .filter(Boolean),
-  )];
 }
 
 export function outboundIntentFromResponsePlan(value: unknown): OutboundIntent {
@@ -126,79 +113,31 @@ export function formatOutboundComparison(comparison: OutboundComparison): string
 }
 
 export class OutboundTurnStore {
-  private readonly byAlias = new Map<string, StoredIntent>();
-  private readonly ttlMs: number;
-  private readonly limit: number;
-  private readonly now: () => number;
+  private readonly store: CorrelationStore<OutboundIntent>;
 
   constructor(
     ttlMs = DEFAULT_TTL_MS,
     limit = DEFAULT_LIMIT,
     now: () => number = () => Date.now(),
   ) {
-    this.ttlMs = ttlMs;
-    this.limit = limit;
-    this.now = now;
+    this.store = new CorrelationStore<OutboundIntent>(ttlMs, limit, now);
   }
 
   register(aliases: string[], responsePlan: unknown): OutboundIntent | undefined {
-    this.prune();
-    const normalized = normalizeAliases(aliases);
-    if (normalized.length === 0) return undefined;
     const intent = outboundIntentFromResponsePlan(responsePlan);
-    const entry: StoredIntent = {
-      aliases: normalized,
-      intent,
-      createdAt: this.now(),
-    };
-    for (const alias of normalized) this.byAlias.set(alias, entry);
-    if (this.byAlias.size > this.limit) this.prune(true);
-    return intent;
+    return this.store.register(aliases, intent)?.value;
   }
 
   peek(aliases: string[]): OutboundIntent | undefined {
-    this.prune();
-    for (const alias of normalizeAliases(aliases)) {
-      const entry = this.byAlias.get(alias);
-      if (entry) return entry.intent;
-    }
-    return undefined;
+    return this.store.peek(aliases);
   }
 
   consume(aliases: string[]): OutboundIntent | undefined {
-    this.prune();
-    for (const alias of normalizeAliases(aliases)) {
-      const entry = this.byAlias.get(alias);
-      if (!entry) continue;
-      this.delete(entry);
-      return entry.intent;
-    }
-    return undefined;
+    return this.store.consume(aliases);
   }
 
   size(): number {
-    this.prune();
-    return new Set(this.byAlias.values()).size;
-  }
-
-  private delete(entry: StoredIntent): void {
-    for (const alias of entry.aliases) {
-      if (this.byAlias.get(alias) === entry) this.byAlias.delete(alias);
-    }
-  }
-
-  private prune(force = false): void {
-    const cutoff = this.now() - this.ttlMs;
-    const entries = [...new Set(this.byAlias.values())].sort(
-      (left, right) => left.createdAt - right.createdAt,
-    );
-    for (const entry of entries) {
-      if (!force && entry.createdAt >= cutoff) continue;
-      this.delete(entry);
-      if (force && this.byAlias.size <= Math.max(1, Math.floor(this.limit / 2))) {
-        break;
-      }
-    }
+    return this.store.size();
   }
 }
 
