@@ -6,6 +6,10 @@ import {
   StickerAutoPolicyStore,
   StickerSelectionStore,
 } from "./sticker-selection.ts";
+import {
+  boundedLifecycleReason,
+  emitStickerLifecycle,
+} from "./sticker-lifecycle.ts";
 import { StickerTurnStore } from "./sticker-turn.ts";
 import {
   assistantTextFromEvent,
@@ -30,6 +34,7 @@ import {
   sessionKeyFromContext,
   stripStickerCandidateContext,
 } from "./sticker-plugin-utils.ts";
+import { addTurnCorrelationAliases } from "./turn-correlation.ts";
 
 const PLUGIN_ID = "yogurt-social-injector";
 const WEIXIN_CHANNEL = "openclaw-weixin";
@@ -69,6 +74,27 @@ function targetFromContext(ctx: any, event?: any): string | undefined {
     optionalString(ctx?.conversationId) ||
     optionalString(ctx?.channelContext?.chat?.id) ||
     senderIdFromContext(ctx)
+  );
+}
+
+function correlatedAliases(
+  ctx: any,
+  event: any,
+  channel: string,
+  senderId?: string,
+  peerId?: unknown,
+): string[] {
+  return addTurnCorrelationAliases(
+    addPeerAlias(contextAliases(ctx, channel, senderId, event), channel, peerId),
+    event,
+    ctx,
+  );
+}
+
+function bridgeSkipReason(decision: ReturnType<typeof parseStickerBridgeDecision>): string {
+  return boundedLifecycleReason(
+    decision.reasons.length > 0 ? decision.reasons.join("|") : undefined,
+    "bridge_no_send",
   );
 }
 
@@ -152,9 +178,11 @@ export default definePluginEntry({
           async execute(_toolCallId: string, params: Record<string, unknown>) {
             const channel = channelFromContext(toolContext);
             const senderId = senderIdFromContext(toolContext);
-            const aliases = addPeerAlias(
-              contextAliases(toolContext, channel, senderId),
+            const aliases = correlatedAliases(
+              toolContext,
+              undefined,
               channel,
+              senderId,
               senderId,
             );
             const stickerId = optionalString(params.sticker_id);
@@ -176,6 +204,12 @@ export default definePluginEntry({
               explicit: false,
             });
             if (result.status === "rejected") {
+              emitStickerLifecycle({
+                aliases,
+                phase: "failed",
+                reason: result.reason,
+                trigger: "choose_sticker",
+              });
               return {
                 content: [
                   {
@@ -186,6 +220,13 @@ export default definePluginEntry({
                 details: { status: "rejected", reason: result.reason },
               };
             }
+            emitStickerLifecycle({
+              aliases,
+              phase: "selected",
+              reason: "tool_selected",
+              stickerId: result.sticker.id,
+              trigger: "choose_sticker",
+            });
             api.logger.info(`${PLUGIN_ID}: sticker selection pending mode=tool`);
             return {
               content: [
@@ -220,11 +261,7 @@ export default definePluginEntry({
         const userId = resolveUserId(config, senderId, channel);
         if (!userId) return;
 
-        const aliases = addPeerAlias(
-          contextAliases(ctx, channel, senderId),
-          channel,
-          senderId,
-        );
+        const aliases = correlatedAliases(ctx, event, channel, senderId, senderId);
         const policyKey = preferredPolicyKey(aliases);
         const explicit = messageExplicitlyRequestsSticker(prompt);
         const forbidden = messageForbidsSticker(prompt);
@@ -269,6 +306,12 @@ export default definePluginEntry({
             } else {
               selectionStore.clear(aliases);
               decisionReason = "no_candidates";
+              emitStickerLifecycle({
+                aliases,
+                phase: "skipped",
+                reason: "no_candidates",
+                trigger: "pre_reply",
+              });
             }
           } else {
             socialContext = stripStickerCandidateContext(rawSocialContext);
@@ -276,6 +319,12 @@ export default definePluginEntry({
             if (forbidden) {
               turnStore.clear(aliases);
               decisionReason = "user_forbid";
+              emitStickerLifecycle({
+                aliases,
+                phase: "skipped",
+                reason: "user_forbid",
+                trigger: "pre_reply",
+              });
             } else {
               turnStore.register(aliases, {
                 userId,
@@ -297,6 +346,15 @@ export default definePluginEntry({
                   .join("\n\n");
                 if (!bridgeDecision.shouldSend || candidates.length === 0) {
                   turnStore.clear(aliases);
+                  emitStickerLifecycle({
+                    aliases,
+                    phase: "skipped",
+                    reason:
+                      candidates.length === 0
+                        ? "no_candidates"
+                        : bridgeSkipReason(bridgeDecision),
+                    trigger: "pre_reply",
+                  });
                 }
               }
             }
@@ -311,6 +369,12 @@ export default definePluginEntry({
           selectionStore.clear(aliases);
           turnStore.clear(aliases);
           const reason = error instanceof Error ? error.message : "unknown_error";
+          emitStickerLifecycle({
+            aliases,
+            phase: "failed",
+            reason,
+            trigger: "pre_reply",
+          });
           api.logger.warn(`${PLUGIN_ID}: social layer unavailable (${reason}); fail-open`);
           return;
         }
@@ -360,6 +424,15 @@ export default definePluginEntry({
         turnStore.consume(params.aliases);
         if (!bridgeDecision.shouldSend || candidates.length === 0) {
           selectionStore.clear(params.aliases);
+          emitStickerLifecycle({
+            aliases: params.aliases,
+            phase: "skipped",
+            reason:
+              candidates.length === 0
+                ? "no_candidates"
+                : bridgeSkipReason(bridgeDecision),
+            trigger: params.trigger,
+          });
           return false;
         }
 
@@ -375,6 +448,12 @@ export default definePluginEntry({
             `${PLUGIN_ID}: send decision rejected by delivery policy reason=${policyDecision.reason}`,
           );
           selectionStore.clear(params.aliases);
+          emitStickerLifecycle({
+            aliases: params.aliases,
+            phase: "skipped",
+            reason: policyDecision.reason,
+            trigger: params.trigger,
+          });
           return false;
         }
 
@@ -393,17 +472,36 @@ export default definePluginEntry({
         );
         if (selected.status !== "selected") {
           selectionStore.clear(resolvedAliases);
+          emitStickerLifecycle({
+            aliases: resolvedAliases,
+            phase: "failed",
+            reason: selected.reason,
+            trigger: params.trigger,
+          });
           api.logger.warn(
             `${PLUGIN_ID}: post-reply selection rejected reason=${selected.reason}`,
           );
           return false;
         }
+        emitStickerLifecycle({
+          aliases: resolvedAliases,
+          phase: "selected",
+          reason: policyDecision.reason,
+          stickerId: selected.sticker.id,
+          trigger: params.trigger,
+        });
         api.logger.info(
           `${PLUGIN_ID}: post-reply sticker selected sticker=${selected.sticker.id} reason=${policyDecision.reason}`,
         );
         return true;
       } catch (error) {
         const reason = error instanceof Error ? error.message : "unknown_error";
+        emitStickerLifecycle({
+          aliases: params.aliases,
+          phase: "failed",
+          reason,
+          trigger: params.trigger,
+        });
         api.logger.warn(
           `${PLUGIN_ID}: post-reply sticker decision unavailable trigger=${params.trigger} (${reason}); text preserved`,
         );
@@ -427,6 +525,13 @@ export default definePluginEntry({
 
       const target = targetFromContext(params.ctx, params.event);
       if (!target) {
+        emitStickerLifecycle({
+          aliases: params.aliases,
+          phase: "failed",
+          reason: "target_missing",
+          stickerId: pending.sticker.id,
+          trigger: params.trigger,
+        });
         api.logger.warn(
           `${PLUGIN_ID}: sticker outbound delivery skipped (target_missing)`,
         );
@@ -439,10 +544,18 @@ export default definePluginEntry({
         deliveryConfig.deliveryDelayMs,
         params.minimumDelayMs || 0,
       );
+      emitStickerLifecycle({
+        aliases: params.aliases,
+        phase: "scheduled",
+        reason: "delivery_scheduled",
+        stickerId: pending.sticker.id,
+        trigger: params.trigger,
+      });
       api.logger.info(
         `${PLUGIN_ID}: sticker outbound scheduled trigger=${params.trigger} mode=${pending.mode} hasTarget=true delayMs=${delayMs}`,
       );
 
+      const lifecycleAliases = [...params.aliases];
       const timer = setTimeout(async () => {
         deliveryTimers.delete(pending.snapshotId);
         const selected = selectionStore.consumePendingBySnapshot(pending.snapshotId);
@@ -469,11 +582,25 @@ export default definePluginEntry({
             ...(accountId ? { accountId } : {}),
           } as any);
           autoPolicyStore.recordSent(selected.policyKey, selected.sticker);
+          emitStickerLifecycle({
+            aliases: lifecycleAliases,
+            phase: "sent",
+            reason: "media_sent",
+            stickerId: selected.sticker.id,
+            trigger: "channel_outbound_adapter",
+          });
           api.logger.info(
             `${PLUGIN_ID}: sticker media sent trigger=channel_outbound_adapter mode=${selected.mode} sticker=${selected.sticker.id}`,
           );
         } catch (error) {
           const reason = error instanceof Error ? error.message : "unknown_error";
+          emitStickerLifecycle({
+            aliases: lifecycleAliases,
+            phase: "failed",
+            reason,
+            stickerId: selected.sticker.id,
+            trigger: "channel_outbound_adapter",
+          });
           api.logger.warn(
             `${PLUGIN_ID}: sticker media send failed trigger=channel_outbound_adapter (${reason}); text preserved`,
           );
@@ -488,11 +615,7 @@ export default definePluginEntry({
       if (channel !== WEIXIN_CHANNEL) return;
       const senderId = senderIdFromContext(ctx);
       const peerId = targetFromContext(ctx, event);
-      const aliases = addPeerAlias(
-        contextAliases(ctx, channel, senderId, event),
-        channel,
-        peerId,
-      );
+      const aliases = correlatedAliases(ctx, event, channel, senderId, peerId);
       await finalizeAutoSelection({
         trigger: "agent_end",
         aliases,
@@ -515,11 +638,7 @@ export default definePluginEntry({
       if (channel !== WEIXIN_CHANNEL) return;
       const senderId = senderIdFromContext(ctx);
       const peerId = targetFromContext(ctx, event);
-      const aliases = addPeerAlias(
-        contextAliases(ctx, channel, senderId, event),
-        channel,
-        peerId,
-      );
+      const aliases = correlatedAliases(ctx, event, channel, senderId, peerId);
       await finalizeAutoSelection({
         trigger: "message_sent",
         aliases,
@@ -547,11 +666,7 @@ export default definePluginEntry({
 
         const senderId = senderIdFromContext(ctx);
         const peerId = targetFromContext(ctx, event);
-        const aliases = addPeerAlias(
-          contextAliases(ctx, channel, senderId, event),
-          channel,
-          peerId,
-        );
+        const aliases = correlatedAliases(ctx, event, channel, senderId, peerId);
         await finalizeAutoSelection({
           trigger: "reply_payload_sending",
           aliases,
@@ -568,6 +683,13 @@ export default definePluginEntry({
         } catch (error) {
           selectionStore.consumePendingBySnapshot(pending.snapshotId);
           const reason = error instanceof Error ? error.message : "unknown_error";
+          emitStickerLifecycle({
+            aliases,
+            phase: "failed",
+            reason,
+            stickerId: pending.sticker.id,
+            trigger: "reply_payload_sending",
+          });
           api.logger.warn(
             `${PLUGIN_ID}: sticker media attach failed (${reason}); text preserved`,
           );
@@ -578,6 +700,13 @@ export default definePluginEntry({
         const mediaUrls = normalizePayloadMediaUrls(event?.payload);
         if (!mediaUrls.includes(filePath)) mediaUrls.push(filePath);
         autoPolicyStore.recordSent(selected.policyKey, selected.sticker);
+        emitStickerLifecycle({
+          aliases,
+          phase: "sent",
+          reason: "media_attached",
+          stickerId: selected.sticker.id,
+          trigger: "reply_payload_sending",
+        });
         api.logger.info(
           `${PLUGIN_ID}: sticker media attached trigger=reply_payload_sending mode=${selected.mode} sticker=${selected.sticker.id} mediaCount=${mediaUrls.length}`,
         );
@@ -593,7 +722,7 @@ export default definePluginEntry({
     );
 
     api.logger.info(
-      `${PLUGIN_ID}: registered before_prompt_build, agent_end, message_sent, reply_payload_sending, V2.1 post-reply decision, and optional choose_sticker`,
+      `${PLUGIN_ID}: registered before_prompt_build, agent_end, message_sent, reply_payload_sending, V2.1 post-reply decision, typed sticker lifecycle, and optional choose_sticker`,
     );
   },
 });
