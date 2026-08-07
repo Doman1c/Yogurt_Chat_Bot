@@ -87,7 +87,6 @@ assert.equal(store.consume(["session:owner"])?.bubbleTarget, 1);
 assert.equal(store.consume(["peer:wechat:owner"]), undefined);
 assert.equal(store.size(), 0);
 
-// Strong run ids may share every weak alias without deleting or consuming each other.
 const concurrent = new OutboundTurnStore(5_000, 16, () => now);
 concurrent.register(
   ["run:run-a", "session:shared", "peer:wechat:owner"],
@@ -99,25 +98,18 @@ concurrent.register(
   { bubble_target: 2, state_version: 102 },
 );
 assert.equal(concurrent.size(), 2);
-assert.equal(
-  concurrent.peek(["run:run-a", "session:shared"])?.stateVersion,
-  101,
-);
-assert.equal(
-  concurrent.peek(["run:run-b", "session:shared"])?.stateVersion,
-  102,
-);
+assert.equal(concurrent.peek(["run:run-a", "session:shared"])?.stateVersion, 101);
+assert.equal(concurrent.peek(["run:run-b", "session:shared"])?.stateVersion, 102);
 assert.equal(
   concurrent.peek(["run:run-missing", "session:shared"]),
   undefined,
-  "a strong correlation miss must never fall back to another turn's weak alias",
+  "a same-namespace runId mismatch must never fall through to another turn",
 );
 assert.equal(concurrent.consume(["run:run-a"])?.bubbleTarget, 1);
 assert.equal(concurrent.size(), 1);
 assert.equal(concurrent.consume(["run:run-b"])?.bubbleTarget, 2);
 assert.equal(concurrent.size(), 0);
 
-// Re-registering the same strong id replaces that turn only.
 concurrent.register(
   ["run:run-c", "session:shared"],
   { bubble_target: 1, state_version: 201 },
@@ -134,7 +126,6 @@ assert.equal(concurrent.size(), 2);
 assert.equal(concurrent.peek(["run:run-c"])?.stateVersion, 203);
 assert.equal(concurrent.peek(["run:run-d"])?.stateVersion, 202);
 
-// Generic correlation aliases include strong ids without retaining raw content.
 const aliases = addTurnCorrelationAliases(
   ["session:shared"],
   { runId: "run-event", messageId: "message-event", traceId: "trace-event" },
@@ -152,8 +143,37 @@ assert.equal(generic.peek(["run:a", "session:s"])?.marker, "a");
 assert.equal(generic.peek(["run:b", "session:s"])?.marker, "b");
 assert.equal(generic.peek(["run:x", "session:s"]), undefined);
 
-// If an earlier hook had no strong id, a later strong-id hook may use the
-// single unambiguous weak candidate. This is the only allowed strong miss fallback.
+// Different strong-id namespaces may appear at different OpenClaw hook phases.
+// trace:t1 -> run:r1 is compatible when the weak parent identity is unique.
+const crossNamespace = new CorrelationStore(5_000, 16, () => now);
+crossNamespace.register(
+  ["trace:trace-before-prompt", "session:cross", "peer:wechat:owner"],
+  { marker: "parent" },
+);
+assert.equal(
+  crossNamespace.peek(["run:run-message-sending", "session:cross", "peer:wechat:owner"])?.marker,
+  "parent",
+  "different strong namespaces should correlate through one unique compatible parent",
+);
+assert.equal(
+  crossNamespace.peek(["trace:different-trace", "session:cross"]),
+  undefined,
+  "the same strong namespace with a different value is still a hard mismatch",
+);
+assert.equal(
+  crossNamespace.peek(["session:cross"]),
+  undefined,
+  "a weak-only child must not steal a parent that already has a strong identity",
+);
+
+const messageToRun = new CorrelationStore(5_000, 16, () => now);
+messageToRun.register(["message:msg-1", "session:message-run"], { marker: "message-parent" });
+assert.equal(
+  messageToRun.consume(["run:run-1", "session:message-run"])?.marker,
+  "message-parent",
+);
+
+// A legacy host that had no strong id at registration may still gain one later.
 const legacyOnly = new CorrelationStore(5_000, 16, () => now);
 legacyOnly.register(["session:legacy", "peer:wechat:legacy"], { marker: "legacy" });
 assert.equal(
@@ -162,16 +182,14 @@ assert.equal(
   "one weak-only legacy entry may be correlated when a later hook gains runId",
 );
 
-// Even one stored entry with a different strong id is a hard mismatch.
 const differentStrong = new CorrelationStore(5_000, 16, () => now);
 differentStrong.register(["run:old", "session:one"], { marker: "old" });
 assert.equal(
   differentStrong.peek(["run:new", "session:one"]),
   undefined,
-  "a different stored strong id must never be accepted through session fallback",
+  "a different stored runId must never be accepted through session fallback",
 );
 
-// Weak-only lookup must refuse to guess when more than one live turn shares it.
 const ambiguousWeak = new CorrelationStore(5_000, 16, () => now);
 ambiguousWeak.register(["run:one", "session:ambiguous"], { marker: "one" });
 ambiguousWeak.register(["run:two", "session:ambiguous"], { marker: "two" });
@@ -240,5 +258,5 @@ assert.ok(
   ),
 );
 
-console.log("v4.3.1 outbound coordinator and strong correlation model: ok");
+console.log("v4.3.2 outbound coordinator and cross-namespace strong correlation model: ok");
 JS
