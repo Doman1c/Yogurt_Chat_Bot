@@ -5,6 +5,7 @@ import { delimiter, join } from "node:path";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 import v3Plugin from "./index-v3.ts";
+import { responsePlanTurns } from "./response-plan-store.ts";
 import { assistantTextFromEvent } from "./sticker-v21-utils.ts";
 import {
   asRecord,
@@ -17,6 +18,10 @@ import {
   resolveUserId,
   senderIdFromContext,
 } from "./sticker-plugin-utils.ts";
+import {
+  addTurnCorrelationAliases,
+  CorrelationStore,
+} from "./turn-correlation.ts";
 
 const PLUGIN_ID = "yogurt-social-injector";
 const WEIXIN_CHANNEL = "openclaw-weixin";
@@ -45,8 +50,6 @@ type V4Config = {
 type PendingStateTurn = {
   userId: string;
   conversationKey: string;
-  keys: string[];
-  createdAt: number;
 };
 
 type ObserverResult = {
@@ -196,87 +199,34 @@ function targetFromContext(event: any, ctx: any): string | undefined {
 
 function eventHasMedia(event: any): boolean {
   const metadata = eventMetadata(event);
+  const payload = asRecord(event?.payload);
   return Boolean(
-    optionalString(event?.mediaUrl) ||
+    (Array.isArray(event?.media) && event.media.length > 0) ||
+      (Array.isArray(payload.media) && payload.media.length > 0) ||
+      optionalString(event?.mediaUrl) ||
       (Array.isArray(event?.mediaUrls) && event.mediaUrls.length > 0) ||
+      optionalString(payload.mediaUrl) ||
+      (Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0) ||
       optionalString(metadata.mediaUrl) ||
       (Array.isArray(metadata.mediaUrls) && metadata.mediaUrls.length > 0),
   );
 }
 
-function contextKeys(event: any, ctx: any): string[] {
+function turnAliases(event: any, ctx: any): string[] {
+  const channel =
+    optionalString(event?.channel) ||
+    optionalString(eventMetadata(event).channel) ||
+    channelFromContext(ctx);
+  const senderId = senderIdFromContext(ctx);
   const accountId = accountIdFromContext(event, ctx);
-  const values = [
-    event?.to,
-    event?.conversationId,
-    event?.sessionKey,
-    ctx?.senderId,
-    ctx?.requesterSenderId,
-    ctx?.to,
-    ctx?.chatId,
-    ctx?.conversationId,
-    ctx?.sessionKey,
-    ctx?.nativeChannelId,
-    ctx?.channelContext?.chat?.id,
-    ctx?.deliveryContext?.to,
-    ctx?.deliveryContext?.conversationId,
-    ctx?.deliveryContext?.chatId,
-    senderIdFromContext(ctx),
-  ]
-    .map(optionalString)
-    .filter((value): value is string => Boolean(value));
-  const keys: string[] = [];
-  for (const value of [...new Set(values)]) {
-    keys.push(`value:${value}`);
-    if (accountId) keys.push(`account:${accountId}:${value}`);
+  const target = targetFromContext(event, ctx);
+  const aliases = contextAliases(ctx, channel, senderId, event);
+  if (target) {
+    aliases.push(`peer:${channel}:${target}`);
+    aliases.push(`value:${target}`);
+    if (accountId) aliases.push(`account:${accountId}:${target}`);
   }
-  return [...new Set(keys)];
-}
-
-class PendingStateTurnStore {
-  private readonly byKey = new Map<string, PendingStateTurn>();
-
-  register(entry: Omit<PendingStateTurn, "createdAt">): void {
-    this.prune();
-    const keys = [...new Set(entry.keys)].filter(Boolean);
-    if (keys.length === 0) return;
-    const value: PendingStateTurn = {
-      ...entry,
-      keys,
-      createdAt: Date.now(),
-    };
-    for (const key of keys) this.byKey.set(key, value);
-    if (this.byKey.size > MAX_PENDING_TURNS) this.prune(true);
-  }
-
-  consume(event: any, ctx: any): PendingStateTurn | undefined {
-    this.prune();
-    for (const key of contextKeys(event, ctx)) {
-      const entry = this.byKey.get(key);
-      if (!entry) continue;
-      this.delete(entry);
-      return entry;
-    }
-    return undefined;
-  }
-
-  private delete(entry: PendingStateTurn): void {
-    for (const key of entry.keys) {
-      if (this.byKey.get(key) === entry) this.byKey.delete(key);
-    }
-  }
-
-  private prune(force = false): void {
-    const cutoff = Date.now() - TURN_TTL_MS;
-    const values = [...new Set(this.byKey.values())].sort(
-      (left, right) => left.createdAt - right.createdAt,
-    );
-    for (const entry of values) {
-      if (!force && entry.createdAt >= cutoff) continue;
-      this.delete(entry);
-      if (force && this.byKey.size <= MAX_PENDING_TURNS / 2) break;
-    }
-  }
+  return addTurnCorrelationAliases(aliases, event, ctx);
 }
 
 function runObserver(
@@ -432,7 +382,10 @@ export default definePluginEntry({
   description:
     "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state, V4.1 planning, and opt-in V4.2 shadow recall gating.",
   register(api: any) {
-    const pendingTurns = new PendingStateTurnStore();
+    const pendingTurns = new CorrelationStore<PendingStateTurn>(
+      TURN_TTL_MS,
+      MAX_PENDING_TURNS,
+    );
     (v3Plugin as any).register(api);
 
     api.on(
@@ -448,8 +401,9 @@ export default definePluginEntry({
         const senderId = senderIdFromContext(ctx);
         const userId = resolveUserId(baseConfig, senderId, channel);
         if (!userId) return;
-        const aliases = contextAliases(ctx, channel, senderId, event);
-        const conversationKey = preferredPolicyKey(aliases);
+        const policyAliases = contextAliases(ctx, channel, senderId, event);
+        const aliases = turnAliases(event, ctx);
+        const conversationKey = preferredPolicyKey(policyAliases);
 
         try {
           const result = await runObserver(api, event, {
@@ -460,11 +414,7 @@ export default definePluginEntry({
             include_response_plan: config.responsePlannerEnabled,
             include_memory_recall: config.memoryRecallGateEnabled,
           });
-          pendingTurns.register({
-            userId,
-            conversationKey,
-            keys: contextKeys(event, ctx),
-          });
+          pendingTurns.register(aliases, { userId, conversationKey });
           api.logger.info(
             `${PLUGIN_ID}: v4 state observed phase=user ${compactStateLog(result)}`,
           );
@@ -478,6 +428,13 @@ export default definePluginEntry({
           if (!planContext) {
             api.logger.warn(
               `${PLUGIN_ID}: v4 response plan unavailable (missing_or_invalid_context); chat preserved`,
+            );
+            return;
+          }
+          const structuredPlan = responsePlanTurns.register(aliases, result.response_plan);
+          if (!structuredPlan) {
+            api.logger.warn(
+              `${PLUGIN_ID}: v4 response plan unavailable (missing_structured_plan); chat preserved`,
             );
             return;
           }
@@ -499,7 +456,7 @@ export default definePluginEntry({
     const observeAssistant = async (event: any, ctx: any, text: string) => {
       const config = readV4Config(api, event);
       if (!v4RuntimeEnabled(config)) return;
-      const pending = pendingTurns.consume(event, ctx);
+      const pending = pendingTurns.consume(turnAliases(event, ctx));
       if (!pending) return;
       try {
         const result = await runObserver(api, event, {
@@ -523,6 +480,8 @@ export default definePluginEntry({
       "message_sending",
       async (event: any, ctx: any) => {
         if (eventHasMedia(event)) return;
+        const kind = optionalString(event?.kind) || optionalString(eventMetadata(event).kind);
+        if (kind && kind !== "final") return;
         const text = optionalString(event?.content) || optionalString(event?.text);
         const target = targetFromContext(event, ctx);
         if (!text || !target) return;
