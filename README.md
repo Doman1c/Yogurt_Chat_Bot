@@ -7,14 +7,14 @@
 ## 当前开发版本
 
 ```text
-Yogurt Chat Bot: V4.3.2 hardening
-OpenClaw plugin: yogurt-social-injector 0.6.3-alpha.6
+Yogurt Chat Bot: V4.3.1 hardening
+OpenClaw plugin: yogurt-social-injector 0.6.3-alpha.5
 Plugin entry: integrations/openclaw/index-v43.ts
 Sticker Runtime: V2.1
 Catalog Schema: 1.0
 ```
 
-当前 V4.3.2 仍在 Draft PR 中，Feature Flags 默认关闭；在实机回归完成前不应直接开启为默认行为。
+当前 V4.3.1 仍在 Draft PR 中，Feature Flags 默认关闭；在实机回归完成前不应直接开启为默认行为。
 
 ## 核心能力
 
@@ -25,8 +25,7 @@ Catalog Schema: 1.0
 - V4.1：Response Planner；
 - V4.2：记忆召回 Shadow Gate；
 - V4.3：统一 Outbound Intent / Result、Shadow 与 Enforced Coordinator；
-- V4.3.1：强 Turn Correlation、结构化 Planner 交接、类型化 Sticker Lifecycle、typed media / final payload 保护；
-- V4.3.2：跨 Hook 强 ID 命名空间兼容、弱 child 防抢占、V3 memory/multi-bubble pending Turn 同步强关联。
+- V4.3.1：强 Turn Correlation、结构化 Planner 交接、类型化 Sticker Lifecycle、typed media / final payload 保护。
 
 ## 当前架构
 
@@ -51,16 +50,15 @@ Yogurt Social Injector
   │
   ├── V3 Runtime
   │   ├── 自动记忆候选
-  │   ├── legacy natural multi-bubble
-  │   └── strong Turn-correlated pending stores
+  │   └── legacy natural multi-bubble
   │
   ├── V4 State / V4.1 Planner / V4.2 Recall Gate
   │   ├── ConversationState
   │   ├── ResponsePlan Prompt Context
   │   └── Structured ResponsePlan Snapshot
   │
-  └── V4.3.2 Outbound Coordinator
-      ├── cross-hook strong Turn correlation
+  └── V4.3.1 Outbound Coordinator
+      ├── strong Turn correlation
       ├── Shadow comparison
       ├── optional Enforced bubble target
       ├── typed media / final reply guard
@@ -73,7 +71,7 @@ OpenClaw outbound hooks
 微信 sendText / sendMedia
 ```
 
-## 为什么 V4.3.2 需要 Turn Correlation
+## 为什么 V4.3.1 需要 Turn Correlation
 
 同一微信会话可能在前一轮 Sticker 还没发送时立刻进入下一轮。如果只用：
 
@@ -83,31 +81,21 @@ session / sender / peer
 
 作为单值 key，后一轮会覆盖前一轮。
 
-V4.3.1 开始优先使用：
+V4.3.1 优先使用：
 
 ```text
 runId / messageId / traceId
 ```
 
-V4.3.2 进一步处理 OpenClaw 在不同 Hook 阶段暴露不同强 ID 命名空间的情况。例如：
+并保留 session/sender/peer/account 作为弱兼容别名。
 
-```text
-before_prompt_build: traceId=T1
-message_sending:     runId=R1
-recursive child:     只有 session/peer
-```
+规则是：
 
-`traceId=T1` 与 `runId=R1` 不是冲突，因为它们属于不同命名空间。只有同一命名空间明确不一致，例如 `run:A` 对 `run:B`，才是硬冲突。
-
-当前规则：
-
+- 不同强 Turn ID 可以共享同一 session 而同时存在；
 - 强 ID 精确命中优先；
-- `traceId → runId`、`messageId → runId` 等不同强命名空间可在唯一弱父级身份下兼容关联；
-- `run:A → run:B`、`trace:A → trace:B` 等同命名空间不一致绝不回退；
-- 已经带强身份的父 Turn 不能被只有弱 session/peer 的递归 child 抢走；
-- 早期 Hook 完全没有强 ID 时，后续强 ID Hook 仍可在唯一候选下兼容关联；
-- 多个候选时永远拒绝猜测；
-- V3 自动记忆、多气泡 pending Turn 与扩展记忆现在使用同一 CorrelationStore。
+- 不同强 ID 之间绝不弱回退；
+- 只有早期 Hook 没有强 ID、且弱别名只有唯一候选时才兼容回退；
+- 一旦存在歧义就放弃关联，而不是猜测另一个 Turn。
 
 ## Response Planner 与 Outbound Coordinator
 
@@ -126,7 +114,7 @@ V4.1 Planner 输出：
 }
 ```
 
-V4.3.1 起不再从中文 Prompt Context 反向正则解析这些字段，而是通过结构化 Store 直接交给 Coordinator。因此 V4.3 日志中的 `stateVersion` 应与 Planner 的真实版本一致，不再固定为 `0`。
+V4.3.1 不再从中文 Prompt Context 反向正则解析这些字段，而是通过结构化 Store 直接交给 Coordinator。因此 V4.3 日志中的 `stateVersion` 应与 Planner 的真实版本一致，不再固定为 `0`。
 
 Coordinator 当前主要执行 `bubble_target`，其余 Planner 字段暂时用于观测和后续扩展。
 
@@ -270,22 +258,112 @@ V4.3 Shadow / Enforced 需要 `responsePlannerEnabled=true` 才有意义。
 ## 安全与 fail-open
 
 - Python/SQLite/Bridge 异常不阻断原始聊天；
-- 新功能默认关闭；
-- 不保存原始完整聊天记录作为调度状态；
-- 强关联失败或歧义时宁可不协调，也不会猜另一个 Turn；
-- Sticker Catalog、图片资产与本地运行配置不由升级脚本清理或覆盖；
-- Coordinator 失败时保留 legacy V3 / 原始父消息路径。
+- Sticker 失败不撤销已生成文本；
+- V4.3 adapter loader 抛错时回退原文本；
+- typed `event.media` / `payload.media` 不进入强制拆分；
+- 如果 Hook 提供 `kind`，只有 `kind=final` 才消费 Planner Intent；
+- 子气泡不会再次消费父级计划；
+- 所有 Turn Store 都有 TTL 和容量边界；
+- 有关联歧义时宁可不协调，也不跨 Turn 猜测。
 
-## 当前验证重点
+## 本地文件保护
 
-V4.3.2 合并前需要在真实微信上确认：
+以下内容可能是本地运行资产，不应在普通代码升级时删除或重置：
 
-1. Planner、V4.3 Intent 和 Shadow 的 `stateVersion` 一致且非零；
-2. `traceId`/`runId` 跨 Hook 时，递归弱 child 不再抢走父 Intent；
-3. Planner `bubbles=2` 且 legacy 实际发送 2 条时，Shadow 最终记录 `actualBubbles=2 matched=true`；
-4. 同一微信 session 快速连续两个 Turn 不串 Planner/V3 pending state；
-5. Turn A Sticker pending 时启动 Turn B，A 的 terminal Sticker 仍回写 A；
-6. Enforced target1/target2 基本回归；
-7. 两个 V4.3 flags 关闭后完全回到 legacy 路径。
+```text
+assets/stickers/images/
+assets/stickers/stickers.json
+social_layer/config/stickers.json
+本地未提交的阈值调整
+```
 
-PR #8 在上述实机验证结束前继续保持 Draft，不自动合并。
+普通 linked-plugin 升级不需要重新运行安装脚本，也不要执行：
+
+```text
+git clean
+git reset --hard
+```
+
+## 首次安装
+
+首次安装才使用：
+
+```bash
+cd ~/Yogurt_Chat_Bot
+bash scripts/install-openclaw-adapter
+```
+
+安装脚本会：
+
+- 校验插件文件；
+- 备份 OpenClaw 配置；
+- 以本地路径 link 插件；
+- 写入基础运行路径；
+- 将高风险/实验功能保持为默认关闭；
+- 校验 OpenClaw 配置和插件状态。
+
+## 已安装环境升级
+
+如果插件已经通过本地路径 link 到仓库，普通升级只需要：
+
+```bash
+cd ~/Yogurt_Chat_Bot
+git pull --ff-only
+
+bash scripts/test-openclaw-adapter
+bash scripts/test-sticker-explicit-fallback
+bash scripts/test-sticker-auto-delivery
+bash scripts/test-sticker-v21
+bash scripts/test-v3
+bash scripts/test-v3-runtime
+bash scripts/test-v3-sticker-bubble-order
+bash scripts/test-v4-state
+bash scripts/test-v4-runtime
+bash scripts/test-v4-outbound
+bash scripts/test-v4-outbound-runtime
+
+openclaw config validate
+openclaw plugins doctor
+openclaw gateway restart
+```
+
+如果本地存在未提交修改，应先做 patch/stash 保护，再 fast-forward 拉取并恢复本地修改。
+
+## 当前自动化验证
+
+CI 覆盖 Python 3.9–3.12 和 Node.js 22。
+
+V4.3.1 新增验证包括：
+
+- 两个 run 在同一 session 同时 pending；
+- 逆序完成不串 Planner target/stateVersion；
+- Sticker delayed terminal 不串轮；
+- typed media 不拆分；
+- non-final payload 不提前消费 Planner Intent；
+- adapter loader exception fail-open；
+- partial direct delivery 防重复；
+- structured Planner 不携带原始用户/助手文本；
+- typed Sticker sent/skipped/failed；
+- 两个 V4.3 Flags 都关闭时 legacy V3 保持不变。
+
+## 已知下一阶段工作
+
+V4.3.1 完成的是“合并前安全加固”，尚未解决：
+
+1. 真实 Text Delivery Barrier：Sticker 现在仍主要依赖发送延迟保证文字在前；
+2. `message_sent` 级别的 delivered bubble 终态统计；
+3. 调研 OpenClaw 标准 `reply_dispatch` 是否能替代直接 adapter 多气泡发送；
+4. Planner `stickerPreference / replyLength / askFollowup` 的更完整审计或软约束；
+5. 从纯字符串拆分升级到 Text/Code/List/Link/Image Segment 模型；
+6. 通用 ConversationState 与当前项目版本词典进一步解耦；
+7. 可选的轻量管理/观测页面。
+
+这些工作应在 V4.3.1 实机回归稳定后继续，而不是一次性叠加到同一验证批次。
+
+## 设计文档
+
+- `docs/V1_DESIGN.md`
+- `docs/V2_DESIGN.md`
+- `docs/V2_1_DESIGN.md`
+- `docs/V3_RESEARCH_PLAN.md`
+- `docs/V4_3_DESIGN.md`
