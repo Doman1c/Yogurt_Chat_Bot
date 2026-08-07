@@ -1,4 +1,8 @@
-import { CorrelationStore } from "./turn-correlation.ts";
+import {
+  CorrelationStore,
+  isStrongCorrelationAlias,
+  normalizeCorrelationAliases,
+} from "./turn-correlation.ts";
 
 const DEFAULT_TTL_MS = 15 * 60_000;
 const DEFAULT_LIMIT = 200;
@@ -33,6 +37,14 @@ export type OutboundComparison = {
   bubbleDelta: number;
   bubbleTargetMatched: boolean;
   reasons: string[];
+};
+
+export type OutboundCorrelationMatch = "strict" | "weak_parent" | "miss";
+
+export type OutboundConsumeResult = {
+  intent?: OutboundIntent;
+  match: OutboundCorrelationMatch;
+  pendingBefore: number;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -114,16 +126,20 @@ export function formatOutboundComparison(comparison: OutboundComparison): string
 
 export class OutboundTurnStore {
   private readonly store: CorrelationStore<OutboundIntent>;
+  private readonly blockedWeakFallbackEntryIds = new Set<number>();
+  private readonly limit: number;
 
   constructor(
     ttlMs = DEFAULT_TTL_MS,
     limit = DEFAULT_LIMIT,
     now: () => number = () => Date.now(),
   ) {
+    this.limit = limit;
     this.store = new CorrelationStore<OutboundIntent>(ttlMs, limit, now);
   }
 
   register(aliases: string[], responsePlan: unknown): OutboundIntent | undefined {
+    this.pruneBlocked();
     const intent = outboundIntentFromResponsePlan(responsePlan);
     return this.store.register(aliases, intent)?.value;
   }
@@ -136,16 +152,55 @@ export class OutboundTurnStore {
     return this.store.peekParent(aliases);
   }
 
+  consumeWithMatch(aliases: string[]): OutboundConsumeResult {
+    this.pruneBlocked();
+    const pendingBefore = this.store.size();
+    const normalized = normalizeCorrelationAliases(aliases);
+    const strong = normalized.filter(isStrongCorrelationAlias);
+    const weak = normalized.filter((alias) => !isStrongCorrelationAlias(alias));
+
+    const strictEntry = this.store.consumeEntry(normalized);
+    if (strictEntry) {
+      this.blockedWeakFallbackEntryIds.delete(strictEntry.id);
+      return { intent: strictEntry.value, match: "strict", pendingBefore };
+    }
+
+    if (strong.length > 0) {
+      // A same-namespace strong mismatch or ambiguous cross-namespace lookup is
+      // intentionally terminal for this callback. If there is one weakly
+      // identifiable stored parent, mark it so a recursive weak-only child from
+      // this failed callback cannot steal it afterward.
+      const candidate = this.store.findParentEntry(weak);
+      if (candidate) this.blockedWeakFallbackEntryIds.add(candidate.id);
+      this.pruneBlocked();
+      return { match: "miss", pendingBefore };
+    }
+
+    const parentEntry = this.store.findParentEntry(normalized);
+    if (!parentEntry || this.blockedWeakFallbackEntryIds.has(parentEntry.id)) {
+      return { match: "miss", pendingBefore };
+    }
+    this.store.remove(parentEntry);
+    return { intent: parentEntry.value, match: "weak_parent", pendingBefore };
+  }
+
   consume(aliases: string[]): OutboundIntent | undefined {
-    // index-v43 calls this only for the top-level final assistant delivery after
-    // its AsyncLocalStorage child guard. This parent-specific fallback is what
-    // allows a final hook that lost trace/run/message IDs to recover one unique
-    // stored Turn without relaxing CorrelationStore's strict default globally.
-    return this.store.consumeParent(aliases);
+    return this.consumeWithMatch(aliases).intent;
   }
 
   size(): number {
+    this.pruneBlocked();
     return this.store.size();
+  }
+
+  private pruneBlocked(): void {
+    for (const id of [...this.blockedWeakFallbackEntryIds]) {
+      if (!this.store.getById(id)) this.blockedWeakFallbackEntryIds.delete(id);
+    }
+    if (this.blockedWeakFallbackEntryIds.size <= this.limit) return;
+    for (const id of [...this.blockedWeakFallbackEntryIds].slice(0, this.limit)) {
+      this.blockedWeakFallbackEntryIds.delete(id);
+    }
   }
 }
 
