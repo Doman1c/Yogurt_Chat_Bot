@@ -56,6 +56,24 @@ export function addTurnCorrelationAliases(
   return normalizeCorrelationAliases(values);
 }
 
+function newestEntry<T>(entries: Iterable<CorrelatedEntry<T>>): CorrelatedEntry<T> | undefined {
+  let newest: CorrelatedEntry<T> | undefined;
+  for (const entry of entries) {
+    if (
+      !newest ||
+      entry.createdAt > newest.createdAt ||
+      (entry.createdAt === newest.createdAt && entry.id > newest.id)
+    ) {
+      newest = entry;
+    }
+  }
+  return newest;
+}
+
+function entryHasStrongAlias<T>(entry: CorrelatedEntry<T>): boolean {
+  return entry.aliases.some(isStrongCorrelationAlias);
+}
+
 export class CorrelationStore<T> {
   private readonly byAlias = new Map<string, Set<CorrelatedEntry<T>>>();
   private readonly byId = new Map<number, CorrelatedEntry<T>>();
@@ -112,20 +130,39 @@ export class CorrelationStore<T> {
     const normalized = normalizeCorrelationAliases(aliases);
     if (normalized.length === 0) return undefined;
     const strong = normalized.filter(isStrongCorrelationAlias);
-    const searchAliases = strong.length > 0 ? strong : normalized;
-    let newest: CorrelatedEntry<T> | undefined;
-    for (const alias of searchAliases) {
-      for (const entry of this.byAlias.get(alias) || []) {
-        if (
-          !newest ||
-          entry.createdAt > newest.createdAt ||
-          (entry.createdAt === newest.createdAt && entry.id > newest.id)
-        ) {
-          newest = entry;
+    const weak = normalized.filter((alias) => !isStrongCorrelationAlias(alias));
+
+    if (strong.length > 0) {
+      const exact = new Set<CorrelatedEntry<T>>();
+      for (const alias of strong) {
+        for (const entry of this.byAlias.get(alias) || []) exact.add(entry);
+      }
+      const strongMatch = newestEntry(exact);
+      if (strongMatch) return strongMatch;
+
+      // Compatibility for hosts that expose a strong id only in a later hook:
+      // fall back only when exactly one weakly-correlated entry exists AND that
+      // stored entry had no strong id of its own. A different strong id is a
+      // hard mismatch, and multiple candidates are always treated as ambiguous.
+      const weakOnlyCandidates = new Set<CorrelatedEntry<T>>();
+      for (const alias of weak) {
+        for (const entry of this.byAlias.get(alias) || []) {
+          if (!entryHasStrongAlias(entry)) weakOnlyCandidates.add(entry);
         }
       }
+      if (weakOnlyCandidates.size === 1) {
+        return weakOnlyCandidates.values().next().value;
+      }
+      return undefined;
     }
-    return newest;
+
+    const candidates = new Set<CorrelatedEntry<T>>();
+    for (const alias of weak) {
+      for (const entry of this.byAlias.get(alias) || []) candidates.add(entry);
+    }
+    // Weak-only hooks are safe when the conversation has one live candidate.
+    // If strong-id turns overlap on the same session/peer, never guess.
+    return candidates.size === 1 ? candidates.values().next().value : undefined;
   }
 
   peek(aliases: string[]): T | undefined {
