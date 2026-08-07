@@ -3,20 +3,33 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODULE="$REPO_ROOT/integrations/openclaw/outbound-coordinator.ts"
+CORRELATION_MODULE="$REPO_ROOT/integrations/openclaw/turn-correlation.ts"
+PLAN_MODULE="$REPO_ROOT/integrations/openclaw/response-plan-store.ts"
+LIFECYCLE_MODULE="$REPO_ROOT/integrations/openclaw/sticker-lifecycle.ts"
 
 node --experimental-strip-types --check "$MODULE"
+node --experimental-strip-types --check "$CORRELATION_MODULE"
+node --experimental-strip-types --check "$PLAN_MODULE"
+node --experimental-strip-types --check "$LIFECYCLE_MODULE"
 
-node --experimental-strip-types --input-type=module - "$MODULE" <<'JS'
+node --experimental-strip-types --input-type=module - "$MODULE" "$CORRELATION_MODULE" "$PLAN_MODULE" <<'JS'
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 
 const modulePath = process.argv[2];
+const correlationPath = process.argv[3];
+const planPath = process.argv[4];
 const {
   OutboundTurnStore,
   compareOutboundResult,
   formatOutboundComparison,
   outboundIntentFromResponsePlan,
 } = await import(pathToFileURL(modulePath));
+const {
+  CorrelationStore,
+  addTurnCorrelationAliases,
+} = await import(pathToFileURL(correlationPath));
+const { responsePlanSnapshot } = await import(pathToFileURL(planPath));
 
 const intent = outboundIntentFromResponsePlan({
   plan_version: "4.1",
@@ -36,8 +49,33 @@ assert.deepEqual(intent, {
 });
 assert.equal("raw_message" in intent, false);
 
+const plan = responsePlanSnapshot({
+  plan_version: "4.1",
+  dialogue_act: "plan",
+  primary_goal: "advance_current_project",
+  reply_length: "medium",
+  bubble_target: 2,
+  ask_followup: true,
+  sticker_preference: "neutral",
+  state_version: 67,
+  user_message: "must not escape",
+  assistant_reply: "must not escape",
+});
+assert.deepEqual(plan, {
+  plan_version: "4.1",
+  dialogue_act: "plan",
+  primary_goal: "advance_current_project",
+  reply_length: "medium",
+  bubble_target: 2,
+  ask_followup: true,
+  sticker_preference: "neutral",
+  state_version: 67,
+});
+assert.equal("user_message" in plan, false);
+assert.equal("assistant_reply" in plan, false);
+
 let now = 1_000;
-const store = new OutboundTurnStore(500, 4, () => now);
+const store = new OutboundTurnStore(500, 8, () => now);
 const registered = store.register(
   ["session:owner", "peer:wechat:owner", "session:owner"],
   { bubble_target: 1, sticker_preference: "none", state_version: 4 },
@@ -49,10 +87,76 @@ assert.equal(store.consume(["session:owner"])?.bubbleTarget, 1);
 assert.equal(store.consume(["peer:wechat:owner"]), undefined);
 assert.equal(store.size(), 0);
 
-store.register(["session:expired"], { bubble_target: 2, state_version: 5 });
+// Strong run ids may share every weak alias without deleting or consuming each other.
+const concurrent = new OutboundTurnStore(5_000, 16, () => now);
+concurrent.register(
+  ["run:run-a", "session:shared", "peer:wechat:owner"],
+  { bubble_target: 1, state_version: 101 },
+);
+now += 1;
+concurrent.register(
+  ["run:run-b", "session:shared", "peer:wechat:owner"],
+  { bubble_target: 2, state_version: 102 },
+);
+assert.equal(concurrent.size(), 2);
+assert.equal(
+  concurrent.peek(["run:run-a", "session:shared"])?.stateVersion,
+  101,
+);
+assert.equal(
+  concurrent.peek(["run:run-b", "session:shared"])?.stateVersion,
+  102,
+);
+assert.equal(
+  concurrent.peek(["run:run-missing", "session:shared"]),
+  undefined,
+  "a strong correlation miss must never fall back to another turn's weak alias",
+);
+assert.equal(concurrent.consume(["run:run-a"])?.bubbleTarget, 1);
+assert.equal(concurrent.size(), 1);
+assert.equal(concurrent.consume(["run:run-b"])?.bubbleTarget, 2);
+assert.equal(concurrent.size(), 0);
+
+// Re-registering the same strong id replaces that turn only.
+concurrent.register(
+  ["run:run-c", "session:shared"],
+  { bubble_target: 1, state_version: 201 },
+);
+concurrent.register(
+  ["run:run-d", "session:shared"],
+  { bubble_target: 2, state_version: 202 },
+);
+concurrent.register(
+  ["run:run-c", "session:shared"],
+  { bubble_target: 3, state_version: 203 },
+);
+assert.equal(concurrent.size(), 2);
+assert.equal(concurrent.peek(["run:run-c"])?.stateVersion, 203);
+assert.equal(concurrent.peek(["run:run-d"])?.stateVersion, 202);
+
+// Generic correlation aliases include strong ids without retaining raw content.
+const aliases = addTurnCorrelationAliases(
+  ["session:shared"],
+  { runId: "run-event", messageId: "message-event", traceId: "trace-event" },
+  { runId: "run-ctx", messageId: "message-ctx", traceId: "trace-ctx" },
+);
+assert.ok(aliases.includes("run:run-event"));
+assert.ok(aliases.includes("run:run-ctx"));
+assert.ok(aliases.includes("message:message-event"));
+assert.ok(aliases.includes("trace:trace-ctx"));
+
+const generic = new CorrelationStore(5_000, 16, () => now);
+generic.register(["run:a", "session:s"], { marker: "a" });
+generic.register(["run:b", "session:s"], { marker: "b" });
+assert.equal(generic.peek(["run:a", "session:s"])?.marker, "a");
+assert.equal(generic.peek(["run:b", "session:s"])?.marker, "b");
+assert.equal(generic.peek(["run:x", "session:s"]), undefined);
+
+const expiring = new OutboundTurnStore(500, 4, () => now);
+expiring.register(["session:expired"], { bubble_target: 2, state_version: 5 });
 now += 501;
-assert.equal(store.peek(["session:expired"]), undefined);
-assert.equal(store.size(), 0);
+assert.equal(expiring.peek(["session:expired"]), undefined);
+assert.equal(expiring.size(), 0);
 
 const mismatch = compareOutboundResult(
   outboundIntentFromResponsePlan({ bubble_target: 1, state_version: 11 }),
@@ -107,5 +211,5 @@ assert.ok(
   ),
 );
 
-console.log("v4.3 outbound coordinator model: ok");
+console.log("v4.3.1 outbound coordinator and strong correlation model: ok");
 JS
