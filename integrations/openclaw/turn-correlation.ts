@@ -8,6 +8,12 @@ export type CorrelatedEntry<T> = {
   createdAt: number;
 };
 
+export type CorrelationAliasSummary = {
+  strongKinds: string[];
+  weakKinds: string[];
+  aliasCount: number;
+};
+
 const STRONG_PREFIXES = ["run:", "message:", "trace:"] as const;
 
 type StrongPrefix = (typeof STRONG_PREFIXES)[number];
@@ -27,6 +33,30 @@ export function isStrongCorrelationAlias(alias: string): boolean {
 
 function strongPrefix(alias: string): StrongPrefix | undefined {
   return STRONG_PREFIXES.find((prefix) => alias.startsWith(prefix));
+}
+
+function aliasKind(alias: string): string {
+  const separator = alias.indexOf(":");
+  return (separator >= 0 ? alias.slice(0, separator) : alias).slice(0, 32) || "unknown";
+}
+
+export function summarizeCorrelationAliases(aliases: string[]): CorrelationAliasSummary {
+  const normalized = normalizeCorrelationAliases(aliases);
+  const strongKinds = [...new Set(
+    normalized
+      .filter(isStrongCorrelationAlias)
+      .map(aliasKind),
+  )].sort();
+  const weakKinds = [...new Set(
+    normalized
+      .filter((alias) => !isStrongCorrelationAlias(alias))
+      .map(aliasKind),
+  )].sort();
+  return {
+    strongKinds,
+    weakKinds,
+    aliasCount: normalized.length,
+  };
 }
 
 export function addTurnCorrelationAliases(
@@ -162,7 +192,10 @@ export class CorrelationStore<T> {
     return entry;
   }
 
-  findEntry(aliases: string[]): CorrelatedEntry<T> | undefined {
+  private findEntryInternal(
+    aliases: string[],
+    allowWeakToStrongParent: boolean,
+  ): CorrelatedEntry<T> | undefined {
     this.prune();
     const normalized = normalizeCorrelationAliases(aliases);
     if (normalized.length === 0) return undefined;
@@ -200,14 +233,29 @@ export class CorrelationStore<T> {
     if (candidates.size !== 1) return undefined;
     const candidate = candidates.values().next().value as CorrelatedEntry<T>;
 
-    // A weak-only child callback must never steal a parent Turn that already
-    // has a run/message/trace identity. Hosts that omit all strong ids remain
-    // supported when the stored Turn is also weak-only.
-    return entryHasStrongAlias(candidate) ? undefined : candidate;
+    // Strict correlation remains the safe default: a weak-only callback cannot
+    // consume a strong parent Turn. Known top-level parent hooks may opt into
+    // findParentEntry/consumeParent after their own recursive-child guard has
+    // already run. This keeps the alpha.6 child-stealing protection while
+    // supporting hosts that drop trace/run/message IDs on the final parent hook.
+    if (entryHasStrongAlias(candidate) && !allowWeakToStrongParent) return undefined;
+    return candidate;
+  }
+
+  findEntry(aliases: string[]): CorrelatedEntry<T> | undefined {
+    return this.findEntryInternal(aliases, false);
+  }
+
+  findParentEntry(aliases: string[]): CorrelatedEntry<T> | undefined {
+    return this.findEntryInternal(aliases, true);
   }
 
   peek(aliases: string[]): T | undefined {
     return this.findEntry(aliases)?.value;
+  }
+
+  peekParent(aliases: string[]): T | undefined {
+    return this.findParentEntry(aliases)?.value;
   }
 
   consumeEntry(aliases: string[]): CorrelatedEntry<T> | undefined {
@@ -217,8 +265,19 @@ export class CorrelationStore<T> {
     return entry;
   }
 
+  consumeParentEntry(aliases: string[]): CorrelatedEntry<T> | undefined {
+    const entry = this.findParentEntry(aliases);
+    if (!entry) return undefined;
+    this.remove(entry);
+    return entry;
+  }
+
   consume(aliases: string[]): T | undefined {
     return this.consumeEntry(aliases)?.value;
+  }
+
+  consumeParent(aliases: string[]): T | undefined {
+    return this.consumeParentEntry(aliases)?.value;
   }
 
   getById(id: number): CorrelatedEntry<T> | undefined {
