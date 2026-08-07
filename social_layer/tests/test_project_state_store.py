@@ -16,7 +16,7 @@ def test_explicit_progress_parser_extracts_current_state():
     assert parsed.patch.plugin_version == "alpha.6"
     assert parsed.patch.current_stage == "Shadow 实机验证"
     assert "本地测试已经通过" in parsed.patch.completed_add
-    assert parsed.patch.next_items == ("测试快速双 Turn",)
+    assert parsed.patch.next_items == ("快速双 Turn",)
     assert parsed.patch.replace_next is True
 
 
