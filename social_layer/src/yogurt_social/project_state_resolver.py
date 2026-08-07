@@ -43,6 +43,7 @@ def _merge_items(*groups: tuple[str, ...], limit: int = _MAX_ITEMS) -> tuple[str
 class ResolvedProjectState:
     project: str
     project_key: str
+    current_topic: str | None
     current_version: str | None
     plugin_version: str | None
     current_stage: str | None
@@ -56,6 +57,7 @@ class ResolvedProjectState:
         return {
             "project": self.project,
             "project_key": self.project_key,
+            "current_topic": self.current_topic,
             "current_version": self.current_version,
             "plugin_version": self.plugin_version,
             "current_stage": self.current_stage,
@@ -80,6 +82,7 @@ def resolve_project_state(
 
     repository_status = repository_status or {}
     project = _text(repository_status.get("project"), 80) or "Yogurt Chat Bot"
+    current_topic = _text(repository_status.get("current_topic"), 80)
     repo_version = _text(repository_status.get("current_version"), 48)
     repo_plugin = _text(repository_status.get("plugin_version"), 48)
     repo_stage = _text(repository_status.get("current_stage"), 180)
@@ -129,6 +132,7 @@ def resolve_project_state(
     return ResolvedProjectState(
         project=project,
         project_key=project_key,
+        current_topic=current_topic,
         current_version=current_version,
         plugin_version=plugin_version,
         current_stage=current_stage,
