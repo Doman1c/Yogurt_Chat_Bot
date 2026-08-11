@@ -1,8 +1,8 @@
 {
   "id": "yogurt-social-injector",
   "name": "Yogurt Social Injector",
-  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state/planning/recall, persistent V4.3.3 ProjectState continuity, and opt-in V4.3 outbound coordination with bounded parent-correlation diagnostics and child-safe trace-to-run recovery.",
-  "version": "0.6.3-alpha.9",
+  "description": "Injects Yogurt social context, V2.1 stickers, V3 memory/multi-bubble, V4 state/planning/recall, persistent V4.3.3 ProjectState continuity, and opt-in V4.3 outbound coordination with bounded parent-correlation diagnostics and child-safe top-level run-to-run recovery.",
+  "version": "0.6.3-alpha.10",
   "activation": {
     "onStartup": true
   },
