@@ -158,7 +158,11 @@ const pluginConfig = {
   unknownSenderPolicy: "skip",
   allowedChannels: ["openclaw-weixin"],
   onlyUserTurns: true,
-  timeoutMs: 2500,
+  // The complete Node-on-Node harness can occasionally exceed the production
+  // bridge timeout on macOS even though the same bridge call completes in a few
+  // hundred milliseconds in isolation. Keep this test-only allowance wide
+  // enough to avoid fixture scheduling flakes; production defaults are unchanged.
+  timeoutMs: 10000,
   maxMemories: 3,
   stickerEnabled: true,
   stickerConfigPath: `${fakeRepo}/social_layer/config/stickers.json`,
