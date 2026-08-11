@@ -120,6 +120,62 @@ assert.equal(weakParent.match, "weak_parent");
 assert.equal(weakParent.intent?.bubbleTarget, 2);
 assert.equal(weakParent.intent?.stateVersion, 501);
 
+// Real OpenClaw shape observed on macOS: before_prompt_build carries traceId,
+// final message_sending carries a new runId, and even the weak aliases do not
+// overlap. Strict correlation must refuse to guess, but the explicitly guarded
+// top-level parent path may recover exactly one pending Turn across disjoint
+// strong namespaces.
+const realShape = new OutboundTurnStore(5_000, 16);
+realShape.register(
+  ["trace:trace-real-parent", "session:registration-shape"],
+  { bubble_target: 2, state_version: 701 },
+);
+const realStrict = realShape.consumeWithMatch([
+  "run:run-real-parent",
+  "peer:openclaw-weixin:delivery-shape",
+  "target:delivery-shape",
+]);
+assert.equal(realStrict.match, "miss");
+assert.equal(realShape.size(), 1);
+const realParent = realShape.consumeTopLevelWithMatch([
+  "run:run-real-parent",
+  "peer:openclaw-weixin:delivery-shape",
+  "target:delivery-shape",
+]);
+assert.equal(realParent.match, "cross_namespace_parent");
+assert.equal(realParent.intent?.stateVersion, 701);
+assert.equal(realShape.size(), 0);
+
+// Same-namespace disagreement is never eligible for top-level recovery.
+const sameNamespace = new OutboundTurnStore(5_000, 16);
+sameNamespace.register(["run:run-old", "session:before"], {
+  bubble_target: 1,
+  state_version: 702,
+});
+const sameNamespaceMiss = sameNamespace.consumeTopLevelWithMatch([
+  "run:run-new",
+  "target:after",
+]);
+assert.equal(sameNamespaceMiss.match, "miss");
+assert.equal(sameNamespace.size(), 1);
+
+// More than one pending Turn is ambiguous even when strong namespaces differ.
+const ambiguousCross = new OutboundTurnStore(5_000, 16);
+ambiguousCross.register(["trace:trace-a", "session:a"], {
+  bubble_target: 1,
+  state_version: 703,
+});
+ambiguousCross.register(["trace:trace-b", "session:b"], {
+  bubble_target: 2,
+  state_version: 704,
+});
+const ambiguousCrossMiss = ambiguousCross.consumeTopLevelWithMatch([
+  "run:run-ambiguous",
+  "target:after",
+]);
+assert.equal(ambiguousCrossMiss.match, "miss");
+assert.equal(ambiguousCross.size(), 2);
+
 // If a final callback carries an explicitly conflicting strong ID, refuse it
 // and block a subsequent weak recursive child from stealing the old parent.
 const conflict = new OutboundTurnStore(5_000, 16);
@@ -133,9 +189,10 @@ const weakChild = conflict.consumeWithMatch(["session:conflict"]);
 assert.equal(weakChild.match, "miss");
 assert.equal(conflict.peek(["run:run-old"])?.stateVersion, 601);
 
-// Real V3 regression: registration has traceId, but the final top-level
-// message_sending callback exposes only weak aliases. It must still split into
-// two bubbles, while recursive child callbacks pass through exactly once.
+// Real V3 regression: registration has traceId and inbound-only aliases, while
+// the final top-level message_sending callback exposes a new runId plus a
+// different delivery peer. It must still split into two bubbles. Recursive
+// child callbacks remain protected by the existing bubble fingerprint guard.
 const hooks = new Map();
 const logs = [];
 const sent = [];
@@ -175,8 +232,8 @@ const api = {
                 },
                 {
                   channelId: "openclaw-weixin",
-                  senderId: "wx-owner@im.wechat",
-                  sessionKey: "session-v3-weak-parent",
+                  senderId: "wx-delivery-child@im.wechat",
+                  sessionKey: "session-child-only",
                 },
               );
             },
@@ -202,13 +259,13 @@ async function dispatch(name, event, ctx) {
 registerV3Runtime(api);
 const inboundCtx = {
   channelId: "openclaw-weixin",
-  senderId: "wx-owner@im.wechat",
-  sessionKey: "session-v3-weak-parent",
+  senderId: "wx-inbound-registration",
+  sessionKey: "session-registration-only",
 };
 await dispatch(
   "before_prompt_build",
   {
-    prompt: "测试弱 parent 最终回调",
+    prompt: "测试 trace 到 run 的真实 parent 最终回调",
     traceId: "trace-v3-parent",
   },
   inboundCtx,
@@ -220,9 +277,12 @@ const result = await dispatch(
   {
     content: parentText,
     to: "wx-owner@im.wechat",
+    runId: "run-v3-parent",
     metadata: { channel: "openclaw-weixin" },
   },
-  inboundCtx,
+  {
+    channelId: "openclaw-weixin",
+  },
 );
 
 assert.equal(result?.cancel, true);
@@ -231,7 +291,8 @@ assert.deepEqual(sent, ["第一句足够自然。", "第二句也足够自然。
 assert.ok(
   logs.some((value) =>
     value.includes("multi bubble correlation") &&
-    value.includes("strongKinds=none") &&
+    value.includes("strongKinds=run") &&
+    value.includes("pendingBefore=1") &&
     value.includes("match=weak_parent")
   ),
 );
@@ -239,5 +300,5 @@ assert.ok(logs.some((value) => value.includes("multi bubble sent count=2")));
 assert.equal(logs.some((value) => value.includes("trace-v3-parent")), false);
 assert.equal(logs.some((value) => value.includes("wx-owner")), false);
 
-console.log("v4.3 weak-only parent correlation, child guard, and bounded diagnostics: ok");
+console.log("v4.3 unique trace-to-run parent recovery, child guard, and bounded diagnostics: ok");
 JS
