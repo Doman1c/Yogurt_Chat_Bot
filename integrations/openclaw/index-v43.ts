@@ -574,10 +574,17 @@ export default definePluginEntry({
             if (!coordinatorEnabled(config)) return handler(event, ctx);
             if (!isFinalAssistantEvent(event)) return handler(event, ctx);
 
+            const text = optionalString(event?.content) || optionalString(event?.text) || "";
+            if (eventHasMedia(event) && !text) {
+              api.logger.info(
+                `${PLUGIN_ID}: v4.3 outbound media-only passthrough intentPreserved=true`,
+              );
+              return handler(event, ctx);
+            }
+
             const aliases = aliasesFor(event, ctx);
             const intent = outboundTurns.consume(aliases);
             if (!intent) return handler(event, ctx);
-            const text = optionalString(event?.content) || optionalString(event?.text) || "";
 
             if (config.unifiedOutboundEnforceEnabled && text) {
               const planned = planDelivery(event, text, intent, config);
