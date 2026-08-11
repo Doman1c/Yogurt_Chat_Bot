@@ -39,7 +39,11 @@ export type OutboundComparison = {
   reasons: string[];
 };
 
-export type OutboundCorrelationMatch = "strict" | "weak_parent" | "miss";
+export type OutboundCorrelationMatch =
+  | "strict"
+  | "weak_parent"
+  | "cross_namespace_parent"
+  | "miss";
 
 export type OutboundConsumeResult = {
   intent?: OutboundIntent;
@@ -166,10 +170,10 @@ export class OutboundTurnStore {
     }
 
     if (strong.length > 0) {
-      // A same-namespace strong mismatch or ambiguous cross-namespace lookup is
-      // intentionally terminal for this callback. If there is one weakly
-      // identifiable stored parent, mark it so a recursive weak-only child from
-      // this failed callback cannot steal it afterward.
+      // Generic correlation stays conservative. A same-namespace mismatch or a
+      // strong callback that cannot be resolved through shared weak aliases is
+      // not guessed here. If a weakly identifiable candidate exists, block it
+      // from a later recursive weak-only child.
       const candidate = this.store.findParentEntry(weak);
       if (candidate) this.blockedWeakFallbackEntryIds.add(candidate.id);
       this.pruneBlocked();
@@ -184,8 +188,32 @@ export class OutboundTurnStore {
     return { intent: parentEntry.value, match: "weak_parent", pendingBefore };
   }
 
+  consumeTopLevelWithMatch(aliases: string[]): OutboundConsumeResult {
+    const result = this.consumeWithMatch(aliases);
+    if (result.intent) return result;
+
+    const normalized = normalizeCorrelationAliases(aliases);
+    const strong = normalized.filter(isStrongCorrelationAlias);
+    if (strong.length === 0) return result;
+
+    // index-v43 calls consume() only after its AsyncLocalStorage recursive-child
+    // guard has established that this is the top-level parent send. At that
+    // boundary we may recover one unique trace/message -> run parent even when
+    // OpenClaw changed every weak alias between hooks. CorrelationStore still
+    // requires disjoint strong namespaces, exactly one pending entry, and no
+    // same-namespace disagreement.
+    const parentEntry = this.store.consumeParentEntry(normalized);
+    if (!parentEntry) return result;
+    this.blockedWeakFallbackEntryIds.delete(parentEntry.id);
+    return {
+      intent: parentEntry.value,
+      match: "cross_namespace_parent",
+      pendingBefore: result.pendingBefore,
+    };
+  }
+
   consume(aliases: string[]): OutboundIntent | undefined {
-    return this.consumeWithMatch(aliases).intent;
+    return this.consumeTopLevelWithMatch(aliases).intent;
   }
 
   size(): number {
