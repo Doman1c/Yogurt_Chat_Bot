@@ -329,6 +329,9 @@ export function registerV3Runtime(api: any): void {
       if (config.autoMemoryEnabled) memoryTurns.register(aliases, turn);
       if (config.multiBubbleEnabled && channel === WEIXIN_CHANNEL) {
         bubbleTurns.register(aliases, turn);
+        api.logger.info(
+          `${PLUGIN_ID}: multi bubble registered ${correlationSummary(aliases)} pendingAfter=${bubbleTurns.size()}`,
+        );
       }
     },
     { priority: 55, timeoutMs: 2000 },
