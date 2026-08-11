@@ -141,6 +141,14 @@ function hasSameNamespaceConflict(left: string[], right: string[]): boolean {
   return false;
 }
 
+function sharesStrongNamespace(left: string[], right: string[]): boolean {
+  const leftStrong = strongAliasesByPrefix(left);
+  const rightStrong = strongAliasesByPrefix(right);
+  return STRONG_PREFIXES.some(
+    (prefix) => leftStrong.has(prefix) && rightStrong.has(prefix),
+  );
+}
+
 export class CorrelationStore<T> {
   private readonly byAlias = new Map<string, Set<CorrelatedEntry<T>>>();
   private readonly byId = new Map<number, CorrelatedEntry<T>>();
@@ -213,7 +221,7 @@ export class CorrelationStore<T> {
       // OpenClaw may expose different strong-id namespaces at different hook
       // phases (for example traceId before prompt build, then runId during
       // delivery). Those are compatible unless the same namespace explicitly
-      // disagrees. Use weak aliases only to locate a unique compatible parent.
+      // disagrees. Use weak aliases first to locate a unique compatible parent.
       const compatible = new Set<CorrelatedEntry<T>>();
       for (const alias of weak) {
         for (const entry of this.byAlias.get(alias) || []) {
@@ -223,6 +231,29 @@ export class CorrelationStore<T> {
         }
       }
       if (compatible.size === 1) return compatible.values().next().value;
+
+      // A known top-level parent hook may opt into one additional bounded
+      // recovery path when OpenClaw changes strong namespaces and also changes
+      // the weak alias shape between hooks. This is deliberately unavailable to
+      // ordinary strict correlation. It requires exactly one pending entry,
+      // both sides to have strong identities, disjoint strong namespaces, and
+      // no same-namespace disagreement. Therefore run:A -> run:B remains a hard
+      // mismatch, while one unique trace:A -> run:B parent can be recovered.
+      if (
+        allowWeakToStrongParent &&
+        compatible.size === 0 &&
+        this.byId.size === 1
+      ) {
+        const candidate = this.byId.values().next().value as CorrelatedEntry<T> | undefined;
+        if (
+          candidate &&
+          entryHasStrongAlias(candidate) &&
+          !hasSameNamespaceConflict(normalized, candidate.aliases) &&
+          !sharesStrongNamespace(normalized, candidate.aliases)
+        ) {
+          return candidate;
+        }
+      }
       return undefined;
     }
 
