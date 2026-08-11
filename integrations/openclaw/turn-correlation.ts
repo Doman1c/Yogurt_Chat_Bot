@@ -218,27 +218,52 @@ export class CorrelationStore<T> {
       const strongMatch = newestEntry(exact);
       if (strongMatch) return strongMatch;
 
+      // Track exact weak-value overlap separately from strong compatibility.
+      // Real OpenClaw delivery can replace an inbound runId with a different
+      // outbound runId while retaining a stable peer/session identity. Ordinary
+      // strict correlation must still reject that same-namespace mismatch, but
+      // an explicitly guarded top-level parent path may use one unique exact
+      // weak overlap to recover the correct Turn.
+      const weakCandidates = new Set<CorrelatedEntry<T>>();
+      for (const alias of weak) {
+        for (const entry of this.byAlias.get(alias) || []) weakCandidates.add(entry);
+      }
+
       // OpenClaw may expose different strong-id namespaces at different hook
       // phases (for example traceId before prompt build, then runId during
       // delivery). Those are compatible unless the same namespace explicitly
       // disagrees. Use weak aliases first to locate a unique compatible parent.
       const compatible = new Set<CorrelatedEntry<T>>();
-      for (const alias of weak) {
-        for (const entry of this.byAlias.get(alias) || []) {
-          if (!hasSameNamespaceConflict(normalized, entry.aliases)) {
-            compatible.add(entry);
-          }
+      for (const entry of weakCandidates) {
+        if (!hasSameNamespaceConflict(normalized, entry.aliases)) {
+          compatible.add(entry);
         }
       }
       if (compatible.size === 1) return compatible.values().next().value;
+
+      // Real-device macOS/OpenClaw observation: before_prompt_build and final
+      // message_sending may both expose runIds, but they are different runIds.
+      // Only a caller that has already established a top-level parent boundary
+      // may recover this case, and only when one exact weak alias identifies one
+      // unique candidate. Concurrent same-peer Turns remain ambiguous because
+      // weakCandidates will contain more than one entry.
+      if (allowWeakToStrongParent && weakCandidates.size === 1) {
+        const candidate = weakCandidates.values().next().value as CorrelatedEntry<T>;
+        if (
+          entryHasStrongAlias(candidate) &&
+          hasSameNamespaceConflict(normalized, candidate.aliases)
+        ) {
+          return candidate;
+        }
+      }
 
       // A known top-level parent hook may opt into one additional bounded
       // recovery path when OpenClaw changes strong namespaces and also changes
       // the weak alias shape between hooks. This is deliberately unavailable to
       // ordinary strict correlation. It requires exactly one pending entry,
       // both sides to have strong identities, disjoint strong namespaces, and
-      // no same-namespace disagreement. Therefore run:A -> run:B remains a hard
-      // mismatch, while one unique trace:A -> run:B parent can be recovered.
+      // no same-namespace disagreement. Therefore one unique trace:A -> run:B
+      // parent can be recovered even if every weak alias changed.
       if (
         allowWeakToStrongParent &&
         compatible.size === 0 &&
