@@ -116,3 +116,68 @@ def test_hypothetical_version_does_not_write_project_state(monkeypatch, capsys, 
     assert payload["project_state_update"] is None
     assert payload["project_state"]["current_version"] == "V4.3.2"
     assert payload["project_state"]["plugin_version"] == "0.6.3-alpha.6"
+
+
+def test_active_project_chat_directives_do_not_mutate_project_state(monkeypatch, capsys, tmp_path):
+    project_root = tmp_path / "repo"
+    _write_repository_status(project_root)
+    db_path = tmp_path / "state.sqlite3"
+    key = "session:directive-guard"
+
+    established = _run_observer(
+        monkeypatch,
+        capsys,
+        db_path,
+        project_root,
+        {
+            "user_id": "owner",
+            "conversation_key": key,
+            "phase": "user",
+            "message": "现在测试 V4.3 Sticker interleaving",
+            "include_response_plan": True,
+        },
+    )
+    assert established["project_state_update"]["updated"] is True
+    initial_state_version = established["project_state"]["state_version"]
+    initial_next = established["project_state"]["next"]
+
+    for message in (
+        "接下来只回复我一句“第二轮收到”，这轮不要发表情包",
+        "现在在吃饭",
+        "已经吃完了",
+        "更新当前进度：接下来只回复收到",
+    ):
+        payload = _run_observer(
+            monkeypatch,
+            capsys,
+            db_path,
+            project_root,
+            {
+                "user_id": "owner",
+                "conversation_key": key,
+                "phase": "user",
+                "message": message,
+                "include_response_plan": True,
+            },
+        )
+        assert payload["project_state_update"] is None
+        assert payload["project_state"]["state_version"] == initial_state_version
+        assert payload["project_state"]["next"] == initial_next
+        assert "第二轮收到" not in payload["response_plan_context"]
+
+    real_progress = _run_observer(
+        monkeypatch,
+        capsys,
+        db_path,
+        project_root,
+        {
+            "user_id": "owner",
+            "conversation_key": key,
+            "phase": "user",
+            "message": "接下来做 Sticker interleaving 测试",
+            "include_response_plan": True,
+        },
+    )
+    assert real_progress["project_state_update"]["updated"] is True
+    assert real_progress["project_state"]["state_version"] == initial_state_version + 1
+    assert real_progress["project_state"]["next"] == ["Sticker interleaving 测试"]
