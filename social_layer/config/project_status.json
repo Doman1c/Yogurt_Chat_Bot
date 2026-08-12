@@ -2,23 +2,23 @@
   "schema_version": 1,
   "project": "Yogurt Chat Bot",
   "current_version": "V4.3.3",
-  "plugin_version": "0.6.3-alpha.10",
-  "current_stage": "real-device validation of top-level run-to-new-run parent recovery before resuming full outbound acceptance",
+  "plugin_version": "0.6.3-alpha.12",
+  "current_stage": "real-device validation of ProjectState mutation guard and explicit-sticker output-protocol hardening after alpha.11 media interleaving protection",
   "current_topic": "统一发送协调",
   "completed": [
     "V4.3.1 structured Planner handoff is validated on the real WeChat bot with matching nonzero stateVersion",
     "V4.3.2 cross-hook strong correlation and alpha.6 local/CI regression are passing",
     "V4.3.3 persistent ProjectState Store, revision log, deterministic explicit-progress parser, and continuity resolver are implemented",
-    "real-device diagnostics confirmed before_prompt_build registers strongKinds=run with peer/session aliases while final message_sending carries a different runId with peer/target aliases",
-    "alpha.10 adds top-level-only run-to-new-run recovery when one exact weak alias identifies exactly one candidate; strict callbacks, ambiguous same-peer concurrent Turns, and no-weak-overlap run mismatches still fail closed",
-    "ProjectState and Outbound follow-up prompts stay in the project planning route and the Planner forbids unconfirmed sticker-delivery narration"
+    "alpha.10 top-level-only run-to-new-run recovery is validated on the real WeChat bot without rapid-turn stateVersion cross-talk",
+    "alpha.11 media-only passthrough preserves the next text OutboundIntent during real Sticker interleaving",
+    "alpha.12 prevents active-project conversational directives from mutating ProjectState and injects an explicit Sticker output guard against fabricated media/control directives"
   ],
   "next": [
-    "sync alpha.10 to the Mac while preserving local assets/config and local sticker threshold edits",
-    "repeat the single-turn real-device Shadow prompt and verify V3 sends two bubbles and V4.3 Shadow reports actualBubbles=2 matched=true",
-    "then run rapid two-turn anti-cross-talk validation; ambiguous simultaneous same-peer Turns must never be guessed",
-    "run Sticker interleaving validation",
-    "finish with quick Enforced target-1/target-2 sanity and both-flags-disabled rollback"
+    "sync alpha.12 to the Mac while preserving local assets/config and local sticker threshold edits",
+    "overwrite the previously polluted explicit ProjectState next item with the current alpha.12 validation state",
+    "start a new WeChat session and verify explicit Sticker text obeys the exact requested A/B confirmation without [[...]], MEDIA:, image:, sticker IDs, or paths",
+    "run Enforced target-1 and target-2 real-device sanity checks",
+    "finish with both outbound flags disabled rollback"
   ],
   "historical_versions_are_background_only": true
 }
