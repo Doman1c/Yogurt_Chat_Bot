@@ -81,6 +81,13 @@ _PROJECT_MARKERS = (
     "enforced",
     "sticker",
     "turn",
+    "projectstate",
+    "outbound",
+    "memory",
+    "sqlite",
+    "gateway",
+    "ci",
+    "pr",
     "项目",
     "版本",
     "测试",
@@ -89,6 +96,12 @@ _PROJECT_MARKERS = (
     "发送",
     "协调",
     "插件",
+    "代码",
+    "部署",
+    "持久化",
+    "多气泡",
+    "网关",
+    "修复",
 )
 _COMPLETION_MARKERS = (
     "已经完成",
@@ -183,13 +196,13 @@ def _projectish(clause: str) -> bool:
     )
 
 
-def _completion_items(clauses: list[str], active_project: bool) -> tuple[str, ...]:
+def _completion_items(clauses: list[str], allow_contextual: bool) -> tuple[str, ...]:
     items: list[str] = []
     for clause in clauses:
         compact = _compact(clause)
         if not _contains_any(compact, _COMPLETION_MARKERS):
             continue
-        if not active_project and not _projectish(clause):
+        if not allow_contextual and not _projectish(clause):
             continue
         text = clause.strip()[:180]
         if text and text not in items:
@@ -197,7 +210,7 @@ def _completion_items(clauses: list[str], active_project: bool) -> tuple[str, ..
     return tuple(items[:5])
 
 
-def _next_items(clauses: list[str], active_project: bool) -> tuple[str, ...]:
+def _next_items(clauses: list[str], allow_contextual: bool) -> tuple[str, ...]:
     items: list[str] = []
     for clause in clauses:
         compact = _compact(clause)
@@ -205,7 +218,7 @@ def _next_items(clauses: list[str], active_project: bool) -> tuple[str, ...]:
             continue
         if _contains_any(compact, _PROGRESS_QUERY_MARKERS):
             continue
-        if not active_project and not _projectish(clause):
+        if not allow_contextual and not _projectish(clause):
             continue
         text = _strip_prefix(clause, _NEXT_MARKERS)
         if text and text not in items:
@@ -213,14 +226,14 @@ def _next_items(clauses: list[str], active_project: bool) -> tuple[str, ...]:
     return tuple(items[:5])
 
 
-def _stage(clauses: list[str], active_project: bool) -> str | None:
+def _stage(clauses: list[str], allow_contextual: bool) -> str | None:
     for clause in clauses:
         compact = _compact(clause)
         if not _contains_any(compact, _STAGE_MARKERS):
             continue
         if _contains_any(compact, _PROGRESS_QUERY_MARKERS):
             continue
-        if not active_project and not _projectish(clause):
+        if not allow_contextual and not _projectish(clause):
             continue
         stage = _strip_prefix(clause, _STAGE_MARKERS)
         if stage:
@@ -243,8 +256,11 @@ def parse_project_state_update(
     """Parse only explicit/confirmed current-project updates.
 
     Questions about current progress are always read-only. Hypothetical future
-    ideas are intentionally ignored. This parser never calls a model and returns
-    only bounded structured fields, not the full chat turn.
+    ideas are intentionally ignored. Being inside an active project conversation
+    is not enough on its own to persist conversational directives such as
+    "接下来只回复收到"; a project-semantic signal is still required. This parser
+    never calls a model and returns only bounded structured fields, not the full
+    chat turn.
     """
 
     if not isinstance(message, str) or not message.strip():
@@ -257,14 +273,18 @@ def parse_project_state_update(
 
     explicit_progress = _contains_any(compact, _EXPLICIT_PROGRESS_MARKERS)
     clauses = _clauses(message)
+    has_project_signal = any(_projectish(clause) for clause in clauses)
+    allow_contextual = active_project and explicit_progress and has_project_signal
 
     has_confirmed_action = any(
         _contains_any(_compact(clause), _COMPLETION_MARKERS + _NEXT_MARKERS + _STAGE_MARKERS)
         and not _contains_any(_compact(clause), _PROGRESS_QUERY_MARKERS)
-        and (active_project or _projectish(clause))
+        and (allow_contextual or _projectish(clause))
         for clause in clauses
     )
     if not explicit_progress and not correction and not has_confirmed_action:
+        return None
+    if (explicit_progress or correction) and not has_project_signal:
         return None
 
     if (
@@ -280,9 +300,9 @@ def parse_project_state_update(
     current_version = _clean_version(current_match.group(0) if current_match else None)
     plugin_version = _clean_version(plugin_match.group(0) if plugin_match else None)
 
-    completed = _completion_items(clauses, active_project)
-    next_items = _next_items(clauses, active_project)
-    stage = _stage(clauses, active_project)
+    completed = _completion_items(clauses, allow_contextual)
+    next_items = _next_items(clauses, allow_contextual)
+    stage = _stage(clauses, allow_contextual)
 
     if not explicit_progress and not correction:
         if current_version and not has_confirmed_action:
