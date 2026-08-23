@@ -1,0 +1,22 @@
+[server]
+host = "127.0.0.1"
+port = 8770
+
+[engine]
+type = "cosyvoice3"
+model = "Fun-CosyVoice3-0.5B-2512"
+streaming = false
+
+[voice]
+default_profile = "yogurt"
+default_emotion = "neutral"
+default_speed = 1.0
+
+[limits]
+max_text_chars = 500
+max_request_seconds = 180
+max_concurrent_requests = 1
+
+[privacy]
+allow_remote_bind = false
+persist_generated_audio = false
