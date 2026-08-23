@@ -13,6 +13,11 @@ import {
   resolveUserId,
   senderIdFromContext,
 } from "./sticker-plugin-utils.ts";
+import {
+  addTurnCorrelationAliases,
+  CorrelationStore,
+  summarizeCorrelationAliases,
+} from "./turn-correlation.ts";
 
 const PLUGIN_ID = "yogurt-social-injector";
 const WEIXIN_CHANNEL = "openclaw-weixin";
@@ -34,8 +39,6 @@ type V3Config = {
 type PendingTurn = {
   userId: string;
   message: string;
-  aliases: string[];
-  createdAt: number;
 };
 
 type AutoMemoryResult = {
@@ -129,9 +132,14 @@ function accountIdFromContext(ctx: any, event?: any): string | undefined {
 
 function eventHasMedia(event: any): boolean {
   const metadata = eventMetadata(event);
+  const payload = asRecord(event?.payload);
   return Boolean(
-    optionalString(event?.mediaUrl) ||
+    (Array.isArray(event?.media) && event.media.length > 0) ||
+      (Array.isArray(payload.media) && payload.media.length > 0) ||
+      optionalString(event?.mediaUrl) ||
       (Array.isArray(event?.mediaUrls) && event.mediaUrls.length > 0) ||
+      optionalString(payload.mediaUrl) ||
+      (Array.isArray(payload.mediaUrls) && payload.mediaUrls.length > 0) ||
       optionalString(metadata.mediaUrl) ||
       (Array.isArray(metadata.mediaUrls) && metadata.mediaUrls.length > 0),
   );
@@ -143,59 +151,26 @@ function aliasesFor(ctx: any, event?: any): string[] {
   const target = targetFromContext(ctx, event);
   const aliases = contextAliases(ctx, channel, senderId, event);
   if (target) aliases.push(`peer:${channel}:${target}`);
-  return [...new Set(aliases)];
+  return addTurnCorrelationAliases(aliases, event, ctx);
 }
 
-class PendingTurnStore {
-  private readonly byAlias = new Map<string, PendingTurn>();
-
-  register(aliases: string[], turn: Omit<PendingTurn, "aliases" | "createdAt">): void {
-    this.prune();
-    const resolvedAliases = [...new Set(aliases)].filter(Boolean);
-    if (resolvedAliases.length === 0) return;
-    const entry: PendingTurn = {
-      ...turn,
-      aliases: resolvedAliases,
-      createdAt: Date.now(),
-    };
-    for (const alias of resolvedAliases) this.byAlias.set(alias, entry);
-    if (this.byAlias.size > MAX_PENDING_TURNS) this.prune(true);
-  }
-
-  get(aliases: string[]): PendingTurn | undefined {
-    this.prune();
-    for (const alias of aliases) {
-      const turn = this.byAlias.get(alias);
-      if (turn) return turn;
-    }
-    return undefined;
-  }
-
-  consume(aliases: string[]): PendingTurn | undefined {
-    const turn = this.get(aliases);
-    if (!turn) return undefined;
-    for (const alias of turn.aliases) {
-      if (this.byAlias.get(alias) === turn) this.byAlias.delete(alias);
-    }
-    return turn;
-  }
-
-  private prune(force = false): void {
-    const cutoff = Date.now() - TURN_TTL_MS;
-    const seen = new Set<PendingTurn>(this.byAlias.values());
-    const ordered = [...seen].sort((left, right) => left.createdAt - right.createdAt);
-    for (const turn of ordered) {
-      if (!force && turn.createdAt >= cutoff) continue;
-      for (const alias of turn.aliases) {
-        if (this.byAlias.get(alias) === turn) this.byAlias.delete(alias);
-      }
-      if (force && this.byAlias.size <= MAX_PENDING_TURNS / 2) break;
-    }
-  }
+function correlationSummary(aliases: string[]): string {
+  const summary = summarizeCorrelationAliases(aliases);
+  return [
+    `strongKinds=${summary.strongKinds.join(",") || "none"}`,
+    `weakKinds=${summary.weakKinds.join(",") || "none"}`,
+    `aliasCount=${summary.aliasCount}`,
+  ].join(" ");
 }
 
-const memoryTurns = new PendingTurnStore();
-const bubbleTurns = new PendingTurnStore();
+const memoryTurns = new CorrelationStore<PendingTurn>(
+  TURN_TTL_MS,
+  MAX_PENDING_TURNS,
+);
+const bubbleTurns = new CorrelationStore<PendingTurn>(
+  TURN_TTL_MS,
+  MAX_PENDING_TURNS,
+);
 const bubblePassThrough = new Map<string, Set<symbol>>();
 
 function bubbleFingerprint(to: string, accountId: string | undefined, text: string): string {
@@ -315,7 +290,12 @@ export function registerV3Runtime(api: any): void {
   ): Promise<boolean> => {
     const config = readV3Config(api, event);
     if (!config.autoMemoryEnabled || !assistantReply) return false;
-    const turn = memoryTurns.consume(aliases);
+    const strictTurn = memoryTurns.peek(aliases);
+    const turn = strictTurn
+      ? memoryTurns.consume(aliases)
+      : trigger === "message_sending"
+        ? memoryTurns.consumeParent(aliases)
+        : memoryTurns.consume(aliases);
     if (!turn) return false;
     try {
       const result = await runAutoMemory(api, turn, assistantReply, config);
@@ -349,6 +329,9 @@ export function registerV3Runtime(api: any): void {
       if (config.autoMemoryEnabled) memoryTurns.register(aliases, turn);
       if (config.multiBubbleEnabled && channel === WEIXIN_CHANNEL) {
         bubbleTurns.register(aliases, turn);
+        api.logger.info(
+          `${PLUGIN_ID}: multi bubble registered ${correlationSummary(aliases)} pendingAfter=${bubbleTurns.size()}`,
+        );
       }
     },
     { priority: 55, timeoutMs: 2000 },
@@ -389,7 +372,17 @@ export function registerV3Runtime(api: any): void {
       if (consumeBubblePassThrough(fingerprint)) return;
 
       const aliases = aliasesFor(ctx, event);
-      const turn = bubbleTurns.consume(aliases);
+      const pendingBefore = bubbleTurns.size();
+      const strictTurn = bubbleTurns.peek(aliases);
+      const turn = strictTurn
+        ? bubbleTurns.consume(aliases)
+        : bubbleTurns.consumeParent(aliases);
+      const match = strictTurn ? "strict" : turn ? "weak_parent" : "miss";
+      if (match !== "strict") {
+        api.logger.info(
+          `${PLUGIN_ID}: multi bubble correlation ${correlationSummary(aliases)} pendingBefore=${pendingBefore} match=${match}`,
+        );
+      }
       if (!turn) return;
       const bubbles = splitNaturalBubbles(text, {
         minChars: config.multiBubbleMinChars,

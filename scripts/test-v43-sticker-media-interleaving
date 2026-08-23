@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+TEST_ROOT="$TMP_DIR/plugin-test"
+mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
+
+for file in \
+  index-v43.ts \
+  outbound-coordinator.ts \
+  response-plan-store.ts \
+  sticker-lifecycle.ts \
+  turn-correlation.ts \
+  multi-bubble.ts; do
+  cp "$REPO_ROOT/integrations/openclaw/$file" "$TEST_ROOT/$file"
+done
+
+cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
+{
+  "name": "openclaw",
+  "version": "0.0.0-test",
+  "type": "module",
+  "exports": {
+    "./plugin-sdk/plugin-entry": "./plugin-sdk/plugin-entry.js"
+  }
+}
+JSON
+
+cat > "$TEST_ROOT/node_modules/openclaw/plugin-sdk/plugin-entry.js" <<'JS'
+export function definePluginEntry(definition) {
+  return definition;
+}
+JS
+
+cat > "$TEST_ROOT/sticker-plugin-utils.ts" <<'TS'
+export function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+export function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+export function channelFromContext(ctx: any): string {
+  return optionalString(ctx?.channelId) || "openclaw-weixin";
+}
+export function senderIdFromContext(ctx: any): string | undefined {
+  return optionalString(ctx?.senderId);
+}
+export function contextAliases(ctx: any, channel: string, senderId?: string, event?: any): string[] {
+  const aliases: string[] = [];
+  if (ctx?.sessionKey) aliases.push(`session:${ctx.sessionKey}`);
+  if (event?.sessionKey) aliases.push(`session:${event.sessionKey}`);
+  if (senderId) aliases.push(`sender:${channel}:${senderId}`);
+  return aliases;
+}
+TS
+
+cat > "$TEST_ROOT/index-v4.ts" <<'TS'
+import { responsePlanTurns } from "./response-plan-store.ts";
+import { addTurnCorrelationAliases } from "./turn-correlation.ts";
+
+function aliasesFor(event: any, ctx: any): string[] {
+  const channel = ctx?.channelId || "openclaw-weixin";
+  const aliases: string[] = [];
+  if (ctx?.sessionKey) aliases.push(`session:${ctx.sessionKey}`);
+  if (ctx?.senderId) aliases.push(`sender:${channel}:${ctx.senderId}`);
+  return addTurnCorrelationAliases(aliases, event, ctx);
+}
+
+export default {
+  register(api: any) {
+    api.on("before_prompt_build", async () => undefined, { priority: 60 });
+    api.on(
+      "before_prompt_build",
+      async (event: any, ctx: any) => {
+        const stateVersion = Number.parseInt(String(event?.prompt || "").replace(/\D+/g, ""), 10);
+        responsePlanTurns.register(aliasesFor(event, ctx), {
+          plan_version: "4.1",
+          dialogue_act: "inform",
+          primary_goal: "respond_to_latest_message",
+          reply_length: "short",
+          bubble_target: 1,
+          ask_followup: false,
+          sticker_preference: "neutral",
+          state_version: stateVersion,
+        });
+      },
+      { priority: 50 },
+    );
+    api.on("message_sending", async () => undefined, { priority: 70 });
+  },
+};
+TS
+
+node --experimental-strip-types --input-type=module - "$TEST_ROOT" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const testRoot = process.argv[2];
+const plugin = (await import(pathToFileURL(`${testRoot}/index-v43.ts`))).default;
+const { emitStickerLifecycle } = await import(pathToFileURL(`${testRoot}/sticker-lifecycle.ts`));
+const hooks = new Map();
+const logs = [];
+
+const api = {
+  pluginConfig: {
+    responsePlannerEnabled: true,
+    unifiedOutboundShadowEnabled: true,
+    unifiedOutboundEnforceEnabled: false,
+    stickerEnabled: true,
+    multiBubbleMinChars: 8,
+    multiBubbleMaxChars: 360,
+    multiBubbleDelayMs: 0,
+  },
+  logger: {
+    info(message) { logs.push(String(message)); },
+    warn(message) { logs.push(String(message)); },
+  },
+  on(name, handler, options = {}) {
+    const items = hooks.get(name) || [];
+    items.push({ handler, priority: options.priority || 0 });
+    hooks.set(name, items);
+  },
+};
+
+async function dispatch(name, event, ctx) {
+  let result;
+  const ordered = [...(hooks.get(name) || [])].sort(
+    (left, right) => right.priority - left.priority,
+  );
+  for (const item of ordered) {
+    const current = await item.handler(event, ctx);
+    if (current !== undefined) result = current;
+  }
+  return result;
+}
+
+plugin.register(api);
+
+const to = "wx-owner@im.wechat";
+const base = {
+  channelId: "openclaw-weixin",
+  senderId: to,
+  sessionKey: "session-shared",
+};
+const turnA = { ...base, runId: "run-sticker-a" };
+const turnB = { ...base, runId: "run-text-b" };
+const lifecycleAliasesA = [
+  "run:run-sticker-a",
+  "session:session-shared",
+  `sender:openclaw-weixin:${to}`,
+  `peer:openclaw-weixin:${to}`,
+];
+
+await dispatch("before_prompt_build", { prompt: "401", runId: turnA.runId }, turnA);
+emitStickerLifecycle({
+  aliases: lifecycleAliasesA,
+  phase: "selected",
+  reason: "explicit",
+  stickerId: "sticker-a",
+  trigger: "agent_end",
+});
+emitStickerLifecycle({
+  aliases: lifecycleAliasesA,
+  phase: "scheduled",
+  reason: "delivery_scheduled",
+  stickerId: "sticker-a",
+  trigger: "agent_end",
+});
+await dispatch(
+  "message_sending",
+  {
+    content: "A文字",
+    to,
+    kind: "final",
+    runId: turnA.runId,
+    metadata: { channel: "openclaw-weixin" },
+  },
+  turnA,
+);
+assert.ok(
+  logs.some((value) =>
+    value.includes("stateVersion=401") && value.includes("sticker=pending")
+  ),
+);
+
+await dispatch("before_prompt_build", { prompt: "402", runId: turnB.runId }, turnB);
+
+// Real-device shape: Turn A's delayed Sticker adapter emits a media-only
+// message_sending while Turn B already owns the current text OutboundIntent.
+// The media event must pass through without consuming Turn B's text intent.
+await dispatch(
+  "message_sending",
+  {
+    to,
+    runId: turnA.runId,
+    mediaUrl: "/tmp/sticker-a.webp",
+    metadata: { channel: "openclaw-weixin" },
+  },
+  turnA,
+);
+assert.ok(
+  logs.some((value) => value.includes("media-only passthrough intentPreserved=true")),
+);
+assert.equal(
+  logs.some((value) =>
+    value.includes("stateVersion=402") && value.includes("outcome=media_passthrough")
+  ),
+  false,
+  "Turn A media must not consume Turn B outbound intent",
+);
+
+emitStickerLifecycle({
+  aliases: lifecycleAliasesA,
+  phase: "sent",
+  reason: "media_sent",
+  stickerId: "sticker-a",
+  trigger: "channel_outbound_adapter",
+});
+assert.ok(
+  logs.some((value) =>
+    value.includes("v4.3 outbound finalized") &&
+    value.includes("stateVersion=401") &&
+    value.includes("sticker=sent")
+  ),
+);
+assert.equal(
+  logs.some((value) =>
+    value.includes("v4.3 outbound finalized") && value.includes("stateVersion=402")
+  ),
+  false,
+);
+
+await dispatch(
+  "message_sending",
+  {
+    content: "B文字",
+    to,
+    kind: "final",
+    runId: turnB.runId,
+    metadata: { channel: "openclaw-weixin" },
+  },
+  turnB,
+);
+assert.ok(
+  logs.some((value) =>
+    value.includes("v4.3 outbound shadow") &&
+    value.includes("stateVersion=402") &&
+    value.includes("textChars=3")
+  ),
+  "Turn B text intent must remain available after Turn A sticker media",
+);
+
+console.log("v4.3 sticker media interleaving preserves the next text intent: ok");
+JS

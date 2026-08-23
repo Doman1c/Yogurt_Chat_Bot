@@ -75,7 +75,7 @@ const expiredStore = new StickerSelectionStore({ ttlMs: 1_000, maxSnapshots: 8 }
 expiredStore.register(aliases, candidates, 10_000);
 const expired = expiredStore.select(aliases, "sticker-0123456789ab", 12_000);
 assert.equal(expired.status, "rejected");
-assert.equal(expired.reason, "snapshot_missing");
+assert.equal(expired.reason, "snapshot_expired");
 
 const policy = new StickerAutoPolicyStore();
 const policyConfig = {

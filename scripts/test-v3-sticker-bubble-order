@@ -8,6 +8,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 TEST_ROOT="$TMP_DIR/plugin-test"
 mkdir -p "$TEST_ROOT/node_modules/openclaw/plugin-sdk"
 cp "$REPO_ROOT/integrations/openclaw/index-v3.ts" "$TEST_ROOT/index-v3.ts"
+cp "$REPO_ROOT/integrations/openclaw/turn-correlation.ts" "$TEST_ROOT/turn-correlation.ts"
 
 cat > "$TEST_ROOT/node_modules/openclaw/package.json" <<'JSON'
 {
@@ -26,6 +27,27 @@ export function definePluginEntry(definition) {
 }
 JS
 
+cat > "$TEST_ROOT/sticker-plugin-utils.ts" <<'TS'
+export function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+export function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+export function senderIdFromContext(ctx: any): string | undefined {
+  return optionalString(ctx?.senderId);
+}
+export function contextAliases(ctx: any, channel: string, senderId?: string, event?: any): string[] {
+  const aliases: string[] = [];
+  if (ctx?.sessionKey) aliases.push(`session:${ctx.sessionKey}`);
+  if (event?.sessionKey) aliases.push(`session:${event.sessionKey}`);
+  if (senderId) aliases.push(`sender:${channel}:${senderId}`);
+  return aliases;
+}
+TS
+
 cat > "$TEST_ROOT/index-v2.ts" <<'TS'
 export default {
   register(api: any) {
@@ -38,11 +60,7 @@ export default {
       { priority: 60 },
     );
     api.on("agent_end", async (event: any, ctx: any) => {
-      api.trace.push({
-        step: "sticker-finalizer",
-        event,
-        ctx,
-      });
+      api.trace.push({ step: "sticker-finalizer", event, ctx });
     });
   },
 };
@@ -74,14 +92,9 @@ const plugin = (await import(pathToFileURL(`${testRoot}/index-v3.ts`))).default;
 const hooks = new Map();
 const trace = [];
 const logs = [];
-
 const api = {
   trace,
-  logger: {
-    info(message) {
-      logs.push(String(message));
-    },
-  },
+  logger: { info(message) { logs.push(String(message)); } },
   on(name, handler, options = {}) {
     const values = hooks.get(name) || [];
     values.push({ handler, priority: options.priority || 0 });
@@ -91,17 +104,12 @@ const api = {
 
 plugin.register(api);
 const sendingHooks = hooks.get("message_sending") || [];
-assert.deepEqual(
-  sendingHooks.map((item) => item.priority).sort((a, b) => b - a),
-  [80, 70],
-);
+assert.deepEqual(sendingHooks.map((item) => item.priority).sort((a, b) => b - a), [80, 70]);
 assert.ok(logs.some((message) => message.includes("captured=true")));
 
 async function dispatch(name, event, ctx) {
   let result;
-  const ordered = [...(hooks.get(name) || [])].sort(
-    (left, right) => right.priority - left.priority,
-  );
+  const ordered = [...(hooks.get(name) || [])].sort((left, right) => right.priority - left.priority);
   for (const item of ordered) {
     const current = await item.handler(event, ctx);
     if (current !== undefined) result = current;
@@ -115,12 +123,9 @@ const inboundContext = {
   chatId: "wx-owner@im.wechat",
   sessionKey: "session-1",
   accountId: "weixin-account",
+  runId: "run-order-1",
 };
-await dispatch(
-  "before_prompt_build",
-  { prompt: "终于全部弄好了！" },
-  inboundContext,
-);
+await dispatch("before_prompt_build", { prompt: "终于全部弄好了！", runId: inboundContext.runId }, inboundContext);
 trace.length = 0;
 
 const fullReply = "终于全部弄好了！\n\n主人真的太厉害啦喵！";
@@ -129,28 +134,21 @@ const result = await dispatch(
   {
     content: fullReply,
     to: "wx-owner@im.wechat",
-    metadata: {
-      channel: "openclaw-weixin",
-      accountId: "weixin-account",
-    },
+    kind: "final",
+    runId: inboundContext.runId,
+    metadata: { channel: "openclaw-weixin", accountId: "weixin-account" },
   },
-  {
-    channelId: "openclaw-weixin",
-    accountId: "weixin-account",
-  },
+  { channelId: "openclaw-weixin", accountId: "weixin-account", runId: inboundContext.runId },
 );
-
 assert.equal(result.cancel, true);
-assert.deepEqual(
-  trace.map((item) => item.step),
-  ["sticker-finalizer", "multi-bubble"],
-);
+assert.deepEqual(trace.map((item) => item.step), ["sticker-finalizer", "multi-bubble"]);
 assert.equal(trace[0].event.success, true);
 assert.equal(trace[0].event.messages[0].content, fullReply);
 assert.equal(trace[0].event.to, "wx-owner@im.wechat");
 assert.equal(trace[0].ctx.channel, "openclaw-weixin");
 assert.equal(trace[0].ctx.senderId, "wx-owner@im.wechat");
 assert.equal(trace[0].ctx.sessionKey, "session-1");
+assert.equal(trace[0].event.runId, "run-order-1");
 assert.ok(logs.some((message) => message.includes("pre-bubble sticker finalizer")));
 
 trace.length = 0;
@@ -159,43 +157,30 @@ await dispatch(
   {
     content: "主人真的太厉害啦喵！",
     to: "wx-owner@im.wechat",
-    metadata: {
-      channel: "openclaw-weixin",
-      accountId: "weixin-account",
-    },
+    kind: "final",
+    runId: inboundContext.runId,
+    metadata: { channel: "openclaw-weixin", accountId: "weixin-account" },
   },
-  { channelId: "openclaw-weixin", accountId: "weixin-account" },
+  { channelId: "openclaw-weixin", accountId: "weixin-account", runId: inboundContext.runId },
 );
-assert.deepEqual(
-  trace.map((item) => item.step),
-  ["multi-bubble"],
-  "child bubbles must not repeat sticker finalization",
-);
+assert.deepEqual(trace.map((item) => item.step), ["multi-bubble"], "child bubbles must not repeat sticker finalization");
 
-await dispatch(
-  "before_prompt_build",
-  { prompt: "再发一段带图片的回复。" },
-  { ...inboundContext, sessionKey: "session-media" },
-);
+const mediaContext = { ...inboundContext, sessionKey: "session-media", runId: "run-media" };
+await dispatch("before_prompt_build", { prompt: "再发一段带图片的回复。", runId: mediaContext.runId }, mediaContext);
 trace.length = 0;
 await dispatch(
   "message_sending",
   {
     content: fullReply,
     to: "wx-owner@im.wechat",
-    metadata: {
-      channel: "openclaw-weixin",
-      accountId: "weixin-account",
-      mediaUrls: ["/tmp/sticker.webp"],
-    },
+    kind: "final",
+    runId: mediaContext.runId,
+    media: [{ type: "image", id: "image-1" }],
+    metadata: { channel: "openclaw-weixin", accountId: "weixin-account" },
   },
-  { channelId: "openclaw-weixin", accountId: "weixin-account" },
+  { channelId: "openclaw-weixin", accountId: "weixin-account", runId: mediaContext.runId },
 );
-assert.deepEqual(
-  trace.map((item) => item.step),
-  ["multi-bubble"],
-  "media messages must skip the pre-bubble sticker finalizer",
-);
+assert.deepEqual(trace.map((item) => item.step), ["multi-bubble"], "typed media messages must skip the pre-bubble sticker finalizer");
 
-console.log("v3 sticker-before-bubble hook order: ok");
+console.log("v3 sticker-before-bubble hook order with strong turn correlation: ok");
 JS

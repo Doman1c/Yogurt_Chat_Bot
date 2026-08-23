@@ -1,6 +1,6 @@
 {
   "name": "@doman1c/openclaw-yogurt-social-injector",
-  "version": "0.6.2-alpha.1",
+  "version": "0.6.3-alpha.12",
   "private": true,
   "type": "module",
   "files": [
@@ -8,6 +8,11 @@
     "index-v2.ts",
     "index-v3.ts",
     "index-v4.ts",
+    "index-v43.ts",
+    "outbound-coordinator.ts",
+    "response-plan-store.ts",
+    "sticker-lifecycle.ts",
+    "turn-correlation.ts",
     "sticker-plugin-utils.ts",
     "sticker-selection.ts",
     "sticker-turn.ts",
@@ -27,7 +32,7 @@
   },
   "openclaw": {
     "extensions": [
-      "./index-v4.ts"
+      "./index-v43.ts"
     ],
     "compat": {
       "pluginApi": ">=2026.7.1-0"

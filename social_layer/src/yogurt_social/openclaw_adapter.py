@@ -102,6 +102,17 @@ class OpenClawAdapter:
             )
         return "\n".join(lines)
 
+    @staticmethod
+    def _build_explicit_sticker_output_guard() -> str:
+        return "\n".join(
+            [
+                "[Yogurt Sticker Output Guard]",
+                "图片完全由本地发送层处理；正文只能包含给用户看的自然语言。",
+                "绝对不要输出、猜测或伪造任何媒体/控制指令，包括 [[...]]、MEDIA:、image:、sticker ID、文件名或本地路径。",
+                "如果用户明确指定了回复文字或格式，严格按用户最新要求输出，不要额外添加前言、图片占位符或动作标记。",
+            ]
+        )
+
     def prepare(
         self,
         user_id: str,
@@ -192,12 +203,24 @@ class OpenClawAdapter:
                 forbidden=sticker_forbidden,
             ).to_dict()
 
+            explicit_output_guard = (
+                self._build_explicit_sticker_output_guard()
+                if decision_phase == "pre_reply" and explicit_sticker_request
+                else ""
+            )
             sticker_context = (
                 self._build_sticker_context(candidates)
                 if decision_phase == "pre_reply"
                 else ""
             )
-            context_parts = [part for part in (base_social_context, sticker_context) if part]
+            # Keep the output guard before the candidate block. The OpenClaw auto-mode
+            # adapter strips [Yogurt Sticker Candidates] and everything after it so the
+            # model never sees raw candidate details; the guard must survive that strip.
+            context_parts = [
+                part
+                for part in (base_social_context, explicit_output_guard, sticker_context)
+                if part
+            ]
             social_context = "\n\n".join(context_parts)
             final_model_input = {
                 "prepend_system_context": social_context,

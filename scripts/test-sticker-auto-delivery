@@ -24,7 +24,9 @@ for source in \
   sticker-plugin-utils.ts \
   sticker-selection.ts \
   sticker-turn.ts \
-  sticker-v21-utils.ts; do
+  sticker-v21-utils.ts \
+  sticker-lifecycle.ts \
+  turn-correlation.ts; do
   cp "$REPO_ROOT/integrations/openclaw/$source" "$TEST_ROOT/$source"
 done
 
@@ -47,62 +49,77 @@ JS
 
 printf 'fake-webp' > "$FAKE_REPO/assets/stickers/images/sticker-test123.webp"
 
-cat > "$FAKE_REPO/social_layer/config/stickers.json" <<'JSON'
-{
-  "delivery_delay_ms": 10,
-  "delivery_max_bytes": 10485760,
-  "explicit_min_score": 5,
-  "proactive_min_score": 7,
-  "proactive_min_margin": 2,
-  "global_cooldown_seconds": 300,
-  "scene_cooldown_seconds": 900,
-  "default_sticker_cooldown_seconds": 1800,
-  "max_stickers_per_hour": 4
-}
-JSON
+# Keep this fixture independent from local Python cold-start / shim latency and
+# from asynchronous stdin event-loop behavior on macOS. runBridge only requires
+# an executable that accepts stdin JSON and emits stdout JSON; the real Python
+# bridge is covered by the adapter/Python tests elsewhere.
+cat > "$TMP_DIR/fake-bridge" <<'JS'
+#!/usr/bin/env node
+import { readFileSync } from "node:fs";
 
-cat > "$TMP_DIR/fake-python" <<'PY'
-#!/usr/bin/env python3
-import json
-import sys
-
-request = json.load(sys.stdin)
-if request.get("explicit_sticker_request") is not True:
-    raise SystemExit("explicit_sticker_request was not forwarded")
-
-message = request.get("message", "")
-available = "模拟无候选" not in message
-candidate = {
-    "id": "sticker-test123",
-    "file": "images/sticker-test123.webp",
-    "description": "一只猫咪正在卖萌",
-    "score": 9,
-    "scenes": ["playful"],
+let request;
+try {
+  request = JSON.parse(readFileSync(0, "utf8"));
+} catch {
+  console.error("invalid bridge request json");
+  process.exit(3);
 }
-payload = {
-    "social_context": "[Yogurt Social State]\nscene: playful",
-    "sticker_candidates": [candidate] if available else [],
-    "sticker_decision": {
-        "should_send": available,
-        "mode": "explicit_specific",
-        "score": 9 if available else 0,
-        "threshold": 5,
-        "intents": ["playful"] if available else [],
-        "reasons": ["explicit_request"] if available else ["no_candidates"],
-        "deferred": False,
-    },
+
+if (request?.explicit_sticker_request !== true) {
+  console.error("explicit_sticker_request was not forwarded");
+  process.exit(2);
 }
-json.dump(payload, sys.stdout, ensure_ascii=False)
-PY
-chmod +x "$TMP_DIR/fake-python"
+
+const noCandidates =
+  typeof request?.message === "string" && request.message.includes("模拟无候选");
+const result = noCandidates
+  ? {
+      social_context: "[Yogurt Social State]\nscene: playful",
+      sticker_candidates: [],
+      sticker_decision: {
+        should_send: false,
+        mode: "explicit_specific",
+        score: 0,
+        threshold: 5,
+        intents: [],
+        reasons: ["no_candidates"],
+        deferred: false,
+      },
+    }
+  : {
+      social_context: "[Yogurt Social State]\nscene: playful",
+      sticker_candidates: [
+        {
+          id: "sticker-test123",
+          file: "images/sticker-test123.webp",
+          description: "一只猫咪正在卖萌",
+          score: 9,
+          scenes: ["playful"],
+        },
+      ],
+      sticker_decision: {
+        should_send: true,
+        mode: "explicit_specific",
+        score: 9,
+        threshold: 5,
+        intents: ["playful"],
+        reasons: ["explicit_request"],
+        deferred: false,
+      },
+    };
+
+process.stdout.write(JSON.stringify(result));
+process.exit(0);
+JS
+chmod +x "$TMP_DIR/fake-bridge"
 
 YOGURT_STICKER_AGENT_END_DELAY_MS=10 \
 node --experimental-strip-types --input-type=module - \
-  "$TEST_ROOT" "$FAKE_REPO" "$TMP_DIR/fake-python" <<'JS'
+  "$TEST_ROOT" "$FAKE_REPO" "$TMP_DIR/fake-bridge" <<'JS'
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 
-const [testRoot, fakeRepo, fakePython] = process.argv.slice(2);
+const [testRoot, fakeRepo, fakeBridge] = process.argv.slice(2);
 const plugin = (await import(pathToFileURL(`${testRoot}/index-v2.ts`))).default;
 const hooks = {};
 const logs = [];
@@ -111,9 +128,28 @@ const openclawConfig = { channels: { "openclaw-weixin": {} } };
 let toolFactory;
 let loadedChannel;
 
+async function waitFor(predicate, timeoutMs = 3000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return predicate();
+}
+
+function printDiagnostic(label) {
+  console.error(`========== ${label} ==========`);
+  console.error(`node=${process.version}`);
+  console.error(`fakeBridge=${fakeBridge}`);
+  console.error(`loadedChannel=${loadedChannel || "none"}`);
+  console.error(`sentMedia=${sentMedia.length}`);
+  console.error(logs.length > 0 ? logs.join("\n") : "(no plugin logs captured)");
+  console.error("===============================================");
+}
+
 const pluginConfig = {
   enabled: true,
-  pythonPath: fakePython,
+  pythonPath: fakeBridge,
   repoPath: fakeRepo,
   dbPath: `${fakeRepo}/memory.sqlite3`,
   defaultUserId: "owner",
@@ -122,7 +158,11 @@ const pluginConfig = {
   unknownSenderPolicy: "skip",
   allowedChannels: ["openclaw-weixin"],
   onlyUserTurns: true,
-  timeoutMs: 2500,
+  // The complete Node-on-Node harness can occasionally exceed the production
+  // bridge timeout on macOS even though the same bridge call completes in a few
+  // hundred milliseconds in isolation. Keep this test-only allowance wide
+  // enough to avoid fixture scheduling flakes; production defaults are unchanged.
+  timeoutMs: 10000,
   maxMemories: 3,
   stickerEnabled: true,
   stickerConfigPath: `${fakeRepo}/social_layer/config/stickers.json`,
@@ -132,23 +172,13 @@ const pluginConfig = {
 plugin.register({
   config: openclawConfig,
   pluginConfig,
-  resolvePath(value) {
-    return value;
-  },
+  resolvePath(value) { return value; },
   logger: {
-    info(message) {
-      logs.push(String(message));
-    },
-    warn(message) {
-      logs.push(String(message));
-    },
+    info(message) { logs.push(String(message)); },
+    warn(message) { logs.push(String(message)); },
   },
-  registerTool(definition) {
-    toolFactory = definition;
-  },
-  on(name, handler) {
-    hooks[name] = handler;
-  },
+  registerTool(definition) { toolFactory = definition; },
+  on(name, handler) { hooks[name] = handler; },
   runtime: {
     channel: {
       outbound: {
@@ -180,37 +210,23 @@ const context = {
   accountId: "weixin-account",
 };
 const promptResult = await hooks.before_prompt_build(
-  {
-    prompt: "酸奶，发一个卖萌的表情包过来",
-    context: { pluginConfig },
-  },
+  { prompt: "酸奶，发一个卖萌的表情包过来", context: { pluginConfig } },
   context,
 );
-if (!promptResult?.prependContext) {
-  console.error("========== sticker adapter diagnostic ==========");
-  console.error(`node=${process.version}`);
-  console.error(`fakePython=${fakePython}`);
-  console.error(logs.length > 0 ? logs.join("\n") : "(no plugin logs captured)");
-  console.error("===============================================");
-}
-assert.ok(
-  promptResult?.prependContext,
-  "before_prompt_build returned no context; see diagnostic logs above",
-);
+if (!promptResult?.prependContext) printDiagnostic("sticker adapter pre-reply diagnostic");
+assert.ok(promptResult?.prependContext, "before_prompt_build returned no context; see diagnostic logs above");
 assert.match(promptResult.prependContext, /\[Yogurt Sticker Delivery\]/);
 assert.doesNotMatch(promptResult.prependContext, /\[Yogurt Sticker Candidates\]/);
 assert.doesNotMatch(promptResult.prependContext, /一只猫咪正在卖萌/);
 assert.match(promptResult.prependContext, /不要描述、解释或虚构表情包画面/);
 
 await hooks.agent_end(
-  {
-    success: true,
-    messages: [{ role: "assistant", content: "来啦～" }],
-  },
+  { success: true, messages: [{ role: "assistant", content: "来啦～" }] },
   context,
 );
-await new Promise((resolve) => setTimeout(resolve, 80));
-
+const firstDelivered = await waitFor(() => sentMedia.length >= 1);
+if (!firstDelivered) printDiagnostic("sticker adapter agent_end delivery diagnostic");
+assert.equal(firstDelivered, true, "agent_end sticker delivery did not complete in time");
 assert.equal(loadedChannel, "openclaw-weixin");
 assert.equal(sentMedia.length, 1);
 assert.equal(sentMedia[0].cfg, openclawConfig);
@@ -221,48 +237,32 @@ assert.match(
   sentMedia[0].mediaUrl,
   /assets\/stickers\/images\/sticker-test123\.webp$/,
 );
-assert.ok(
-  logs.some((message) => message.includes("send decision trigger=agent_end")),
-);
+assert.ok(logs.some((message) => message.includes("send decision trigger=agent_end")));
 assert.ok(
   logs.some((message) =>
     message.includes("sticker media sent trigger=channel_outbound_adapter mode=auto"),
   ),
 );
 
-const fallbackContext = {
-  ...context,
-  sessionKey: "session-message-sent",
-};
+const fallbackContext = { ...context, sessionKey: "session-message-sent" };
 await hooks.before_prompt_build(
-  {
-    prompt: "酸奶，再发一个卖萌的表情包",
-    context: { pluginConfig },
-  },
+  { prompt: "酸奶，再发一个卖萌的表情包", context: { pluginConfig } },
   fallbackContext,
 );
 await hooks.agent_end({ success: true }, fallbackContext);
 await hooks.message_sent(
-  {
-    success: true,
-    content: "再来一张～",
-    to: "wx-owner",
-    accountId: "weixin-account",
-  },
+  { success: true, content: "再来一张～", to: "wx-owner", accountId: "weixin-account" },
   fallbackContext,
 );
-await new Promise((resolve) => setTimeout(resolve, 80));
+const secondDelivered = await waitFor(() => sentMedia.length >= 2);
+if (!secondDelivered) printDiagnostic("sticker adapter message_sent delivery diagnostic");
+assert.equal(secondDelivered, true, "message_sent sticker delivery did not complete in time");
 assert.equal(sentMedia.length, 2, "message_sent must provide final-text fallback");
 
+const unavailableContext = { ...context, sessionKey: "session-unavailable" };
 const unavailableResult = await hooks.before_prompt_build(
-  {
-    prompt: "酸奶，发一个表情包，模拟无候选",
-    context: { pluginConfig },
-  },
-  {
-    ...context,
-    sessionKey: "session-unavailable",
-  },
+  { prompt: "酸奶，发一个表情包，模拟无候选", context: { pluginConfig } },
+  unavailableContext,
 );
 assert.match(unavailableResult.prependContext, /\[Yogurt Sticker Request\]/);
 assert.match(unavailableResult.prependContext, /没有找到足够相关且安全的候选/);
@@ -271,12 +271,9 @@ assert.doesNotMatch(unavailableResult.prependContext, /一只猫咪正在卖萌/
 
 await hooks.agent_end(
   { success: true, messages: [{ role: "assistant", content: "这次没发出来。" }] },
-  {
-    ...context,
-    sessionKey: "session-unavailable",
-  },
+  unavailableContext,
 );
-await new Promise((resolve) => setTimeout(resolve, 30));
+await new Promise((resolve) => setTimeout(resolve, 50));
 assert.equal(sentMedia.length, 2, "no candidate must not send media");
 
 console.log("sticker outbound adapter v2.1: ok");

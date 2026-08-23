@@ -12,6 +12,10 @@ import {
   resolveUserId,
   senderIdFromContext,
 } from "./sticker-plugin-utils.ts";
+import {
+  addTurnCorrelationAliases,
+  CorrelationStore,
+} from "./turn-correlation.ts";
 
 const PLUGIN_ID = "yogurt-social-injector";
 const MAX_PENDING_TURNS = 200;
@@ -21,8 +25,6 @@ const MAX_OUTPUT_BYTES = 256 * 1024;
 type PendingTurn = {
   userId: string;
   message: string;
-  aliases: string[];
-  createdAt: number;
 };
 
 type ExtensionConfig = {
@@ -111,54 +113,10 @@ function aliasesFor(ctx: any, event?: any): string[] {
   const target = targetFromContext(ctx, event);
   const aliases = contextAliases(ctx, channel, senderId, event);
   if (target) aliases.push(`peer:${channel}:${target}`);
-  return [...new Set(aliases)];
+  return addTurnCorrelationAliases(aliases, event, ctx);
 }
 
-class PendingTurnStore {
-  private readonly byAlias = new Map<string, PendingTurn>();
-
-  register(aliases: string[], turn: Omit<PendingTurn, "aliases" | "createdAt">): void {
-    this.prune();
-    const resolvedAliases = [...new Set(aliases)].filter(Boolean);
-    if (resolvedAliases.length === 0) return;
-    const entry: PendingTurn = {
-      ...turn,
-      aliases: resolvedAliases,
-      createdAt: Date.now(),
-    };
-    for (const alias of resolvedAliases) this.byAlias.set(alias, entry);
-    if (this.byAlias.size > MAX_PENDING_TURNS) this.prune(true);
-  }
-
-  consume(aliases: string[]): PendingTurn | undefined {
-    this.prune();
-    let turn: PendingTurn | undefined;
-    for (const alias of aliases) {
-      turn = this.byAlias.get(alias);
-      if (turn) break;
-    }
-    if (!turn) return undefined;
-    for (const alias of turn.aliases) {
-      if (this.byAlias.get(alias) === turn) this.byAlias.delete(alias);
-    }
-    return turn;
-  }
-
-  private prune(force = false): void {
-    const cutoff = Date.now() - TURN_TTL_MS;
-    const seen = new Set<PendingTurn>(this.byAlias.values());
-    const ordered = [...seen].sort((left, right) => left.createdAt - right.createdAt);
-    for (const turn of ordered) {
-      if (!force && turn.createdAt >= cutoff) continue;
-      for (const alias of turn.aliases) {
-        if (this.byAlias.get(alias) === turn) this.byAlias.delete(alias);
-      }
-      if (force && this.byAlias.size <= MAX_PENDING_TURNS / 2) break;
-    }
-  }
-}
-
-const turns = new PendingTurnStore();
+const turns = new CorrelationStore<PendingTurn>(TURN_TTL_MS, MAX_PENDING_TURNS);
 
 function runExtension(
   api: any,

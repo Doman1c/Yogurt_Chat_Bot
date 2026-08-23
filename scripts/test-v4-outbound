@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MODULE="$REPO_ROOT/integrations/openclaw/outbound-coordinator.ts"
+CORRELATION_MODULE="$REPO_ROOT/integrations/openclaw/turn-correlation.ts"
+PLAN_MODULE="$REPO_ROOT/integrations/openclaw/response-plan-store.ts"
+LIFECYCLE_MODULE="$REPO_ROOT/integrations/openclaw/sticker-lifecycle.ts"
+
+node --experimental-strip-types --check "$MODULE"
+node --experimental-strip-types --check "$CORRELATION_MODULE"
+node --experimental-strip-types --check "$PLAN_MODULE"
+node --experimental-strip-types --check "$LIFECYCLE_MODULE"
+
+node --experimental-strip-types --input-type=module - "$MODULE" "$CORRELATION_MODULE" "$PLAN_MODULE" <<'JS'
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+const modulePath = process.argv[2];
+const correlationPath = process.argv[3];
+const planPath = process.argv[4];
+const {
+  OutboundTurnStore,
+  compareOutboundResult,
+  formatOutboundComparison,
+  outboundIntentFromResponsePlan,
+} = await import(pathToFileURL(modulePath));
+const {
+  CorrelationStore,
+  addTurnCorrelationAliases,
+} = await import(pathToFileURL(correlationPath));
+const { responsePlanSnapshot } = await import(pathToFileURL(planPath));
+
+const intent = outboundIntentFromResponsePlan({
+  plan_version: "4.1",
+  bubble_target: 9,
+  sticker_preference: "celebration",
+  reply_length: "short",
+  state_version: 12,
+  raw_message: "must not be copied",
+});
+assert.deepEqual(intent, {
+  planVersion: "4.1",
+  bubbleTarget: 3,
+  stickerPreference: "celebration",
+  replyLength: "short",
+  stateVersion: 12,
+  source: "response_planner",
+});
+assert.equal("raw_message" in intent, false);
+
+const plan = responsePlanSnapshot({
+  plan_version: "4.1",
+  dialogue_act: "plan",
+  primary_goal: "advance_current_project",
+  reply_length: "medium",
+  bubble_target: 2,
+  ask_followup: true,
+  sticker_preference: "neutral",
+  state_version: 67,
+  user_message: "must not escape",
+  assistant_reply: "must not escape",
+});
+assert.deepEqual(plan, {
+  plan_version: "4.1",
+  dialogue_act: "plan",
+  primary_goal: "advance_current_project",
+  reply_length: "medium",
+  bubble_target: 2,
+  ask_followup: true,
+  sticker_preference: "neutral",
+  state_version: 67,
+});
+assert.equal("user_message" in plan, false);
+assert.equal("assistant_reply" in plan, false);
+
+let now = 1_000;
+const store = new OutboundTurnStore(500, 8, () => now);
+const registered = store.register(
+  ["session:owner", "peer:wechat:owner", "session:owner"],
+  { bubble_target: 1, sticker_preference: "none", state_version: 4 },
+);
+assert.equal(registered?.bubbleTarget, 1);
+assert.equal(store.size(), 1);
+assert.equal(store.peek(["peer:wechat:owner"])?.stateVersion, 4);
+assert.equal(store.consume(["session:owner"])?.bubbleTarget, 1);
+assert.equal(store.consume(["peer:wechat:owner"]), undefined);
+assert.equal(store.size(), 0);
+
+const concurrent = new OutboundTurnStore(5_000, 16, () => now);
+concurrent.register(
+  ["run:run-a", "session:shared", "peer:wechat:owner"],
+  { bubble_target: 1, state_version: 101 },
+);
+now += 1;
+concurrent.register(
+  ["run:run-b", "session:shared", "peer:wechat:owner"],
+  { bubble_target: 2, state_version: 102 },
+);
+assert.equal(concurrent.size(), 2);
+assert.equal(concurrent.peek(["run:run-a", "session:shared"])?.stateVersion, 101);
+assert.equal(concurrent.peek(["run:run-b", "session:shared"])?.stateVersion, 102);
+assert.equal(
+  concurrent.peek(["run:run-missing", "session:shared"]),
+  undefined,
+  "a same-namespace runId mismatch must never fall through to another turn",
+);
+assert.equal(concurrent.consume(["run:run-a"])?.bubbleTarget, 1);
+assert.equal(concurrent.size(), 1);
+assert.equal(concurrent.consume(["run:run-b"])?.bubbleTarget, 2);
+assert.equal(concurrent.size(), 0);
+
+concurrent.register(
+  ["run:run-c", "session:shared"],
+  { bubble_target: 1, state_version: 201 },
+);
+concurrent.register(
+  ["run:run-d", "session:shared"],
+  { bubble_target: 2, state_version: 202 },
+);
+concurrent.register(
+  ["run:run-c", "session:shared"],
+  { bubble_target: 3, state_version: 203 },
+);
+assert.equal(concurrent.size(), 2);
+assert.equal(concurrent.peek(["run:run-c"])?.stateVersion, 203);
+assert.equal(concurrent.peek(["run:run-d"])?.stateVersion, 202);
+
+const aliases = addTurnCorrelationAliases(
+  ["session:shared"],
+  { runId: "run-event", messageId: "message-event", traceId: "trace-event" },
+  { runId: "run-ctx", messageId: "message-ctx", traceId: "trace-ctx" },
+);
+assert.ok(aliases.includes("run:run-event"));
+assert.ok(aliases.includes("run:run-ctx"));
+assert.ok(aliases.includes("message:message-event"));
+assert.ok(aliases.includes("trace:trace-ctx"));
+
+const generic = new CorrelationStore(5_000, 16, () => now);
+generic.register(["run:a", "session:s"], { marker: "a" });
+generic.register(["run:b", "session:s"], { marker: "b" });
+assert.equal(generic.peek(["run:a", "session:s"])?.marker, "a");
+assert.equal(generic.peek(["run:b", "session:s"])?.marker, "b");
+assert.equal(generic.peek(["run:x", "session:s"]), undefined);
+
+// Different strong-id namespaces may appear at different OpenClaw hook phases.
+// trace:t1 -> run:r1 is compatible when the weak parent identity is unique.
+const crossNamespace = new CorrelationStore(5_000, 16, () => now);
+crossNamespace.register(
+  ["trace:trace-before-prompt", "session:cross", "peer:wechat:owner"],
+  { marker: "parent" },
+);
+assert.equal(
+  crossNamespace.peek(["run:run-message-sending", "session:cross", "peer:wechat:owner"])?.marker,
+  "parent",
+  "different strong namespaces should correlate through one unique compatible parent",
+);
+assert.equal(
+  crossNamespace.peek(["trace:different-trace", "session:cross"]),
+  undefined,
+  "the same strong namespace with a different value is still a hard mismatch",
+);
+assert.equal(
+  crossNamespace.peek(["session:cross"]),
+  undefined,
+  "a weak-only child must not steal a parent that already has a strong identity",
+);
+
+const messageToRun = new CorrelationStore(5_000, 16, () => now);
+messageToRun.register(["message:msg-1", "session:message-run"], { marker: "message-parent" });
+assert.equal(
+  messageToRun.consume(["run:run-1", "session:message-run"])?.marker,
+  "message-parent",
+);
+
+// A legacy host that had no strong id at registration may still gain one later.
+const legacyOnly = new CorrelationStore(5_000, 16, () => now);
+legacyOnly.register(["session:legacy", "peer:wechat:legacy"], { marker: "legacy" });
+assert.equal(
+  legacyOnly.peek(["run:later", "session:legacy"])?.marker,
+  "legacy",
+  "one weak-only legacy entry may be correlated when a later hook gains runId",
+);
+
+const differentStrong = new CorrelationStore(5_000, 16, () => now);
+differentStrong.register(["run:old", "session:one"], { marker: "old" });
+assert.equal(
+  differentStrong.peek(["run:new", "session:one"]),
+  undefined,
+  "a different stored runId must never be accepted through session fallback",
+);
+
+const ambiguousWeak = new CorrelationStore(5_000, 16, () => now);
+ambiguousWeak.register(["run:one", "session:ambiguous"], { marker: "one" });
+ambiguousWeak.register(["run:two", "session:ambiguous"], { marker: "two" });
+assert.equal(
+  ambiguousWeak.peek(["session:ambiguous"]),
+  undefined,
+  "weak-only hooks must refuse ambiguous concurrent turns",
+);
+
+const expiring = new OutboundTurnStore(500, 4, () => now);
+expiring.register(["session:expired"], { bubble_target: 2, state_version: 5 });
+now += 501;
+assert.equal(expiring.peek(["session:expired"]), undefined);
+assert.equal(expiring.size(), 0);
+
+const mismatch = compareOutboundResult(
+  outboundIntentFromResponsePlan({ bubble_target: 1, state_version: 11 }),
+  {
+    actualBubbleCount: 3,
+    textChars: 88,
+    outcome: "split",
+    stickerOutcome: "pending",
+    stickerReason: "delivery_scheduled",
+  },
+);
+assert.equal(mismatch.bubbleTargetMatched, false);
+assert.equal(mismatch.bubbleDelta, 2);
+assert.ok(mismatch.reasons.includes("actual_bubbles_exceeded_target"));
+assert.ok(mismatch.reasons.includes("sticker_pending"));
+assert.ok(formatOutboundComparison(mismatch).includes("targetBubbles=1"));
+assert.ok(formatOutboundComparison(mismatch).includes("actualBubbles=3"));
+assert.ok(formatOutboundComparison(mismatch).includes("stickerReason=delivery_scheduled"));
+
+const matched = compareOutboundResult(
+  outboundIntentFromResponsePlan({ bubble_target: 2, state_version: 12 }),
+  {
+    actualBubbleCount: 2,
+    textChars: 45,
+    outcome: "split",
+    stickerOutcome: "skipped",
+    stickerReason: "policy_rejected",
+  },
+);
+assert.equal(matched.bubbleTargetMatched, true);
+assert.equal(matched.bubbleDelta, 0);
+assert.ok(matched.reasons.includes("bubble_target_matched"));
+assert.ok(matched.reasons.includes("sticker_skipped"));
+assert.ok(formatOutboundComparison(matched).includes("sticker=skipped"));
+
+const partial = compareOutboundResult(
+  outboundIntentFromResponsePlan({ bubble_target: 3, state_version: 13 }),
+  {
+    actualBubbleCount: 1,
+    textChars: 72,
+    outcome: "partial",
+    stickerOutcome: "failed",
+    stickerReason: "weixin_send_media_unavailable",
+  },
+);
+assert.ok(partial.reasons.includes("actual_bubbles_below_target"));
+assert.ok(partial.reasons.includes("partial_delivery"));
+assert.ok(partial.reasons.includes("sticker_failed"));
+assert.ok(
+  formatOutboundComparison(partial).includes(
+    "stickerReason=weixin_send_media_unavailable",
+  ),
+);
+
+console.log("v4.3.2 outbound coordinator and cross-namespace strong correlation model: ok");
+JS

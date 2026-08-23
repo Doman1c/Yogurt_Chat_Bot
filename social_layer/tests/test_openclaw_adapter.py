@@ -37,6 +37,23 @@ class OpenClawAdapterTests(unittest.TestCase):
         self.assertTrue(result.metadata["applied"])
         self.assertTrue(result.metadata["original_message_preserved"])
 
+    def test_explicit_sticker_request_adds_output_protocol_guard(self):
+        message = "发一个卖萌表情包给我，文字只回复“A轮确认”"
+        result = OpenClawAdapter(_StubService()).prepare(
+            "owner",
+            message,
+            explicit_sticker_request=True,
+        )
+
+        self.assertEqual(result.original_message, message)
+        self.assertIn("[Yogurt Sticker Output Guard]", result.social_context)
+        self.assertIn("图片完全由本地发送层处理", result.social_context)
+        self.assertIn("绝对不要输出、猜测或伪造任何媒体/控制指令", result.social_context)
+        self.assertIn("[[...]]", result.social_context)
+        self.assertIn("MEDIA:", result.social_context)
+        self.assertIn("严格按用户最新要求输出", result.social_context)
+        self.assertTrue(result.metadata["explicit_sticker_request"])
+
     def test_fail_open_keeps_original_message(self):
         message = "这条消息必须继续交给原来的 OpenClaw"
         result = OpenClawAdapter(_FailingService()).prepare("owner", message)
