@@ -1,0 +1,11 @@
+# Local-only P10 assets
+voices/
+models/
+cache/
+output/
+config.toml
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.aac
