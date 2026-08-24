@@ -8,8 +8,8 @@
   swap and memory-compression pressure when Brain and TTS coexist.
 - P10-B1-6 WeChat auto-TTS: **DEFERRED**. WeChat is a text channel; it does
   not own Yogurt's speech boundary.
-- P10-B2 Mouth: **ACTIVE** on the P10-B2/B3 branch.
-- P10-B3 VoiceSession: **ACTIVE** on the P10-B2/B3 branch.
+- P10-B2 Mouth: **PASS**.
+- P10-B3 VoiceSession: **PASS**.
 
 ## Architecture
 
@@ -84,6 +84,32 @@ Synthesis is serialized across VoiceSessions sharing an asyncio loop, matching
 the current Voice Runtime single-request capacity. Playback is instead
 serialized per trusted sink in `SinkRegistry`: sessions using one physical sink
 cannot overlap, while different registered sinks may play independently.
+
+The serialization guarantee is scoped to one `SinkRegistry` instance. All
+VoiceSessions in one process that target the same physical output (for example,
+the Mac speaker) must therefore share the same application-level
+`SinkRegistry` / `OutputRouter` composition. Creating separate registries that
+both represent the same physical sink would create independent locks and would
+not provide cross-session arbitration. P10-B intentionally does not introduce a
+global singleton; sharing the registry is an application-composition contract.
+
+## Acceptance
+
+The accepted Mac proof exercises the complete path:
+
+```text
+VoiceSession
+  -> Mouth
+  -> Voice Orchestrator
+  -> Voice Runtime :8770
+  -> GPT-SoVITS :9880
+  -> MacOSPlaybackSink
+  -> /usr/bin/afplay
+```
+
+The real-device lifecycle completed as:
+`queued -> synthesis_started -> audio_ready -> playback_started -> speech_finished`
+with final state `finished`.
 
 ## Explicit non-goals
 
