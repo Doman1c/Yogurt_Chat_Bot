@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 from ..config import EngineConfig, VoiceProfile
@@ -30,13 +31,13 @@ class GptSovitsAdapter:
         text: str,
         language: str,
         profile: VoiceProfile,
-        speed: float | None,
-    ) -> tuple[dict[str, object], float]:
+        speed: Optional[float],
+    ) -> Tuple[Dict[str, object], float]:
         selected_speed = speed
         if selected_speed is None:
             selected_speed = profile.zh_speed if language == "zh" else profile.ja_speed
 
-        payload: dict[str, object] = {
+        payload: Dict[str, object] = {
             "refer_wav_path": profile.reference_path,
             "prompt_text": profile.reference_text,
             "prompt_language": profile.prompt_language,
@@ -77,7 +78,7 @@ class GptSovitsAdapter:
         text: str,
         language: str,
         profile: VoiceProfile,
-        speed: float | None,
+        speed: Optional[float],
     ) -> SynthesisResult:
         # Import lazily so config/payload tests do not need network dependencies.
         import httpx
