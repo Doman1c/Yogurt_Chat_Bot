@@ -345,6 +345,16 @@ P10 不假设 Brain 与 TTS 永久同时常驻。正式 Runtime 候选需要记�
 
 若内存压力较高，优先设计 warm/unload 策略，而不是降低 Brain context 或牺牲 TTS 音质。
 
+## Current P10 status
+
+- **P10-B1-5 resource acceptance: HOLD.** The current 16 GB Mac shows material
+  swap and memory-compression pressure; this is not changed by the Mouth work.
+- **P10-B1-6 WeChat Auto-TTS: DEFERRED.** WeChat remains a text channel, not
+  the owner of Yogurt's speech boundary.
+- **P10-B2: ACTIVE.** B2-0 introduces the standalone `capabilities/mouth`
+  facade, which reuses Voice Orchestrator without exposing GPT-SoVITS or
+  adding automatic playback.
+
 ## P10-A1 状态
 
 A1 基础验收四项均已满足：
