@@ -14,7 +14,7 @@ Mouth / trusted caller
   -> local audio
 ```
 
-Windows RTX remains a training / adaptation host only. No LAN Voice Bridge is required for normal speech inference.
+Windows RTX remains a training / adaptation host and rollback reference only. No LAN Voice Bridge is required for normal speech inference.
 
 ## Invariants
 
@@ -24,7 +24,7 @@ Windows RTX remains a training / adaptation host only. No LAN Voice Bridge is re
 - Training data, reference audio, GPT/SoVITS checkpoints, and local config remain private and are not committed to Git.
 - WeChat remains a text channel; no OpenClaw or WeChat auto-TTS is enabled.
 - Voice Orchestrator receives already-determined text and does not observe chat.
-- Windows remains the rollback reference until Mac real-runtime E2E passes.
+- Mac real-runtime E2E has passed; Windows remains a training / adaptation and rollback reference rather than the normal speech-inference host.
 
 ## Migration plan
 
@@ -41,7 +41,7 @@ The Windows tree also contains local compatibility / training patches, so Mac mu
 
 ### B1-1 Install inference environment on Apple silicon
 
-Install GPT-SoVITS in a separate Mac environment using the project's Apple-silicon / MPS path. Do not use the Mac as the primary training host.
+Install the pinned GPT-SoVITS revision in a separate Apple-silicon-compatible Mac inference environment. Do not use the Mac as the primary training host.
 
 Mac baseline recorded for migration:
 
@@ -49,6 +49,11 @@ Mac baseline recorded for migration:
 - macOS: `26.5.2`
 - conda: `26.5.3`
 - available disk at start: about `313 GiB`
+- PyTorch MPS availability: **available on the host**
+- accepted pinned GPT-SoVITS v2Pro inference device: **CPU**
+- accepted inference precision: **float32**
+
+Important: MPS availability and an install/launch command that mentions MPS do not prove that the pinned v2Pro inference path actually uses MPS. The accepted P10-B1 baseline is CPU/float32. Do not describe daily v2Pro inference as MPS-backed unless a future source/runtime measurement proves that the inference path has changed.
 
 ### B1-2 Transfer private inference assets
 
@@ -97,7 +102,7 @@ Normal speech generation is inference only. Further GPU training is needed only 
 ## Current status
 
 - **B1-0 Pinned source revision: PASS.**
-- **B1-1 Apple Silicon inference environment: PASS.**
+- **B1-1 Apple Silicon inference environment: PASS.** Accepted v2Pro runtime baseline is CPU/float32; host MPS availability is not treated as proof of MPS inference.
 - **B1-2 Private inference assets transferred: PASS.**
 - **B1-3 GPT-SoVITS Mac loopback proof: PASS.**
 - **B1-4 Voice Runtime Mac E2E: PASS.**
