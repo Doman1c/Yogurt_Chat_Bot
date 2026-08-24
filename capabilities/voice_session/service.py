@@ -38,6 +38,28 @@ class _SynthesisCoordinator:
             cls._locks[loop] = lock
         return lock
 
+    @classmethod
+    async def acquire_or_cancel(cls, cancelled: asyncio.Event) -> asyncio.Lock | None:
+        """Acquire the shared runtime slot unless cancellation wins first."""
+
+        if cancelled.is_set():
+            return None
+        lock = cls.lock()
+        acquire_task = asyncio.create_task(lock.acquire())
+        cancel_task = asyncio.create_task(cancelled.wait())
+        done, pending = await asyncio.wait(
+            {acquire_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        acquired = acquire_task in done and acquire_task.result() is True
+        if not acquired or cancelled.is_set():
+            if acquired:
+                lock.release()
+            return None
+        return lock
+
 
 @dataclass
 class _Job:
@@ -208,11 +230,20 @@ class VoiceSession:
         if job.cancel_requested.is_set():
             self._complete(job, UtteranceState.CANCELLED, "cancelled")
             return
-        job.state = UtteranceState.SYNTHESIZING
-        self._state = VoiceSessionState.SYNTHESIZING
-        self._emit(job, "synthesis_started")
-        async with _SynthesisCoordinator.lock():
+        synthesis_lock = await _SynthesisCoordinator.acquire_or_cancel(job.cancel_requested)
+        if synthesis_lock is None:
+            self._complete(job, UtteranceState.CANCELLED, "cancelled")
+            return
+        try:
+            if job.cancel_requested.is_set():
+                self._complete(job, UtteranceState.CANCELLED, "cancelled")
+                return
+            job.state = UtteranceState.SYNTHESIZING
+            self._state = VoiceSessionState.SYNTHESIZING
+            self._emit(job, "synthesis_started")
             result = await self._mouth.speak(job.request)
+        finally:
+            synthesis_lock.release()
         if job.cancel_requested.is_set():
             self._complete(job, UtteranceState.CANCELLED, "cancelled")
             return

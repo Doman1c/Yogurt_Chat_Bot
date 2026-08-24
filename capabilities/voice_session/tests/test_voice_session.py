@@ -13,6 +13,7 @@ from capabilities.voice_session import (
     VoiceSession,
 )
 from capabilities.voice_session.schemas import UtteranceState, VoiceSessionState
+from capabilities.voice_session.service import _SynthesisCoordinator
 
 
 class FakeMouth:
@@ -86,6 +87,22 @@ class CompletingMouth(FakeMouth):
         result = await super().speak(request)
         self.completed.set()
         return result
+
+
+class ObservedSynthesisLock:
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self.acquire_calls = 0
+        self.second_acquire_started = asyncio.Event()
+
+    async def acquire(self) -> bool:
+        self.acquire_calls += 1
+        if self.acquire_calls == 2:
+            self.second_acquire_started.set()
+        return await self._lock.acquire()
+
+    def release(self) -> None:
+        self._lock.release()
 
 
 def _session(
@@ -252,6 +269,40 @@ def test_cancellation_and_failure_emit_one_terminal_event() -> None:
             "synthesis_started",
             "speech_failed",
         ]
+
+    asyncio.run(run())
+
+
+def test_cancel_while_waiting_for_synthesis_slot_skips_runtime_call() -> None:
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        observed_lock = ObservedSynthesisLock()
+        previous_lock = _SynthesisCoordinator._locks.get(loop)
+        _SynthesisCoordinator._locks[loop] = observed_lock
+        try:
+            active_mouth = FakeMouth()
+            active_mouth.release.clear()
+            waiting_mouth = FakeMouth()
+            active = _session(active_mouth, MemoryPlaybackSink())
+            waiting = _session(waiting_mouth, MemoryPlaybackSink())
+            active_handle = await active.submit(SpeakRequest(text="active"))
+            await active_mouth.started.wait()
+            waiting_handle = await waiting.submit(SpeakRequest(text="waiting"))
+            await observed_lock.second_acquire_started.wait()
+            assert await waiting.cancel(waiting_handle.utterance_id) is True
+            active_mouth.release.set()
+            assert (await active_handle.wait()).state == UtteranceState.FINISHED
+            assert (await waiting_handle.wait()).state == UtteranceState.CANCELLED
+            assert waiting_mouth.requests == []
+            assert _event_kinds(waiting, waiting_handle.utterance_id) == [
+                "queued",
+                "speech_cancelled",
+            ]
+        finally:
+            if previous_lock is None:
+                _SynthesisCoordinator._locks.pop(loop, None)
+            else:
+                _SynthesisCoordinator._locks[loop] = previous_lock
 
     asyncio.run(run())
 

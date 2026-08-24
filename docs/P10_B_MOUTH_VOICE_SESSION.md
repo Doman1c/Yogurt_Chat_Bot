@@ -57,11 +57,12 @@ non-cancellable; a cancelled session discards a later synthesis result.
 Real synthesis streaming is **DEFERRED**. `MouthEvent.audio_chunk` is only a
 future contract and is not emitted by the current complete-WAV runtime.
 
-Mouth emits one bounded lifecycle per utterance: `queued`, `synthesis_started`,
-`audio_ready`, `playback_started`, then `speech_finished`; cancellation and
-failure end with `speech_cancelled` or `speech_failed`. `playback_started` is
-emitted only once a trusted sink has actually begun playback. `audio_chunk` is
-future-only.
+Mouth emits one bounded lifecycle per utterance: `queued`, then
+`synthesis_started` only after it has acquired the shared synthesis slot,
+followed by `audio_ready`, `playback_started`, and `speech_finished`.
+Cancellation and failure end with `speech_cancelled` or `speech_failed`.
+`playback_started` is emitted only once a trusted sink has actually begun
+playback. `audio_chunk` is future-only.
 
 Lip sync is amplitude-only, based on deterministic windowed WAV/PCM RMS frames.
 It does not claim phoneme or viseme recognition and never expands complete PCM
