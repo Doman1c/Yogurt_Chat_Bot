@@ -101,8 +101,12 @@ def load_config(
             f"Voice Runtime config not found. Copy config.example.toml to config.toml: {config_path}"
         )
 
-    with config_path.open("rb") as fh:
-        raw = tomllib.load(fh)
+    # Windows PowerShell 5.1 `Set-Content -Encoding utf8` writes a UTF-8 BOM.
+    # Decode with utf-8-sig so both BOM and non-BOM local config files are accepted.
+    try:
+        raw = tomllib.loads(config_path.read_bytes().decode("utf-8-sig"))
+    except UnicodeDecodeError as exc:
+        raise ConfigError("Voice Runtime config must be UTF-8") from exc
 
     server_raw = _table(raw, "server")
     server = ServerConfig(
