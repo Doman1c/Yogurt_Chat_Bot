@@ -7,7 +7,7 @@ P10-B1 changes the deployment target of the already-accepted Yogurt speech infer
 The long-running production path should be local to the Mac:
 
 ```text
-OpenClaw
+Mouth / trusted caller
   -> Voice Orchestrator
   -> 127.0.0.1:8770 Yogurt Voice Runtime
   -> 127.0.0.1:9880 GPT-SoVITS
@@ -22,7 +22,8 @@ Windows RTX remains a training / adaptation host only. No LAN Voice Bridge is re
 - No Cloud -> Mac inbound access is added.
 - Browser / Cloud never call GPT-SoVITS or Voice Runtime directly.
 - Training data, reference audio, GPT/SoVITS checkpoints, and local config remain private and are not committed to Git.
-- OpenClaw text delivery must remain fail-open if voice generation fails.
+- WeChat remains a text channel; no OpenClaw or WeChat auto-TTS is enabled.
+- Voice Orchestrator receives already-determined text and does not observe chat.
 - Windows remains the rollback reference until Mac real-runtime E2E passes.
 
 ## Migration plan
@@ -83,9 +84,11 @@ Measure Mac memory / swap and latency with both the normal Brain model and GPT-S
 
 Do not reduce Brain context or TTS quality merely to keep both permanently resident.
 
-### B1-6 OpenClaw final-output integration
+### B1-6 WeChat Auto-TTS
 
-Only after Mac-local voice E2E passes, connect the observation-only final-output hook to the local Voice Orchestrator. TTS failure must not block normal text delivery.
+Deferred. WeChat remains a text channel. Voice/Mouth is being developed as a
+standalone Yogurt capability for future Native Chat, Desktop, Live2D, and Robot
+callers; no final-output hook is being connected to WeChat text delivery.
 
 ## Training boundary
 
@@ -93,8 +96,16 @@ Normal speech generation is inference only. Further GPU training is needed only 
 
 ## Current status
 
-- P10-B0 bounded Orchestrator proof: Windows real-runtime accepted.
-- P10-B1 deployment decision: Mac-local runtime selected.
-- LAN Voice Bridge approach: abandoned; do not implement.
-- B1-0 upstream revision pin: complete.
-- Next action: create a clean Mac checkout at the pinned revision and begin the Apple-silicon inference environment install.
+- **B1-0 Pinned source revision: PASS.**
+- **B1-1 Apple Silicon inference environment: PASS.**
+- **B1-2 Private inference assets transferred: PASS.**
+- **B1-3 GPT-SoVITS Mac loopback proof: PASS.**
+- **B1-4 Voice Runtime Mac E2E: PASS.**
+- **B1-5 Resource acceptance: HOLD.** Functional coexistence succeeds, but a
+  16 GiB Mac running qwen3.5:9b with context 4096 plus GPT-SoVITS/Voice Runtime
+  shows material swap and memory-compression pressure. This is not a failure.
+- **B1-6 WeChat Auto-TTS: DEFERRED.** WeChat remains a text channel; Mouth is a
+  standalone Yogurt capability.
+
+Next architecture layers are P10-B2 Mouth and P10-B3 VoiceSession. LAN Voice
+Bridge remains abandoned; do not implement it.
