@@ -29,11 +29,25 @@ Windows RTX remains a training / adaptation host only. No LAN Voice Bridge is re
 
 ### B1-0 Pin source revision
 
-Before installing on Mac, record the exact GPT-SoVITS Git commit used by the working Windows inference environment. Mac should begin from the same upstream revision unless a Mac-specific compatibility fix requires a documented deviation.
+Working Windows GPT-SoVITS upstream revision:
+
+```text
+48b1a0169a28582a8984402f82cf438d3bfa6aca
+Fix Fun-ASR-Nano Transformers requirement (#2824)
+```
+
+The Windows tree also contains local compatibility / training patches, so Mac must start from a clean checkout of this exact upstream revision rather than copying the dirty Windows worktree. Mac-specific deviations, if any, must be documented narrowly.
 
 ### B1-1 Install inference environment on Apple silicon
 
 Install GPT-SoVITS in a separate Mac environment using the project's Apple-silicon / MPS path. Do not use the Mac as the primary training host.
+
+Mac baseline recorded for migration:
+
+- architecture: `arm64`
+- macOS: `26.5.2`
+- conda: `26.5.3`
+- available disk at start: about `313 GiB`
 
 ### B1-2 Transfer private inference assets
 
@@ -82,4 +96,5 @@ Normal speech generation is inference only. Further GPU training is needed only 
 - P10-B0 bounded Orchestrator proof: Windows real-runtime accepted.
 - P10-B1 deployment decision: Mac-local runtime selected.
 - LAN Voice Bridge approach: abandoned; do not implement.
-- Next action: capture the exact working Windows GPT-SoVITS commit SHA, then install the matching revision on Mac.
+- B1-0 upstream revision pin: complete.
+- Next action: create a clean Mac checkout at the pinned revision and begin the Apple-silicon inference environment install.
