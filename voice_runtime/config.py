@@ -4,7 +4,7 @@ import ipaddress
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Tuple
+from typing import Any, Mapping, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 try:
@@ -88,7 +88,9 @@ def _table(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
-def load_config(path: str | os.PathLike[str] | None = None) -> RuntimeConfig:
+def load_config(
+    path: Optional[Union[str, os.PathLike[str]]] = None,
+) -> RuntimeConfig:
     config_path = Path(
         path
         or os.environ.get("YOGURT_VOICE_CONFIG", "")
