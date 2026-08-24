@@ -8,7 +8,12 @@ from voice_runtime.engines.gpt_sovits import GptSovitsAdapter
 from voice_runtime.schemas import SpeechRequest
 
 
-def _write_config(tmp_path: Path, server_host: str = "127.0.0.1", engine_url: str = "http://127.0.0.1:9880") -> Path:
+def _write_config(
+    tmp_path: Path,
+    server_host: str = "127.0.0.1",
+    engine_url: str = "http://127.0.0.1:9880",
+    encoding: str = "utf-8",
+) -> Path:
     path = tmp_path / "config.toml"
     path.write_text(
         f'''[server]
@@ -39,9 +44,15 @@ max_text_chars = 500
 max_request_seconds = 180
 max_concurrent_requests = 1
 ''',
-        encoding="utf-8",
+        encoding=encoding,
     )
     return path
+
+
+def test_config_accepts_utf8_bom(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, encoding="utf-8-sig"))
+    assert config.default_profile == "yogurt"
+    assert config.profiles["yogurt"].zh_speed == pytest.approx(1.13)
 
 
 def test_config_requires_loopback_server(tmp_path: Path) -> None:
