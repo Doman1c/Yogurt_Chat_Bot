@@ -28,7 +28,7 @@ reference_path = "E:/private/reference.wav"
 reference_text = "reference text"
 prompt_language = "ja"
 extra_reference_paths = ["E:/private/extra1.wav", "E:/private/extra2.wav"]
-zh_speed = 1.10
+zh_speed = 1.13
 ja_speed = 1.02
 top_k = 15
 top_p = 1.0
@@ -61,7 +61,7 @@ def test_payload_uses_fixed_profile_references_and_language_speed() -> None:
         reference_text="キリト君の手、なんだかあったかいね。",
         prompt_language="ja",
         extra_reference_paths=("E:/private/a.wav", "E:/private/b.wav"),
-        zh_speed=1.10,
+        zh_speed=1.13,
         ja_speed=1.02,
     )
     adapter = GptSovitsAdapter(EngineConfig())
@@ -79,7 +79,7 @@ def test_payload_uses_fixed_profile_references_and_language_speed() -> None:
         speed=None,
     )
 
-    assert zh_speed == pytest.approx(1.10)
+    assert zh_speed == pytest.approx(1.13)
     assert ja_speed == pytest.approx(1.02)
     assert zh_payload["refer_wav_path"] == "E:/private/main.wav"
     assert zh_payload["prompt_language"] == "ja"
