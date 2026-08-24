@@ -6,8 +6,9 @@ from pydantic import BaseModel, Field
 
 MouthEventKind = Literal[
     "queued",
-    "speech_started",
+    "synthesis_started",
     "audio_ready",
+    "playback_started",
     "audio_chunk",
     "speech_finished",
     "speech_cancelled",

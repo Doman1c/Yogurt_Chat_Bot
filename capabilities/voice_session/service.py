@@ -210,7 +210,7 @@ class VoiceSession:
             return
         job.state = UtteranceState.SYNTHESIZING
         self._state = VoiceSessionState.SYNTHESIZING
-        self._emit(job, "speech_started")
+        self._emit(job, "synthesis_started")
         async with _SynthesisCoordinator.lock():
             result = await self._mouth.speak(job.request)
         if job.cancel_requested.is_set():
@@ -228,9 +228,10 @@ class VoiceSession:
         except Exception:
             self._complete(job, UtteranceState.FAILED, "playback_failed")
             return
-        job.state = UtteranceState.PLAYING
-        self._state = VoiceSessionState.PLAYING
-        self._emit(job, "speech_started")
+        if await job.playback.wait_started():
+            job.state = UtteranceState.PLAYING
+            self._state = VoiceSessionState.PLAYING
+            self._emit(job, "playback_started")
         playback_state = await job.playback.wait()
         if playback_state == PlaybackState.FINISHED:
             self._complete(job, UtteranceState.FINISHED)
@@ -277,7 +278,7 @@ class VoiceSession:
 
 
 class _UnavailableSink:
-    async def play(self, artifact: AudioArtifact, cancelled: asyncio.Event) -> None:
+    async def play(self, artifact: AudioArtifact, cancelled: asyncio.Event, mark_started) -> None:
         raise RuntimeError("unavailable")
 
 

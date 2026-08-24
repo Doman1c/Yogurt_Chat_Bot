@@ -6,7 +6,7 @@ import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .errors import PlaybackError
 
@@ -41,13 +41,19 @@ class PlaybackState(str, Enum):
 class PlaybackSink(Protocol):
     """Trusted local output target. Callers select only registered sink IDs."""
 
-    async def play(self, artifact: AudioArtifact, cancelled: asyncio.Event) -> None:
+    async def play(
+        self,
+        artifact: AudioArtifact,
+        cancelled: asyncio.Event,
+        mark_started: Callable[[], None],
+    ) -> None:
         """Play an artifact or return after cancellation."""
 
 
 class PlaybackHandle:
     def __init__(self) -> None:
         self._cancelled = asyncio.Event()
+        self._started = asyncio.Event()
         self._done = asyncio.Event()
         self._state = PlaybackState.PENDING
         self._error_code: str | None = None
@@ -69,6 +75,22 @@ class PlaybackHandle:
     async def wait(self) -> PlaybackState:
         await self._done.wait()
         return self._state
+
+    async def wait_started(self) -> bool:
+        started_task = asyncio.create_task(self._started.wait())
+        done_task = asyncio.create_task(self._done.wait())
+        done, pending = await asyncio.wait(
+            {started_task, done_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        return started_task in done and self._started.is_set()
+
+    def _mark_started(self) -> None:
+        if not self._cancelled.is_set() and not self._done.is_set():
+            self._state = PlaybackState.PLAYING
+            self._started.set()
 
     def _set_state(self, state: PlaybackState, error_code: str | None = None) -> None:
         self._state = state
@@ -95,9 +117,8 @@ class PlaybackController:
         if handle._cancelled.is_set():
             handle._set_state(PlaybackState.CANCELLED)
             return
-        handle._set_state(PlaybackState.PLAYING)
         try:
-            await sink.play(artifact, handle._cancelled)
+            await sink.play(artifact, handle._cancelled, handle._mark_started)
         except PlaybackError as error:
             handle._set_state(PlaybackState.FAILED, str(error))
         except Exception:
@@ -133,10 +154,16 @@ class MemoryPlaybackSink:
     def release(self) -> asyncio.Event:
         return self._events()[1]
 
-    async def play(self, artifact: AudioArtifact, cancelled: asyncio.Event) -> None:
+    async def play(
+        self,
+        artifact: AudioArtifact,
+        cancelled: asyncio.Event,
+        mark_started: Callable[[], None],
+    ) -> None:
         started, release = self._events()
         self.artifacts.append(artifact)
         started.set()
+        mark_started()
         release_task = asyncio.create_task(release.wait())
         cancel_task = asyncio.create_task(cancelled.wait())
         done, pending = await asyncio.wait(
@@ -154,7 +181,12 @@ class MacOSPlaybackSink:
 
     EXECUTABLE = "/usr/bin/afplay"
 
-    async def play(self, artifact: AudioArtifact, cancelled: asyncio.Event) -> None:
+    async def play(
+        self,
+        artifact: AudioArtifact,
+        cancelled: asyncio.Event,
+        mark_started: Callable[[], None],
+    ) -> None:
         artifact.validate()
         if not os.path.isfile(self.EXECUTABLE):
             raise PlaybackError("playback_unavailable")
@@ -172,6 +204,7 @@ class MacOSPlaybackSink:
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
+                mark_started()
             except OSError as error:
                 raise PlaybackError("playback_unavailable") from error
 

@@ -67,9 +67,10 @@ Synthesis is separate from playback. A future `PlaybackController` can choose
 Mac speakers, Live2D, a robot speaker, or a streaming client without changing
 the Mouth synthesis contract.
 
-`MouthEvent` reserves `speech_started`, `audio_ready`, `audio_chunk`, and
-terminal lifecycle signals. Real synthesis streaming is **DEFERRED**: current
-A3 returns complete audio only and does not emit `audio_chunk`.
+`MouthEvent` emits `synthesis_started` before calling the runtime and
+`playback_started` only after a trusted sink has actually started playback.
+`audio_chunk` remains reserved for a future streaming runtime and is not
+emitted by the current full-audio synthesis path.
 
 `amplitude_envelope()` provides deterministic, standard-library WAV/PCM RMS
 frames for future mouth-open animation. Amplitude lipsync is not phoneme or

@@ -64,7 +64,7 @@ def test_macos_sink_uses_fixed_argv_and_cleans_temp_file(tmp_path) -> None:
             with patch("tempfile.NamedTemporaryFile") as temporary:
                 handle = temporary.return_value.__enter__.return_value
                 handle.name = str(tmp_path / "voice.wav")
-                await sink.play(_artifact(), cancelled)
+                await sink.play(_artifact(), cancelled, lambda: None)
         assert create_process.await_args.args[0] == "/usr/bin/afplay"
         assert create_process.await_args.args[1] == str(tmp_path / "voice.wav")
 
@@ -98,7 +98,7 @@ def test_macos_sink_terminates_fixed_child_on_cancellation(tmp_path) -> None:
         ), patch("tempfile.NamedTemporaryFile") as temporary:
             handle = temporary.return_value.__enter__.return_value
             handle.name = str(tmp_path / "voice.wav")
-            task = asyncio.create_task(sink.play(_artifact(), cancelled))
+            task = asyncio.create_task(sink.play(_artifact(), cancelled, lambda: None))
             await process.wait_started.wait()
             cancelled.set()
             await task

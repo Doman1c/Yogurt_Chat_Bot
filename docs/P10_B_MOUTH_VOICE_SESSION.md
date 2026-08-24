@@ -57,8 +57,15 @@ non-cancellable; a cancelled session discards a later synthesis result.
 Real synthesis streaming is **DEFERRED**. `MouthEvent.audio_chunk` is only a
 future contract and is not emitted by the current complete-WAV runtime.
 
-Lip sync is amplitude-only, based on deterministic WAV/PCM RMS frames. It does
-not claim phoneme or viseme recognition.
+Mouth emits one bounded lifecycle per utterance: `queued`, `synthesis_started`,
+`audio_ready`, `playback_started`, then `speech_finished`; cancellation and
+failure end with `speech_cancelled` or `speech_failed`. `playback_started` is
+emitted only once a trusted sink has actually begun playback. `audio_chunk` is
+future-only.
+
+Lip sync is amplitude-only, based on deterministic windowed WAV/PCM RMS frames.
+It does not claim phoneme or viseme recognition and never expands complete PCM
+audio into a Python float list.
 
 ## B3 contract
 
@@ -72,8 +79,10 @@ only a known sink ID; no URL, URI, LAN discovery, command, or device path is
 accepted. Snapshots and bounded lifecycle events omit text, audio, prompts,
 reference paths, and backend detail.
 
-Speech is serialized across VoiceSessions sharing an asyncio loop, matching the
-current Voice Runtime single-request capacity.
+Synthesis is serialized across VoiceSessions sharing an asyncio loop, matching
+the current Voice Runtime single-request capacity. Playback is instead
+serialized per trusted sink in `SinkRegistry`: sessions using one physical sink
+cannot overlap, while different registered sinks may play independently.
 
 ## Explicit non-goals
 
