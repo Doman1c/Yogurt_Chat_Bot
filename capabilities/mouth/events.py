@@ -4,10 +4,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from .schemas import MouthErrorCode
-
-
 MouthEventKind = Literal[
+    "queued",
     "speech_started",
     "audio_ready",
     "audio_chunk",
@@ -28,4 +26,6 @@ class MouthEvent(BaseModel):
     utterance_id: str = Field(min_length=1, max_length=64)
     kind: MouthEventKind
     timestamp_ms: int = Field(ge=0)
-    error_code: Optional[MouthErrorCode] = None
+    # Shared by Mouth and VoiceSession. It is a bounded identifier, never an
+    # upstream body, local path, command, or exception message.
+    error_code: Optional[str] = Field(default=None, max_length=64, pattern=r"^[a-z_]+$")

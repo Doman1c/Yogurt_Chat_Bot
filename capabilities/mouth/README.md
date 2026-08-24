@@ -74,3 +74,10 @@ A3 returns complete audio only and does not emit `audio_chunk`.
 `amplitude_envelope()` provides deterministic, standard-library WAV/PCM RMS
 frames for future mouth-open animation. Amplitude lipsync is not phoneme or
 viseme lipsync; this phase deliberately does not infer A/I/U/E/O mouth shapes.
+
+## VoiceSession
+
+`capabilities.voice_session.VoiceSession` sits above Mouth when a caller needs
+queueing, priority, trusted sink routing, playback cancellation, and safe
+observability. Its `session_id` and opaque utterance IDs are Yogurt voice IDs;
+they are never WeChat or OpenClaw session/message identifiers.

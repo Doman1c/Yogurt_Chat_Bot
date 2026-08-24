@@ -113,15 +113,31 @@ class MemoryPlaybackSink:
 
     def __init__(self, *, block: bool = False) -> None:
         self.artifacts: list[AudioArtifact] = []
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
-        if not block:
-            self.release.set()
+        self._block = block
+        self._started: asyncio.Event | None = None
+        self._release: asyncio.Event | None = None
+
+    def _events(self) -> tuple[asyncio.Event, asyncio.Event]:
+        if self._started is None or self._release is None:
+            self._started = asyncio.Event()
+            self._release = asyncio.Event()
+            if not self._block:
+                self._release.set()
+        return self._started, self._release
+
+    @property
+    def started(self) -> asyncio.Event:
+        return self._events()[0]
+
+    @property
+    def release(self) -> asyncio.Event:
+        return self._events()[1]
 
     async def play(self, artifact: AudioArtifact, cancelled: asyncio.Event) -> None:
+        started, release = self._events()
         self.artifacts.append(artifact)
-        self.started.set()
-        release_task = asyncio.create_task(self.release.wait())
+        started.set()
+        release_task = asyncio.create_task(release.wait())
         cancel_task = asyncio.create_task(cancelled.wait())
         done, pending = await asyncio.wait(
             {release_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
