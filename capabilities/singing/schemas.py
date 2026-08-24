@@ -61,3 +61,28 @@ class BakeoffRecord(BaseModel):
     sample_rate: Optional[int] = Field(default=None, ge=8000, le=192000)
     success: bool
     error_code: Optional[SingingErrorCode] = None
+
+
+class BakeoffRunManifest(BaseModel):
+    """Non-sensitive, machine-readable record of one local bake-off invocation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9-]+$")
+    engine: str = Field(min_length=1, max_length=32)
+    engine_revision: str = Field(min_length=1, max_length=64)
+    sample_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    language: Literal["zh", "ja", "en"]
+    source_duration_ms: int = Field(ge=0)
+    wall_time_ms: int = Field(ge=0)
+    output_duration_ms: Optional[int] = Field(default=None, ge=0)
+    sample_rate: Optional[int] = Field(default=None, ge=8000, le=192000)
+    transpose_semitones: int = Field(ge=-12, le=12)
+    peak_ram_mib: Optional[float] = Field(default=None, ge=0)
+    peak_vram_mib: Optional[float] = Field(default=None, ge=0)
+    f0_correlation: Optional[float] = Field(default=None, ge=-1, le=1)
+    f0_rmse_cents: Optional[float] = Field(default=None, ge=0)
+    voiced_unvoiced_agreement: Optional[float] = Field(default=None, ge=0, le=1)
+    duration_ratio: Optional[float] = Field(default=None, gt=0)
+    success: bool
+    error_code: Optional[SingingErrorCode] = None

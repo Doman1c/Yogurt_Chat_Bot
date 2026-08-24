@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "profile_id": "yogurt-singer-v1",
+  "authorization_status": "confirmed_by_owner",
+  "clips": [
+    {
+      "asset_id": "yogurt-sing-001",
+      "duration_seconds": 8.2,
+      "sample_rate": 44100,
+      "language": "zh",
+      "type": "singing",
+      "pitch_low_hz": 165.0,
+      "pitch_high_hz": 523.3,
+      "noise_notes": "clean"
+    }
+  ],
+  "summary": {
+    "authorized_singing_minutes": 0.14,
+    "authorized_speech_minutes": 0.0,
+    "clip_count": 1,
+    "training_gate": "DATASET_INSUFFICIENT_FOR_FINAL_SINGER"
+  }
+}
