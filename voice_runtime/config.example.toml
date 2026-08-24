@@ -3,20 +3,28 @@ host = "127.0.0.1"
 port = 8770
 
 [engine]
-type = "cosyvoice3"
-model = "Fun-CosyVoice3-0.5B-2512"
-streaming = false
+type = "gpt_sovits"
+base_url = "http://127.0.0.1:9880"
+timeout_seconds = 180
 
 [voice]
 default_profile = "yogurt"
-default_emotion = "neutral"
-default_speed = 1.0
+
+[profiles.yogurt]
+reference_path = "E:/REPLACE_WITH_PRIVATE_REFERENCE.wav"
+reference_text = "REPLACE_WITH_EXACT_REFERENCE_TRANSCRIPT"
+prompt_language = "ja"
+extra_reference_paths = [
+  "E:/REPLACE_WITH_PRIVATE_EXTRA_REFERENCE_1.wav",
+  "E:/REPLACE_WITH_PRIVATE_EXTRA_REFERENCE_2.wav",
+]
+zh_speed = 1.13
+ja_speed = 1.02
+top_k = 15
+top_p = 1.0
+temperature = 1.0
 
 [limits]
 max_text_chars = 500
 max_request_seconds = 180
 max_concurrent_requests = 1
-
-[privacy]
-allow_remote_bind = false
-persist_generated_audio = false

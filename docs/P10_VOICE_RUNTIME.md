@@ -127,12 +127,14 @@ POST /v1/speech
   "voice": "yogurt",
   "emotion": "happy",
   "intensity": 0.7,
-  "speed": 1.0,
+  "speed": null,
   "stream": false
 }
 ```
 
 第一版允许 `emotion` 仅作为受限 hint；不要求引擎必须实现全部情绪。
+
+当前实机基线：GPT e15 + SoVITS e4，中文默认速度 1.13，1 个主参考 + 10 个额外参考。Windows real-runtime E2E 已通过，PR 尚待显式合并批准。
 
 ### P10-B Voice Orchestrator
 
@@ -183,6 +185,81 @@ Mic -> VAD -> STT -> text -> Qwen -> text -> TTS -> audio
 
 STT 文本才进入 16k context；PCM/WAV 不进入 LLM context。
 
+### P10-F Singing / Singer Runtime（开发清单）
+
+唱歌与普通 TTS 分开实现，不把 GPT-SoVITS speech checkpoint 强行当作唱歌引擎。第一阶段优先做翻唱 Voice Conversion，之后再做歌词 + MIDI 的原生歌声合成。
+
+#### P10-F1 Yogurt RVC Singer proof
+
+- 复用已经整理好的本地干净声线素材做第一版 RVC singer 训练 / proof；
+- Windows CUDA 主机负责训练与实机推理；
+- 先验证音色保真、长音、高音和气声稳定性；
+- 若现有约 5 分钟素材覆盖不足，再补充到更完整的 singer dataset；
+- RVC 模型、index、训练素材全部保持本地私有，不进入 Git。
+
+#### P10-F2 Cover pipeline
+
+```text
+Song
+  ↓
+UVR / source separation
+  ↓
+Source Vocal
+  ↓
+Yogurt RVC Singer
+  ↓
+Converted Vocal
+  ↓
+Mix with Instrumental
+  ↓
+Yogurt Cover.wav
+```
+
+优先复用现有 UVR5 / 人声分离经验，不改动已经稳定的 GPT-SoVITS speech runtime。
+
+#### P10-F3 Singing Runtime typed API
+
+为翻唱单独提供本地 typed runtime，例如：
+
+```text
+127.0.0.1:<singing-port>
+POST /v1/cover
+```
+
+调用方只能传 allowlisted `song_id` / `singer=yogurt` / bounded transpose 等参数；不允许任意文件路径、任意模型路径、任意命令或远端 endpoint。
+
+#### P10-F4 Singing Orchestrator
+
+OpenClaw 只产生高层、受限的唱歌意图：
+
+```text
+song_id
++
+singer=yogurt
++
+bounded transpose / render mode
+->
+Singing Runtime
+```
+
+Browser / Cloud 不直连 singing runtime，仍维持本地私有边界。
+
+#### P10-F5 Native singing synthesis
+
+翻唱链路稳定后，再评估 DiffSinger / OpenVPI 一类 Singing Voice Synthesis：
+
+```text
+lyrics
++
+MIDI / note sequence
+->
+Yogurt native singing model
+->
+Vocal
+```
+
+该阶段才进入 pitch / duration / energy / breathiness 等显式歌声控制。它与普通聊天 TTS、RVC cover pipeline 保持独立 adapter，以便后续替换模型而不影响上层。
+
 ## 运行架构
 
 ```text
@@ -208,7 +285,7 @@ User / WeChat
      +-- Text normalization                 |
      +-- Voice Profile: yogurt              |
      +-- TTS Engine Adapter                 |
-     |      +-- GPT-SoVITS (A2 candidate)   |
+     |      +-- GPT-SoVITS                  |
      |      +-- CosyVoice3 (A1 prototype)   |
      |      +-- future engine               |
      |                                      |
@@ -277,4 +354,4 @@ A1 基础验收四项均已满足：
 3. 可输入中文文本；
 4. 可生成本地 WAV，且不经过云端 TTS。
 
-但 A1 的实听质量不足以封为酸奶正式中文声线，因此 P10 当前进入 A2 speaker adaptation / few-shot 训练验证。
+但 A1 的实听质量不足以封为酸奶正式中文声线，因此后续正式中文声线已转入 GPT-SoVITS speaker adaptation 路线。
