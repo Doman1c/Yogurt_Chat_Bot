@@ -10,8 +10,10 @@ sample ID, engine name, language, and bounded transpose.
 
 The adapters use `asyncio.create_subprocess_exec`, fixed argv, fixed working
 directory, timeout, private temporary inputs/outputs, suppressed raw backend
-stdio, and strict PCM WAV validation. Failed process output and private paths
-never reach `SingingResult`, events, or the portable `BakeoffRunManifest`.
+stdio, and strict PCM WAV validation. Event cancellation terminates the child;
+external `Task.cancel()` terminates it, waits with kill fallback, and preserves
+`asyncio.CancelledError`. Failed process output and private paths never reach
+`SingingResult`, events, or the portable `BakeoffRunManifest`.
 
 ## Asset protocol and metrics
 
@@ -63,27 +65,32 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-Before any model transfer, run the official-host preflight and stop if all
-selected/transitive downloads exceed 8 GiB or a single file exceeds 4 GiB:
+Before any model transfer, inventory all selected/transitive dependencies and
+stop if all selected downloads exceed 8 GiB or a single file exceeds 4 GiB.
+For Seed-VC this includes the DiT/config, RMVPE, CAMPPlus, BigVGAN, and Whisper
+Small—not only the main checkpoint. The pinned source has implicit Hugging Face
+loads, so direct inference before local inventory is prohibited. Begin with
+official-host dry runs, for example:
 
 ```powershell
 hf download Plachta/Seed-VC DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema.pth --dry-run
 ```
 
-After the user has placed only authorized 15–30 second WAVs in the private
-runtime and the size preflight is within budget, copy the committed example to
-the ignored local config, replace placeholders, then run:
+After all approved files are explicitly prepared in their private local cache,
+verify the exact source checkout, copy the committed example to the ignored
+local config, replace placeholders, then first run the no-GPU readiness gate:
 
 ```powershell
 Set-Location 'C:\path\to\Yogurt_Chat_Bot'
 Copy-Item singing_runtime\config.example.toml singing_runtime\config.toml
-& 'E:\Yogurt_Singing_Runtime\envs\seedvc\Scripts\python.exe' -m capabilities.singing.bakeoff_cli --sample-id zh-proto --engine seed_vc --language zh --transpose 0
+& 'E:\Yogurt_Singing_Runtime\envs\seedvc\Scripts\python.exe' -m capabilities.singing.bakeoff_cli --sample-id zh-proto --engine seed_vc --language zh --transpose 0 --preflight-only
 ```
 
-Listen to the resulting private WAV before assigning quality. A technical WAV
+Only after `READY`, run the same command without `--preflight-only` to create
+the private short proof WAV. Listen before assigning quality. A technical WAV
 without Yogurt-like identity is `FUNCTIONAL_PASS_QUALITY_HOLD`, not quality
 pass. No full song, parameter sweep, or training should start before this
-short proof succeeds.
+short proof succeeds. See [P10_S3_RUNTIME_PREFLIGHT.md](P10_S3_RUNTIME_PREFLIGHT.md).
 
 ## RVC and Vevo2 gates
 

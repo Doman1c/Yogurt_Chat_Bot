@@ -8,7 +8,12 @@ from pathlib import Path
 from ..assets import InstrumentalArtifact, SeparatedSong, SongAsset
 from ..errors import SingingError
 from ..engines.runtime import (
+    RuntimeModelDependency,
+    RuntimePreflightFailure,
     TrustedRuntimeConfig,
+    TrustedProcessFailure,
+    offline_environment,
+    preflight_runtime,
     read_validated_wav,
     require_absolute_file,
     run_trusted_process,
@@ -20,6 +25,8 @@ class DemucsBackendConfig:
     """Application-owned local Demucs command composition."""
 
     runtime: TrustedRuntimeConfig
+    revision: str
+    model_dependency: RuntimeModelDependency
     model_name: str = "htdemucs"
 
     def __post_init__(self) -> None:
@@ -35,17 +42,30 @@ class DemucsSeparator:
     def __init__(self, config: DemucsBackendConfig | None = None) -> None:
         self._config = config
 
+    async def preflight(self) -> str:
+        config = self._config
+        if config is None:
+            raise SingingError("separator_unavailable")
+        try:
+            require_absolute_file(config.runtime.python_executable, label="python_executable")
+            return await preflight_runtime(
+                config.runtime, config.revision, (config.model_dependency,)
+            )
+        except (RuntimePreflightFailure, SingingError):
+            raise SingingError("separator_unavailable") from None
+
     async def separate(self, asset: SongAsset, cancelled: asyncio.Event) -> SeparatedSong:
         config = self._config
         if config is None:
             raise SingingError("separator_unavailable")
-        require_absolute_file(config.runtime.python_executable, label="python_executable")
+        await self.preflight()
         if not asset.local_path.is_file():
             raise SingingError("unknown_asset")
         with tempfile.TemporaryDirectory(prefix="yogurt-demucs-") as temp_dir:
             output_root = Path(temp_dir)
-            await run_trusted_process(
-                (
+            try:
+                await run_trusted_process(
+                    (
                     config.runtime.python_executable,
                     "-m",
                     "demucs.separate",
@@ -57,9 +77,13 @@ class DemucsSeparator:
                     output_root,
                     asset.local_path,
                 ),
-                config.runtime,
-                cancelled,
-            )
+                    config.runtime,
+                    cancelled,
+                    environment=offline_environment(),
+                )
+            except TrustedProcessFailure as error:
+                code = "separator_unavailable" if error.kind == "spawn" else "separation_failed"
+                raise SingingError(code) from None
             stem_root = output_root / config.model_name / asset.local_path.stem
             try:
                 vocal = read_validated_wav(

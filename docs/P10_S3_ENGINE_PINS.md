@@ -10,8 +10,12 @@ been downloaded, installed, or exercised locally.
 - Archived: yes; GitHub reports the repository as archived. Do not treat it as
   a maintained production dependency.
 - Source license: GPL-3.0.
-- SVC model: `DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema.pth`,
-  44.1 kHz, F0-conditioned Seed-VC V1 SVC path.
+- Selected first-proof SVC model:
+  `DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema_v2.pth`, 44.1
+  kHz, F0-conditioned Seed-VC V1 SVC path.
+- Upstream's pinned `inference.py` default for F0 mode is the same
+  `...ft_ema_v2.pth`. Earlier P10-S3 documentation named the older
+  `...ft_ema.pth`; it is not selected for first proof and no A/B was run.
 - Official model source: <https://huggingface.co/Plachta/Seed-VC>.
 - Checkpoint size: 820,864,573 bytes (about 821 MB) for the selected SVC
   checkpoint. The model repository total is about 3.94 GB; inspect all
@@ -26,6 +30,13 @@ been downloaded, installed, or exercised locally.
   CUDA wheel deliberately rather than relying on an implicit install.
 - CUDA: NVIDIA GPU recommended for practical performance; no VRAM claim is
   recorded until an authorized benchmark is run.
+- Offline dependency inventory: selected DiT checkpoint/config plus RMVPE
+  (`lj1995/VoiceConversionWebUI/rmvpe.pt`), CAMPPlus
+  (`funasr/campplus/campplus_cn_common.bin`), BigVGAN
+  (`nvidia/bigvgan_v2_44khz_128band_512x`), and Whisper Small
+  (`openai/whisper-small`). The pinned upstream calls Hugging Face and
+  `from_pretrained` for these at inference time; all must be explicitly cached
+  and declared before P10-S3 permits process launch.
 - Mac: upstream documents Apple Silicon support, but P10-S3 status is
   **UNKNOWN** without a real benchmark.
 - Windows RTX 4080: expected first proof host; **READY FOR RUNTIME SETUP**.

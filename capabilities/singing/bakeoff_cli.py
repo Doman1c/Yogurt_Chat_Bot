@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -19,7 +20,7 @@ from .assets import VocalArtifact
 from .engines import RVCAdapter, SeedVCAdapter, Vevo2Adapter
 from .engines.base import ConversionOptions, SingingConversionEngine
 from .engines.rvc import RVCBackendConfig
-from .engines.runtime import TrustedRuntimeConfig, read_validated_wav
+from .engines.runtime import RuntimeModelDependency, TrustedRuntimeConfig, read_validated_wav
 from .engines.seed_vc import SeedVCBackendConfig
 from .engines.vevo2 import Vevo2BackendConfig
 from .errors import SingingError
@@ -32,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--engine", required=True, choices=("seed_vc", "rvc", "vevo2"))
     parser.add_argument("--language", required=True, choices=("zh", "ja", "en"))
     parser.add_argument("--transpose", type=int, default=0, choices=range(-12, 13))
+    parser.add_argument("--preflight-only", action="store_true")
     return parser
 
 
@@ -51,6 +53,8 @@ def _load_toml(path: Path) -> dict[str, Any]:
 
 
 def _path(value: Any) -> Path:
+    if not isinstance(value, str):
+        raise RuntimeError("invalid_private_runtime_config")
     path = Path(str(value))
     if not path.is_absolute():
         raise RuntimeError("private runtime paths must be absolute")
@@ -58,65 +62,138 @@ def _path(value: Any) -> Path:
 
 
 def _runtime(values: dict[str, Any]) -> TrustedRuntimeConfig:
-    return TrustedRuntimeConfig(
-        python_executable=_path(values["python_executable"]),
-        working_directory=_path(values["working_directory"]),
-        timeout_seconds=float(values.get("timeout_seconds", 180)),
-        max_output_bytes=int(values.get("max_output_bytes", 16 * 1024 * 1024)),
-        max_output_duration_ms=int(values.get("max_output_duration_ms", 70_000)),
-    )
+    try:
+        return TrustedRuntimeConfig(
+            python_executable=_path(values["python_executable"]),
+            working_directory=_path(values["working_directory"]),
+            timeout_seconds=float(values.get("timeout_seconds", 180)),
+            max_output_bytes=int(values.get("max_output_bytes", 16 * 1024 * 1024)),
+            max_output_duration_ms=int(values.get("max_output_duration_ms", 70_000)),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("invalid_private_runtime_config") from error
+
+
+def _dependencies(values: dict[str, Any]) -> tuple[RuntimeModelDependency, ...]:
+    raw_dependencies = values.get("dependencies", {})
+    if not isinstance(raw_dependencies, dict):
+        raise RuntimeError("invalid_private_runtime_config")
+    try:
+        dependencies = []
+        for component_id, details in sorted(raw_dependencies.items()):
+            if not isinstance(details, dict):
+                raise ValueError("invalid_private_runtime_config")
+            required = details.get("required", True)
+            source_revision = details.get("source_revision")
+            expected_size_bytes = details.get("expected_size_bytes")
+            if (
+                not isinstance(required, bool)
+                or source_revision is not None
+                and not isinstance(source_revision, str)
+                or expected_size_bytes is not None
+                and (not isinstance(expected_size_bytes, int) or isinstance(expected_size_bytes, bool))
+            ):
+                raise ValueError("invalid_private_runtime_config")
+            dependencies.append(
+                RuntimeModelDependency(
+                    component_id=component_id,
+                    local_path=_path(details["local_path"]),
+                    required=required,
+                    source_revision=source_revision,
+                    expected_size_bytes=expected_size_bytes,
+                )
+            )
+        return tuple(dependencies)
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("invalid_private_runtime_config") from error
 
 
 def _engine(data: dict[str, Any], name: str, runtime: TrustedRuntimeConfig) -> SingingConversionEngine:
-    values = data["engines"][name]
-    revision = str(values["revision"])
-    if name == "seed_vc":
-        return SeedVCAdapter(
-            SeedVCBackendConfig(
+    try:
+        values = data["engines"][name]
+        profile = data["profile"]
+        if not isinstance(values, dict) or not isinstance(profile, dict):
+            raise ValueError("invalid_private_runtime_config")
+        revision = values["revision"]
+        if not isinstance(revision, str):
+            raise ValueError("invalid_private_runtime_config")
+        dependencies = _dependencies(values)
+        if name == "seed_vc":
+            return SeedVCAdapter(
+                SeedVCBackendConfig(
+                    runtime=runtime,
+                    inference_script=_path(values["inference_script"]),
+                    checkpoint=_path(values["checkpoint"]),
+                    model_config=_path(values["model_config"]),
+                    reference_audio=_path(profile["reference_audio"]),
+                    dependencies=dependencies,
+                    diffusion_steps=int(values.get("diffusion_steps", 30)),
+                    inference_cfg_rate=float(values.get("inference_cfg_rate", 0.7)),
+                ),
+                revision=revision,
+            )
+        if name == "rvc":
+            index = values.get("index")
+            return RVCAdapter(
+                RVCBackendConfig(
+                    runtime=runtime,
+                    cli_script=_path(values["cli_script"]),
+                    model=_path(values["model"]),
+                    index=_path(index) if index else None,
+                    dependencies=dependencies,
+                    speaker_id=int(values.get("speaker_id", 0)),
+                    index_rate=float(values.get("index_rate", 0.75)),
+                ),
+                revision=revision,
+            )
+        return Vevo2Adapter(
+            Vevo2BackendConfig(
                 runtime=runtime,
-                inference_script=_path(values["inference_script"]),
-                checkpoint=_path(values["checkpoint"]),
-                model_config=_path(values["model_config"]),
-                reference_audio=_path(data["profile"]["reference_audio"]),
-                diffusion_steps=int(values.get("diffusion_steps", 30)),
-                inference_cfg_rate=float(values.get("inference_cfg_rate", 0.7)),
+                runner_script=_path(values["runner_script"]),
+                amphion_root=_path(values["amphion_root"]),
+                model_root=_path(values["model_root"]),
+                reference_audio=_path(profile["reference_audio"]),
+                dependencies=dependencies,
             ),
             revision=revision,
         )
-    if name == "rvc":
-        index = values.get("index")
-        return RVCAdapter(
-            RVCBackendConfig(
-                runtime=runtime,
-                cli_script=_path(values["cli_script"]),
-                model=_path(values["model"]),
-                index=_path(index) if index else None,
-                speaker_id=int(values.get("speaker_id", 0)),
-                index_rate=float(values.get("index_rate", 0.75)),
-            ),
-            revision=revision,
-        )
-    return Vevo2Adapter(
-        Vevo2BackendConfig(
-            runtime=runtime,
-            runner_script=_path(values["runner_script"]),
-            amphion_root=_path(values["amphion_root"]),
-            model_root=_path(values["model_root"]),
-            reference_audio=_path(data["profile"]["reference_audio"]),
-        ),
-        revision=revision,
-    )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("invalid_private_runtime_config") from error
+
+
+async def _preflight(
+    args: argparse.Namespace, config_path: Path
+) -> tuple[SingingConversionEngine, VocalArtifact, TrustedRuntimeConfig, Path, str]:
+    if re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", args.sample_id) is None:
+        raise SingingError("invalid_request")
+    try:
+        data = _load_toml(config_path)
+        engines = data["engines"]
+        samples = data["samples"]
+        outputs = data["outputs"]
+        if not isinstance(engines, dict) or not isinstance(samples, dict) or not isinstance(outputs, dict):
+            raise ValueError("invalid_private_runtime_config")
+        engine_values = engines[args.engine]
+        sample = samples[args.sample_id]
+        if not isinstance(engine_values, dict) or not isinstance(sample, dict):
+            raise ValueError("invalid_private_runtime_config")
+        if sample["language"] != args.language:
+            raise SingingError("invalid_request")
+        runtime = _runtime(engine_values)
+        source = read_validated_wav(_path(sample["vocal_audio"]), runtime, expected_sample_rate=None)
+        output_root = _path(outputs["directory"])
+        output_root.mkdir(parents=True, exist_ok=True)
+        engine = _engine(data, args.engine, runtime)
+        verified_revision = await engine.preflight()  # type: ignore[attr-defined]
+        return engine, source, runtime, output_root, verified_revision
+    except SingingError:
+        raise
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+        raise SingingError("engine_unavailable") from None
 
 
 async def run(args: argparse.Namespace, config_path: Path = Path("singing_runtime/config.toml")) -> BakeoffRunManifest:
-    data = _load_toml(config_path)
-    engine_values = data["engines"][args.engine]
-    runtime = _runtime(engine_values)
-    sample = data["samples"][args.sample_id]
-    if sample["language"] != args.language:
-        raise RuntimeError("sample language does not match the requested language")
-    source = read_validated_wav(_path(sample["vocal_audio"]), runtime, expected_sample_rate=None)
-    engine = _engine(data, args.engine, runtime)
+    engine, source, runtime, output_root, verified_revision = await _preflight(args, config_path)
     started_at = time.monotonic()
     try:
         output = await engine.convert(
@@ -134,7 +211,7 @@ async def run(args: argparse.Namespace, config_path: Path = Path("singing_runtim
     manifest = BakeoffRunManifest(
         run_id=str(uuid.uuid4()),
         engine=engine.name,
-        engine_revision=engine.version,
+        engine_revision=verified_revision,
         sample_id=args.sample_id,
         language=args.language,
         source_duration_ms=source.duration_ms,
@@ -146,8 +223,6 @@ async def run(args: argparse.Namespace, config_path: Path = Path("singing_runtim
         success=output is not None,
         error_code=error_code,
     )
-    output_root = _path(data["outputs"]["directory"])
-    output_root.mkdir(parents=True, exist_ok=True)
     (output_root / f"{manifest.run_id}.json").write_text(manifest.model_dump_json(indent=2))
     if output is not None:
         (output_root / f"{manifest.run_id}.wav").write_bytes(output.audio)
@@ -155,7 +230,19 @@ async def run(args: argparse.Namespace, config_path: Path = Path("singing_runtim
 
 
 def main(argv: list[str] | None = None) -> int:
-    manifest = asyncio.run(run(build_parser().parse_args(argv)))
+    args = build_parser().parse_args(argv)
+    try:
+        if args.preflight_only:
+            _, _, _, _, verified_revision = asyncio.run(_preflight(args, Path("singing_runtime/config.toml")))
+            print(json.dumps({"success": True, "status": "READY", "engine_revision": verified_revision}))
+            return 0
+        manifest = asyncio.run(run(args))
+    except SingingError as error:
+        print(json.dumps({"success": False, "error_code": error.code}))
+        return 2
+    except (RuntimeError, ValueError):
+        print(json.dumps({"success": False, "error_code": "engine_unavailable"}))
+        return 2
     print(manifest.model_dump_json())
     return 0 if manifest.success else 1
 

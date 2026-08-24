@@ -10,8 +10,13 @@ from ..errors import SingingError
 from ..schemas import SingingProfile
 from .base import ConversionOptions
 from .runtime import (
+    RuntimeModelDependency,
+    RuntimePreflightFailure,
     TrustedRuntimeConfig,
+    TrustedProcessFailure,
     find_only_wav,
+    offline_environment,
+    preflight_runtime,
     read_validated_wav,
     require_absolute_file,
     run_trusted_process,
@@ -28,6 +33,7 @@ class SeedVCBackendConfig:
     checkpoint: Path
     model_config: Path
     reference_audio: Path
+    dependencies: tuple[RuntimeModelDependency, ...]
     diffusion_steps: int = 30
     inference_cfg_rate: float = 0.7
 
@@ -36,6 +42,9 @@ class SeedVCBackendConfig:
             raise ValueError("invalid_seedvc_diffusion_steps")
         if not 0.0 <= self.inference_cfg_rate <= 1.0:
             raise ValueError("invalid_seedvc_cfg_rate")
+        required_components = {"rmvpe", "campplus", "bigvgan", "whisper"}
+        if {dependency.component_id for dependency in self.dependencies} != required_components:
+            raise ValueError("incomplete_seedvc_dependency_inventory")
 
 
 class SeedVCAdapter:
@@ -47,6 +56,20 @@ class SeedVCAdapter:
         self._config = config
         self.version = revision
 
+    async def preflight(self) -> str:
+        config = self._config
+        try:
+            for path, label in (
+                (config.inference_script, "inference_script"),
+                (config.checkpoint, "checkpoint"),
+                (config.model_config, "model_config"),
+                (config.reference_audio, "reference_audio"),
+            ):
+                require_absolute_file(path, label=label)
+            return await preflight_runtime(config.runtime, self.version, config.dependencies)
+        except (RuntimePreflightFailure, SingingError):
+            raise SingingError("engine_unavailable") from None
+
     async def convert(
         self,
         vocal: VocalArtifact,
@@ -56,20 +79,15 @@ class SeedVCAdapter:
     ) -> VocalArtifact:
         del profile
         config = self._config
-        for path, label in (
-            (config.inference_script, "inference_script"),
-            (config.checkpoint, "checkpoint"),
-            (config.model_config, "model_config"),
-            (config.reference_audio, "reference_audio"),
-        ):
-            require_absolute_file(path, label=label)
+        await self.preflight()
         with tempfile.TemporaryDirectory(prefix="yogurt-seedvc-") as temp_dir:
             directory = Path(temp_dir)
             source = write_private_input(directory, vocal)
             output = directory / "output"
             output.mkdir()
-            await run_trusted_process(
-                (
+            try:
+                await run_trusted_process(
+                    (
                     config.runtime.python_executable,
                     config.inference_script,
                     "--source",
@@ -97,9 +115,13 @@ class SeedVCAdapter:
                     "--fp16",
                     "True",
                 ),
-                config.runtime,
-                cancelled,
-            )
+                    config.runtime,
+                    cancelled,
+                    environment=offline_environment(),
+                )
+            except TrustedProcessFailure as error:
+                code = "engine_unavailable" if error.kind == "spawn" else "conversion_failed"
+                raise SingingError(code) from None
             return read_validated_wav(
                 find_only_wav(output), config.runtime, expected_sample_rate=44_100
             )
