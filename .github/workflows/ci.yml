@@ -46,3 +46,4 @@ jobs:
           bash scripts/test-v4-state
           bash scripts/test-v4-runtime
           python -m pytest -q voice_runtime/tests
+          python -m pytest -q voice_orchestrator/tests
