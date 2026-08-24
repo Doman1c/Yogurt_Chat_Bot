@@ -2,7 +2,7 @@
 
 P10 的本地语音运行时目录。该层与 OpenClaw / `qwen3.5:9b` 解耦，TTS 引擎通过 adapter 接入，避免上层绑定具体模型实现。
 
-当前阶段：P10-A2 已完成 GPT-SoVITS speaker adaptation 实机验收，P10-A3 开始实现本地 typed TTS service。
+当前阶段：P10-A2 已完成 GPT-SoVITS speaker adaptation 实机验收，P10-A3 已完成 Windows 首轮真实 E2E，进入收口验证。
 
 ## Runtime boundary
 
@@ -22,11 +22,11 @@ P10 的本地语音运行时目录。该层与 OpenClaw / `qwen3.5:9b` 解耦，
 GPT:    yogurt_asuna_v1-e15.ckpt
 SoVITS: yogurt_asuna_v1_e4_*.pth
 
-Chinese default speed: 1.10
+Chinese default speed: 1.13
 Japanese default speed: 1.02
 ```
 
-SoVITS e8 保留为更强气息/相似度候选，但当前跨语言中文默认使用 e4。
+SoVITS e8 保留为更强气息/相似度候选，但当前跨语言中文默认使用 e4。中文实听对比中，1.13 在不显得过快的情况下消除了明显喘气感，因此作为当前默认值。
 
 ## P10-A3 架构
 
@@ -78,7 +78,7 @@ GPT-SoVITS 的 reference path、reference transcript 和 extra references 只存
 - `voice` 只允许 `yogurt`
 - `language` 只允许 `zh` / `ja`
 - `emotion` 是 bounded hint，A3 adapter 暂不改变 GPT-SoVITS 情绪参数
-- `speed` 可省略；中文默认 1.10，日语默认 1.02
+- `speed` 可省略；中文默认 1.13，日语默认 1.02
 - `speed` 仅允许 0.80–1.30
 - `stream=true` 会被拒绝
 - 单进程同时只允许一个 TTS 请求进入下游引擎
@@ -138,6 +138,17 @@ Invoke-WebRequest `
   -Body $body `
   -OutFile .\yogurt_test.wav
 ```
+
+## Windows E2E 状态
+
+已验证：
+
+- GPT-SoVITS v2Pro 在 `127.0.0.1:9880` 成功加载 GPT e15 + SoVITS e4；
+- Voice Runtime `GET /health` 可确认下游 reachable；
+- `/v1/speech` 可生成可播放中文 WAV；
+- 1 个主参考 + 多个 `inp_refs` 可通过本地 profile 传入；
+- 中文 1.10 / 1.15 / 1.13 做过实听 A/B，当前采用 1.13；
+- Runtime 响应不暴露本地 reference path / transcript。
 
 ## Privacy / security notes
 
