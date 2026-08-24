@@ -4,8 +4,6 @@ import io
 import math
 import struct
 import wave
-from typing import Iterable
-
 from pydantic import BaseModel, Field
 
 from .errors import LipSyncError
@@ -18,25 +16,35 @@ class MouthFrame(BaseModel):
     amplitude: float = Field(ge=0.0, le=1.0)
 
 
-def _samples(raw: bytes, sample_width: int) -> Iterable[float]:
+def _rms_from_pcm(raw: bytes, sample_width: int) -> float:
+    total = 0.0
+    count = 0
     if sample_width == 1:
         for value in raw:
-            yield (value - 128) / 128.0
-        return
-    if sample_width == 2:
+            sample = (value - 128) / 128.0
+            total += sample * sample
+            count += 1
+    elif sample_width == 2:
         for (value,) in struct.iter_unpack("<h", raw):
-            yield value / 32768.0
-        return
-    if sample_width == 3:
+            sample = value / 32768.0
+            total += sample * sample
+            count += 1
+    elif sample_width == 3:
         for index in range(0, len(raw) - 2, 3):
             value = int.from_bytes(raw[index : index + 3], "little", signed=True)
-            yield value / 8388608.0
-        return
-    if sample_width == 4:
+            sample = value / 8388608.0
+            total += sample * sample
+            count += 1
+    elif sample_width == 4:
         for (value,) in struct.iter_unpack("<i", raw):
-            yield value / 2147483648.0
-        return
-    raise LipSyncError("unsupported_wav_format")
+            sample = value / 2147483648.0
+            total += sample * sample
+            count += 1
+    else:
+        raise LipSyncError("unsupported_wav_format")
+    if count == 0:
+        raise LipSyncError("invalid_wav")
+    return math.sqrt(total / count)
 
 
 def amplitude_envelope(
@@ -58,25 +66,28 @@ def amplitude_envelope(
             channels = source.getnchannels()
             sample_width = source.getsampwidth()
             sample_rate = source.getframerate()
-            frames = source.getnframes()
             if source.getcomptype() != "NONE" or not (1 <= channels <= 8):
                 raise LipSyncError("unsupported_wav_format")
-            if not (1 <= sample_rate <= 192000) or frames < 0:
+            if not (1 <= sample_rate <= 192000):
                 raise LipSyncError("invalid_wav")
-            raw = source.readframes(frames)
+            window_frames = max(1, sample_rate // frame_rate)
+            bytes_per_frame = channels * sample_width
+            consumed_frames = 0
+            result: list[MouthFrame] = []
+            while True:
+                raw = source.readframes(window_frames)
+                if not raw:
+                    break
+                if len(raw) % bytes_per_frame:
+                    raise LipSyncError("invalid_wav")
+                actual_frames = len(raw) // bytes_per_frame
+                result.append(
+                    MouthFrame(
+                        timestamp_ms=round(consumed_frames * 1000 / sample_rate),
+                        amplitude=min(1.0, _rms_from_pcm(raw, sample_width)),
+                    )
+                )
+                consumed_frames += actual_frames
+            return result
     except (EOFError, wave.Error) as error:
         raise LipSyncError("invalid_wav") from error
-
-    samples_per_window = max(1, sample_rate // frame_rate) * channels
-    values = list(_samples(raw, sample_width))
-    if len(values) != frames * channels:
-        raise LipSyncError("invalid_wav")
-    result: list[MouthFrame] = []
-    for offset in range(0, len(values), samples_per_window):
-        window = values[offset : offset + samples_per_window]
-        if not window:
-            continue
-        rms = math.sqrt(sum(value * value for value in window) / len(window))
-        timestamp_ms = round((offset // channels) * 1000 / sample_rate)
-        result.append(MouthFrame(timestamp_ms=timestamp_ms, amplitude=min(1.0, rms)))
-    return result
