@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass
+from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -37,7 +38,7 @@ class SynthesizedAudio:
     media_type: str
     voice: str
     language: str
-    speed: str | None
+    speed: Optional[str]
 
 
 class VoiceRuntimeClient:
