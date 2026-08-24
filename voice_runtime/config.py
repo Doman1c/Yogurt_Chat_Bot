@@ -58,7 +58,7 @@ class VoiceProfile:
     reference_text: str
     prompt_language: str = "ja"
     extra_reference_paths: Tuple[str, ...] = ()
-    zh_speed: float = 1.10
+    zh_speed: float = 1.13
     ja_speed: float = 1.02
     top_k: int = 15
     top_p: float = 1.0
@@ -167,7 +167,7 @@ def load_config(
             reference_text=reference_text,
             prompt_language=prompt_language,
             extra_reference_paths=tuple(extra_refs),
-            zh_speed=float(value.get("zh_speed", 1.10)),
+            zh_speed=float(value.get("zh_speed", 1.13)),
             ja_speed=float(value.get("ja_speed", 1.02)),
             top_k=int(value.get("top_k", 15)),
             top_p=float(value.get("top_p", 1.0)),
