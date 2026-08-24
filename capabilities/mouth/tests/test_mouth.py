@@ -97,7 +97,7 @@ def test_unreachable_and_timeout_are_normalized() -> None:
     )
 
     assert unreachable.error_code == "voice_runtime_unreachable"
-    assert timeout.error_code == "timeout"
+    assert timeout.error_code == "synthesis_timeout"
 
 
 def test_request_exposes_no_model_or_reference_path_controls() -> None:

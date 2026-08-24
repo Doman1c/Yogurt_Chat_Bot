@@ -23,7 +23,7 @@ def _error_code(error: Exception) -> MouthErrorCode:
         return "synthesis_failed"
     code = str(error)
     if "timeout" in code:
-        return "timeout"
+        return "synthesis_timeout"
     if "unreachable" in code or "not_ready" in code:
         return "voice_runtime_unreachable"
     return "synthesis_failed"

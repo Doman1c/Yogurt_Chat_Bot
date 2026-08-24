@@ -48,13 +48,29 @@ reference paths, model paths, or endpoint URLs from callers.
 - Audio remains in memory. Mouth neither persists it nor starts playback.
 - Browser and cloud callers do not receive direct access to ports 8770 or 9880.
 
-## Deliberately deferred seams
+## Playback and interruption
+
+`MouthService` performs synthesis only. `PlaybackController` accepts an
+in-memory WAV `AudioArtifact` and a trusted `PlaybackSink` separately. The
+included `MemoryPlaybackSink` is for tests/buffer consumers; `MacOSPlaybackSink`
+uses only `/usr/bin/afplay`, writes a private temporary WAV, and removes it when
+playback finishes or is cancelled. No caller supplies an executable or path.
+
+Playback cancellation is real when audio is pending or playing. It does not
+cancel the P10-A3 synthesis request: GPT-SoVITS generation is non-streaming and
+non-cancellable, so a later VoiceSession discards its completed artifact rather
+than claiming generation stopped.
+
+## Future streaming and lipsync seams
 
 Synthesis is separate from playback. A future `PlaybackController` can choose
 Mac speakers, Live2D, a robot speaker, or a streaming client without changing
 the Mouth synthesis contract.
 
-Future B2 work may add a `MouthEvent` stream such as `speech_started`,
-`audio_chunk`, and `speech_finished`, plus verified PCM metadata for lip-sync.
-This phase does not claim streaming, cancellation, phoneme, amplitude, or
-viseme support.
+`MouthEvent` reserves `speech_started`, `audio_ready`, `audio_chunk`, and
+terminal lifecycle signals. Real synthesis streaming is **DEFERRED**: current
+A3 returns complete audio only and does not emit `audio_chunk`.
+
+`amplitude_envelope()` provides deterministic, standard-library WAV/PCM RMS
+frames for future mouth-open animation. Amplitude lipsync is not phoneme or
+viseme lipsync; this phase deliberately does not infer A/I/U/E/O mouth shapes.

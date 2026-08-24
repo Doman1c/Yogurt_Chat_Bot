@@ -13,7 +13,9 @@ MouthErrorCode = Literal[
     "mouth_unavailable",
     "voice_runtime_unreachable",
     "synthesis_failed",
-    "timeout",
+    "synthesis_timeout",
+    "playback_failed",
+    "cancelled",
 ]
 
 
