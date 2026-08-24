@@ -1,15 +1,15 @@
 # Yogurt Voice Orchestrator
 
-P10-B 的本地 Voice Orchestrator。它位于 OpenClaw/Qwen 的最终文本与 `127.0.0.1:8770` Voice Runtime 之间，只负责把高层、受限的场景/情绪提示整理成 typed `SpeechRequest`。
+P10-B 的本地 Voice Orchestrator。它是独立 Yogurt Mouth capability 的内部依赖：接收已经确定的文本和受限 scene/mood，整理成 typed `SpeechRequest` 并调用 `127.0.0.1:8770` Voice Runtime。
 
 ## P10-B0 scope
 
-当前第一步只做独立 proof，不直接改微信正常文本发送链路：
+当前第一步只做独立 proof，不观察聊天，也不改任何微信文本发送链路：
 
 ```text
-final text
-+
-bounded scene / mood
+Caller
+        ↓
+Mouth
         ↓
 Voice Orchestrator
         ↓
@@ -74,4 +74,16 @@ speed = 1.130
 
 ## 下一步
 
-P10-B1 再选择 OpenClaw 的稳定 final-output hook，把最终文本送入 Orchestrator；在确认 hook 行为和失败回退之前，不改动现有微信文本回复链路。Voice 失败必须 fail-open：文本回复照常发送，不能因为 TTS 故障阻塞聊天。
+Voice Orchestrator 现在是 Mouth 的内部依赖：
+
+```text
+Caller
+  ↓
+Mouth
+  ↓
+Voice Orchestrator
+  ↓
+Voice Runtime
+```
+
+它不属于 WeChat，也不主动观察任何聊天 channel；输入必须是已经确定好的 text。未来调用者可以是 Native Chat、Desktop、Live2D 或 Robot。WeChat auto-TTS 保持 DEFERRED。
