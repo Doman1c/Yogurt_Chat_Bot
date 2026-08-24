@@ -15,7 +15,6 @@ from ..engines.runtime import (
     offline_environment,
     preflight_runtime,
     read_validated_wav,
-    require_absolute_file,
     run_trusted_process,
 )
 
@@ -26,12 +25,33 @@ class DemucsBackendConfig:
 
     runtime: TrustedRuntimeConfig
     revision: str
-    model_dependency: RuntimeModelDependency
+    model_repo: Path
+    model_dependencies: tuple[RuntimeModelDependency, ...]
     model_name: str = "htdemucs"
 
     def __post_init__(self) -> None:
         if self.model_name not in {"htdemucs", "htdemucs_ft"}:
             raise ValueError("invalid_demucs_model")
+        if not self.model_repo.is_absolute():
+            raise ValueError("demucs_model_repo_must_be_absolute")
+        if not self.model_dependencies:
+            raise ValueError("incomplete_demucs_model_inventory")
+
+    def validate_model_repo(self) -> None:
+        if not self.model_repo.is_dir():
+            raise RuntimePreflightFailure("demucs_repo_missing")
+        paths = tuple(dependency.local_path for dependency in self.model_dependencies)
+        if not any(path.name == f"{self.model_name}.yaml" for path in paths):
+            raise RuntimePreflightFailure("demucs_bag_missing")
+        if not any(path.suffix == ".th" for path in paths):
+            raise RuntimePreflightFailure("demucs_component_missing")
+        for path in paths:
+            try:
+                path.relative_to(self.model_repo)
+            except ValueError as error:
+                raise RuntimePreflightFailure("demucs_repo_binding_invalid") from error
+            if not path.is_file():
+                raise RuntimePreflightFailure("dependency_missing")
 
 
 class DemucsSeparator:
@@ -47,9 +67,9 @@ class DemucsSeparator:
         if config is None:
             raise SingingError("separator_unavailable")
         try:
-            require_absolute_file(config.runtime.python_executable, label="python_executable")
+            config.validate_model_repo()
             return await preflight_runtime(
-                config.runtime, config.revision, (config.model_dependency,)
+                config.runtime, config.revision, config.model_dependencies
             )
         except (RuntimePreflightFailure, SingingError):
             raise SingingError("separator_unavailable") from None
@@ -71,6 +91,8 @@ class DemucsSeparator:
                     "demucs.separate",
                     "-n",
                     config.model_name,
+                    "--repo",
+                    config.model_repo,
                     "--two-stems",
                     "vocals",
                     "-o",

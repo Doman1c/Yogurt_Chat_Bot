@@ -73,7 +73,7 @@ loads, so direct inference before local inventory is prohibited. Begin with
 official-host dry runs, for example:
 
 ```powershell
-hf download Plachta/Seed-VC DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema.pth --dry-run
+hf download Plachta/Seed-VC DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema_v2.pth --dry-run
 ```
 
 After all approved files are explicitly prepared in their private local cache,
@@ -87,7 +87,9 @@ Copy-Item singing_runtime\config.example.toml singing_runtime\config.toml
 ```
 
 Only after `READY`, run the same command without `--preflight-only` to create
-the private short proof WAV. Listen before assigning quality. A technical WAV
+the private short proof WAV. Its manifest records the configured non-sensitive
+`model_id` and `profile_id` as well as the verified source revision. Listen
+before assigning quality. A technical WAV
 without Yogurt-like identity is `FUNCTIONAL_PASS_QUALITY_HOLD`, not quality
 pass. No full song, parameter sweep, or training should start before this
 short proof succeeds. See [P10_S3_RUNTIME_PREFLIGHT.md](P10_S3_RUNTIME_PREFLIGHT.md).

@@ -14,6 +14,11 @@ execution. Ignored/untracked model cache material does not make source dirty.
 `BakeoffRunManifest.engine_revision` is populated only from this verified
 revision—not an unchecked TOML value.
 
+Before the Git check, the preflight confirms that the configured Python path is
+an existing regular file and that the configured working directory exists.
+This common readiness gate applies to Seed-VC, RVC, Vevo2, and Demucs; it
+blocks process launch with the adapter's existing bounded unavailable result.
+
 ## Seed-VC offline gate
 
 Pinned `inference.py` calls its `hf_utils.load_custom_model_from_hf` for RMVPE
@@ -29,6 +34,15 @@ The private config must declare present local cache/model locations for all of:
 - `bigvgan`;
 - `whisper`.
 
+Those declarations are intentionally bound to the pinned upstream layout, not
+an arbitrary cache folder. `rmvpe` and `campplus` must be inside
+`<seed-vc>/checkpoints`, because `hf_utils.load_custom_model_from_hf` passes
+`cache_dir="./checkpoints"`. `bigvgan` and `whisper` must be inside
+`<seed-vc>/checkpoints/hf_cache`, because `inference.py` sets `HF_HUB_CACHE`
+to that path before its `from_pretrained` calls. The committed example names
+the expected Hugging Face repository-cache roots. A cache outside these roots
+is rejected before any child process starts.
+
 The child receives process-local `HF_HUB_OFFLINE=1`,
 `TRANSFORMERS_OFFLINE=1`, and `HF_DATASETS_OFFLINE=1`. It otherwise inherits
 the host environment, including PATH, SYSTEMROOT, and CUDA variables. Missing
@@ -37,12 +51,18 @@ silent transfer. No global environment or firewall setting is changed.
 
 ## Demucs offline gate
 
-Demucs requires a trusted local cache/model dependency for its selected
-`htdemucs` or `htdemucs_ft` model. The adapter rejects a missing runtime/model
-before running `python -m demucs.separate`; its process also receives the same
-offline policy. Missing runtime/model maps to `separator_unavailable`, process
-exit or missing stems maps to `separation_failed`, and timeout/cancellation
-preserve their bounded codes.
+Demucs always invokes the fixed `python -m demucs.separate ... --repo
+<trusted-local-repo>` argument. The upstream `get_model` code uses
+`LocalRepo(repo)` for component `.th` files and `BagOnlyRepo(repo, model_repo)`
+for the selected bag YAML when `--repo` is supplied; it does not take the
+remote `files.txt` branch. The trusted repo must therefore contain the selected
+`htdemucs.yaml` (or `htdemucs_ft.yaml`) plus every `.th` component it names;
+the preflight requires each configured entry to be a file underneath the
+trusted repo. No remote fallback is available through this adapter.
+
+Missing runtime/model maps to `separator_unavailable`, process exit or missing
+stems maps to `separation_failed`, and timeout/cancellation preserve their
+bounded codes.
 
 ## Safe Windows readiness command
 
@@ -55,6 +75,7 @@ Set-Location 'C:\path\to\Yogurt_Chat_Bot'
   --sample-id zh-proto --engine seed_vc --language zh --transpose 0 --preflight-only
 ```
 
-It prints only bounded JSON: `READY` plus verified revision, or a bounded
-error. It never prints private paths, config content, raw stderr, or a Python
-traceback. Only `READY` authorizes the separate short first-proof command.
+It prints only bounded JSON: `READY`, verified revision, and the configured
+non-sensitive model/profile identifiers, or a bounded error. It never prints
+private paths, config content, raw stderr, or a Python traceback. Only `READY`
+authorizes the separate short first-proof command.

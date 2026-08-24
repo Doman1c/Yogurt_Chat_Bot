@@ -108,7 +108,15 @@ def _dependencies(values: dict[str, Any]) -> tuple[RuntimeModelDependency, ...]:
         raise RuntimeError("invalid_private_runtime_config") from error
 
 
-def _engine(data: dict[str, Any], name: str, runtime: TrustedRuntimeConfig) -> SingingConversionEngine:
+def _provenance_id(value: Any) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[a-z][a-z0-9._-]{0,63}", value) is None:
+        raise RuntimeError("invalid_private_runtime_config")
+    return value
+
+
+def _engine(
+    data: dict[str, Any], name: str, runtime: TrustedRuntimeConfig
+) -> tuple[SingingConversionEngine, str]:
     try:
         values = data["engines"][name]
         profile = data["profile"]
@@ -119,6 +127,7 @@ def _engine(data: dict[str, Any], name: str, runtime: TrustedRuntimeConfig) -> S
             raise ValueError("invalid_private_runtime_config")
         dependencies = _dependencies(values)
         if name == "seed_vc":
+            model_id = _provenance_id(values["model_id"])
             return SeedVCAdapter(
                 SeedVCBackendConfig(
                     runtime=runtime,
@@ -127,13 +136,15 @@ def _engine(data: dict[str, Any], name: str, runtime: TrustedRuntimeConfig) -> S
                     model_config=_path(values["model_config"]),
                     reference_audio=_path(profile["reference_audio"]),
                     dependencies=dependencies,
+                    model_id=model_id,
                     diffusion_steps=int(values.get("diffusion_steps", 30)),
                     inference_cfg_rate=float(values.get("inference_cfg_rate", 0.7)),
                 ),
                 revision=revision,
-            )
+            ), model_id
         if name == "rvc":
             index = values.get("index")
+            model_id = _provenance_id(values["model_id"])
             return RVCAdapter(
                 RVCBackendConfig(
                     runtime=runtime,
@@ -141,11 +152,13 @@ def _engine(data: dict[str, Any], name: str, runtime: TrustedRuntimeConfig) -> S
                     model=_path(values["model"]),
                     index=_path(index) if index else None,
                     dependencies=dependencies,
+                    model_id=model_id,
                     speaker_id=int(values.get("speaker_id", 0)),
                     index_rate=float(values.get("index_rate", 0.75)),
                 ),
                 revision=revision,
-            )
+            ), model_id
+        model_id = _provenance_id(values["model_id"])
         return Vevo2Adapter(
             Vevo2BackendConfig(
                 runtime=runtime,
@@ -154,16 +167,17 @@ def _engine(data: dict[str, Any], name: str, runtime: TrustedRuntimeConfig) -> S
                 model_root=_path(values["model_root"]),
                 reference_audio=_path(profile["reference_audio"]),
                 dependencies=dependencies,
+                model_id=model_id,
             ),
             revision=revision,
-        )
+        ), model_id
     except (KeyError, TypeError, ValueError) as error:
         raise RuntimeError("invalid_private_runtime_config") from error
 
 
 async def _preflight(
     args: argparse.Namespace, config_path: Path
-) -> tuple[SingingConversionEngine, VocalArtifact, TrustedRuntimeConfig, Path, str]:
+) -> tuple[SingingConversionEngine, VocalArtifact, TrustedRuntimeConfig, Path, str, str, str]:
     if re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", args.sample_id) is None:
         raise SingingError("invalid_request")
     try:
@@ -179,13 +193,14 @@ async def _preflight(
             raise ValueError("invalid_private_runtime_config")
         if sample["language"] != args.language:
             raise SingingError("invalid_request")
+        profile_id = _provenance_id(data["profile"]["profile_id"])
         runtime = _runtime(engine_values)
         source = read_validated_wav(_path(sample["vocal_audio"]), runtime, expected_sample_rate=None)
         output_root = _path(outputs["directory"])
         output_root.mkdir(parents=True, exist_ok=True)
-        engine = _engine(data, args.engine, runtime)
+        engine, model_id = _engine(data, args.engine, runtime)
         verified_revision = await engine.preflight()  # type: ignore[attr-defined]
-        return engine, source, runtime, output_root, verified_revision
+        return engine, source, runtime, output_root, verified_revision, model_id, profile_id
     except SingingError:
         raise
     except (KeyError, OSError, RuntimeError, TypeError, ValueError):
@@ -193,7 +208,9 @@ async def _preflight(
 
 
 async def run(args: argparse.Namespace, config_path: Path = Path("singing_runtime/config.toml")) -> BakeoffRunManifest:
-    engine, source, runtime, output_root, verified_revision = await _preflight(args, config_path)
+    engine, source, runtime, output_root, verified_revision, model_id, profile_id = await _preflight(
+        args, config_path
+    )
     started_at = time.monotonic()
     try:
         output = await engine.convert(
@@ -212,6 +229,8 @@ async def run(args: argparse.Namespace, config_path: Path = Path("singing_runtim
         run_id=str(uuid.uuid4()),
         engine=engine.name,
         engine_revision=verified_revision,
+        model_id=model_id,
+        profile_id=profile_id,
         sample_id=args.sample_id,
         language=args.language,
         source_duration_ms=source.duration_ms,
@@ -233,8 +252,20 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.preflight_only:
-            _, _, _, _, verified_revision = asyncio.run(_preflight(args, Path("singing_runtime/config.toml")))
-            print(json.dumps({"success": True, "status": "READY", "engine_revision": verified_revision}))
+            _, _, _, _, verified_revision, model_id, profile_id = asyncio.run(
+                _preflight(args, Path("singing_runtime/config.toml"))
+            )
+            print(
+                json.dumps(
+                    {
+                        "success": True,
+                        "status": "READY",
+                        "engine_revision": verified_revision,
+                        "model_id": model_id,
+                        "profile_id": profile_id,
+                    }
+                )
+            )
             return 0
         manifest = asyncio.run(run(args))
     except SingingError as error:

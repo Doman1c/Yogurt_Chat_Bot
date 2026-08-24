@@ -82,7 +82,9 @@ been downloaded, installed, or exercised locally.
 
 - Package: <https://github.com/facebookresearch/demucs> (optional local Python
   API/module runtime, not a public service).
-- P10-S adapter: fixed `python -m demucs.separate -n htdemucs --two-stems
-  vocals`; bounded execution, private temporary directory, and no shell.
+- P10-S adapter: fixed `python -m demucs.separate -n htdemucs --repo
+  <trusted-local-repo> --two-stems vocals`; the official `--repo` seam selects
+  `LocalRepo`/`BagOnlyRepo` instead of the remote model path. Execution remains
+  bounded, uses a private temporary directory, and has no shell.
 - Model source/size/VRAM: inspect the installed package's official model
   release before download. No Demucs model has been downloaded in P10-S3.

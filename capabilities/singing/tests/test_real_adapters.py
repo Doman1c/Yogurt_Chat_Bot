@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import argparse
 import inspect
 import io
+import json
 import os
 import subprocess
 import sys
@@ -14,6 +16,7 @@ import pytest
 from capabilities.singing.assets import VocalArtifact
 from capabilities.singing.assets import SongAsset
 from capabilities.singing.bakeoff_cli import main as bakeoff_main
+from capabilities.singing.bakeoff_cli import run as bakeoff_run
 from capabilities.singing.engines.base import ConversionOptions
 from capabilities.singing.engines.rvc import RVCAdapter, RVCBackendConfig
 from capabilities.singing.engines.runtime import (
@@ -23,6 +26,7 @@ from capabilities.singing.engines.runtime import (
     preflight_runtime,
 )
 from capabilities.singing.engines.seed_vc import SeedVCAdapter, SeedVCBackendConfig
+from capabilities.singing.engines.vevo2 import Vevo2Adapter, Vevo2BackendConfig
 from capabilities.singing.errors import SingingError
 from capabilities.singing.separation.demucs import DemucsBackendConfig, DemucsSeparator
 
@@ -61,18 +65,39 @@ async def _verified_runtime(*_args, **_kwargs) -> str:
 
 
 def _seed_dependencies(tmp_path: Path) -> tuple[RuntimeModelDependency, ...]:
-    dependencies = []
-    for component in ("rmvpe", "campplus", "bigvgan", "whisper"):
-        path = tmp_path / component
-        path.write_bytes(b"ready")
-        dependencies.append(RuntimeModelDependency(component, path))
-    return tuple(dependencies)
+    paths = {
+        "rmvpe": tmp_path / "checkpoints" / "models--lj1995--VoiceConversionWebUI",
+        "campplus": tmp_path / "checkpoints" / "models--funasr--campplus",
+        "bigvgan": tmp_path / "checkpoints" / "hf_cache" / "models--nvidia--bigvgan",
+        "whisper": tmp_path / "checkpoints" / "hf_cache" / "models--openai--whisper-small",
+    }
+    for path in paths.values():
+        path.mkdir(parents=True)
+    return tuple(RuntimeModelDependency(component, path) for component, path in paths.items())
 
 
 def _rvc_dependencies(tmp_path: Path) -> tuple[RuntimeModelDependency, ...]:
     assets = tmp_path / "rvc-assets"
     assets.mkdir(exist_ok=True)
     return (RuntimeModelDependency("rvc_runtime_assets", assets),)
+
+
+def _demucs_config(tmp_path: Path) -> DemucsBackendConfig:
+    repo = tmp_path / "demucs-repo"
+    repo.mkdir(exist_ok=True)
+    bag = repo / "htdemucs.yaml"
+    component = repo / "component-a.th"
+    bag.write_text("models: [component-a]\n")
+    component.write_bytes(b"ready")
+    return DemucsBackendConfig(
+        _runtime(tmp_path),
+        "a" * 40,
+        repo,
+        (
+            RuntimeModelDependency("demucs-bag", bag),
+            RuntimeModelDependency("demucs-component", component),
+        ),
+    )
 
 
 def _writing_backend(*, malformed: bool = False, oversized: bool = False) -> str:
@@ -96,7 +121,7 @@ else:
 """
 
 
-def test_seedvc_trusted_config_runs_fixed_backend_and_returns_valid_wav(
+def test_seedvc_preflight_accepts_actual_bound_cache_layout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def run() -> None:
@@ -186,6 +211,7 @@ def test_demucs_adapter_uses_trusted_fixed_backend_and_validates_stems(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def fake_run(command, runtime, cancelled, *, environment) -> None:
+        assert command[command.index("--repo") + 1].is_dir()
         output_root = Path(command[command.index("-o") + 1])
         source = Path(command[-1])
         stem_root = output_root / "htdemucs" / source.stem
@@ -198,11 +224,7 @@ def test_demucs_adapter_uses_trusted_fixed_backend_and_validates_stems(
         source.write_bytes(_wav_bytes())
         monkeypatch.setattr("capabilities.singing.separation.demucs.run_trusted_process", fake_run)
         monkeypatch.setattr("capabilities.singing.separation.demucs.preflight_runtime", _verified_runtime)
-        model = tmp_path / "demucs-model"
-        model.write_bytes(b"ready")
-        separator = DemucsSeparator(
-            DemucsBackendConfig(_runtime(tmp_path), "a" * 40, RuntimeModelDependency("demucs", model))
-        )
+        separator = DemucsSeparator(_demucs_config(tmp_path))
         result = await separator.separate(SongAsset("song-01", source), asyncio.Event())
         assert result.vocal.sample_rate == result.instrumental.sample_rate == 44100
         assert result.vocal.duration_ms == result.instrumental.duration_ms == 100
@@ -241,6 +263,109 @@ def test_runtime_revision_match_mismatch_dirty_and_check_failure_are_bounded(tmp
         )
         with pytest.raises(RuntimePreflightFailure, match="revision_check_failed"):
             await preflight_runtime(unavailable_git, revision, ())
+
+    asyncio.run(run())
+
+
+def test_runtime_readiness_requires_python_file_and_working_directory(tmp_path: Path) -> None:
+    async def run() -> None:
+        revision = _init_git_repository(tmp_path)
+        missing_python = TrustedRuntimeConfig(
+            python_executable=tmp_path / "missing-python", working_directory=tmp_path
+        )
+        with pytest.raises(RuntimePreflightFailure, match="runtime_not_ready"):
+            await preflight_runtime(missing_python, revision, ())
+        missing_directory = TrustedRuntimeConfig(
+            python_executable=Path(sys.executable).resolve(),
+            working_directory=tmp_path / "missing-directory",
+        )
+        with pytest.raises(RuntimePreflightFailure, match="runtime_not_ready"):
+            await preflight_runtime(missing_directory, revision, ())
+
+    asyncio.run(run())
+
+
+def test_adapter_preflight_rejects_missing_python_before_backend_launch(tmp_path: Path) -> None:
+    async def run() -> None:
+        unavailable = TrustedRuntimeConfig(
+            python_executable=tmp_path / "missing-python", working_directory=tmp_path
+        )
+        script = _write_backend(tmp_path, _writing_backend())
+        checkpoint, model_config, reference = (tmp_path / "model.pth", tmp_path / "model.yml", tmp_path / "ref.wav")
+        checkpoint.write_bytes(b"model")
+        model_config.write_text("model: seed")
+        reference.write_bytes(_wav_bytes())
+        seed = SeedVCAdapter(
+            SeedVCBackendConfig(
+                unavailable, script, checkpoint, model_config, reference, _seed_dependencies(tmp_path)
+            ),
+            revision="a" * 40,
+        )
+        rvc = RVCAdapter(
+            RVCBackendConfig(unavailable, script, checkpoint, dependencies=_rvc_dependencies(tmp_path)),
+            revision="a" * 40,
+        )
+        amphion_root = tmp_path / "amphion"
+        model_root = tmp_path / "vevo-model"
+        amphion_root.mkdir()
+        model_root.mkdir()
+        vevo2 = Vevo2Adapter(
+            Vevo2BackendConfig(unavailable, script, amphion_root, model_root, reference),
+            revision="a" * 40,
+        )
+        demucs_config = _demucs_config(tmp_path)
+        demucs = DemucsSeparator(
+            DemucsBackendConfig(
+                unavailable,
+                demucs_config.revision,
+                demucs_config.model_repo,
+                demucs_config.model_dependencies,
+            )
+        )
+        for adapter in (seed, rvc, vevo2):
+            with pytest.raises(SingingError, match="engine_unavailable"):
+                await adapter.preflight()
+        with pytest.raises(SingingError, match="separator_unavailable"):
+            await demucs.preflight()
+
+    asyncio.run(run())
+
+
+def test_seedvc_preflight_rejects_missing_working_directory_before_backend_launch(tmp_path: Path) -> None:
+    async def run() -> None:
+        missing_directory = tmp_path / "missing-runtime"
+        runtime = TrustedRuntimeConfig(
+            python_executable=Path(sys.executable).resolve(), working_directory=missing_directory
+        )
+        marker = tmp_path / "backend-started"
+        script = _write_backend(
+            tmp_path,
+            _writing_backend() + f"\npathlib.Path({str(marker)!r}).write_text('started')\n",
+        )
+        checkpoint, model_config, reference = (tmp_path / "model.pth", tmp_path / "model.yml", tmp_path / "ref.wav")
+        checkpoint.write_bytes(b"model")
+        model_config.write_text("model: seed")
+        reference.write_bytes(_wav_bytes())
+        dependency_roots = {
+            "rmvpe": missing_directory / "checkpoints" / "models--rmvpe",
+            "campplus": missing_directory / "checkpoints" / "models--campplus",
+            "bigvgan": missing_directory / "checkpoints" / "hf_cache" / "models--bigvgan",
+            "whisper": missing_directory / "checkpoints" / "hf_cache" / "models--whisper",
+        }
+        adapter = SeedVCAdapter(
+            SeedVCBackendConfig(
+                runtime,
+                script,
+                checkpoint,
+                model_config,
+                reference,
+                tuple(RuntimeModelDependency(component, path) for component, path in dependency_roots.items()),
+            ),
+            revision="a" * 40,
+        )
+        with pytest.raises(SingingError, match="engine_unavailable"):
+            await adapter.convert(VocalArtifact(_wav_bytes(), 100, 44100), "yogurt", _options(), asyncio.Event())
+        assert not marker.exists()
 
     asyncio.run(run())
 
@@ -305,6 +430,35 @@ def test_seedvc_dependency_preflight_and_offline_environment(
         )
         with pytest.raises(SingingError, match="engine_unavailable"):
             await missing_adapter.preflight()
+
+    asyncio.run(run())
+
+
+def test_seedvc_rejects_dependency_cache_outside_upstream_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        marker = tmp_path / "backend-started"
+        script = _write_backend(
+            tmp_path,
+            _writing_backend() + f"\npathlib.Path({str(marker)!r}).write_text('started')\n",
+        )
+        checkpoint, model_config, reference = (tmp_path / "model.pth", tmp_path / "model.yml", tmp_path / "ref.wav")
+        checkpoint.write_bytes(b"model")
+        model_config.write_text("model: seed")
+        reference.write_bytes(_wav_bytes())
+        dependencies = list(_seed_dependencies(tmp_path))
+        outside = tmp_path / "outside-cache"
+        outside.mkdir()
+        dependencies[0] = RuntimeModelDependency("rmvpe", outside)
+        monkeypatch.setattr("capabilities.singing.engines.seed_vc.preflight_runtime", _verified_runtime)
+        adapter = SeedVCAdapter(
+            SeedVCBackendConfig(_runtime(tmp_path), script, checkpoint, model_config, reference, tuple(dependencies)),
+            revision="a" * 40,
+        )
+        with pytest.raises(SingingError, match="engine_unavailable"):
+            await adapter.convert(VocalArtifact(_wav_bytes(), 100, 44100), "yogurt", _options(), asyncio.Event())
+        assert not marker.exists()
 
     asyncio.run(run())
 
@@ -374,9 +528,7 @@ def test_spawn_failure_and_demucs_failure_mapping_are_bounded(
 
         source = tmp_path / "song.wav"
         source.write_bytes(_wav_bytes())
-        cache = tmp_path / "demucs-model"
-        cache.write_bytes(b"ready")
-        config = DemucsBackendConfig(_runtime(tmp_path), "a" * 40, RuntimeModelDependency("demucs", cache))
+        config = _demucs_config(tmp_path)
         separator = DemucsSeparator(config)
         monkeypatch.setattr("capabilities.singing.separation.demucs.preflight_runtime", _verified_runtime)
 
@@ -400,9 +552,7 @@ def test_demucs_missing_stems_timeout_cancel_and_model_preflight_are_bounded(
     async def run() -> None:
         source = tmp_path / "song.wav"
         source.write_bytes(_wav_bytes())
-        cache = tmp_path / "demucs-model"
-        cache.write_bytes(b"ready")
-        config = DemucsBackendConfig(_runtime(tmp_path), "a" * 40, RuntimeModelDependency("demucs", cache))
+        config = _demucs_config(tmp_path)
         separator = DemucsSeparator(config)
         monkeypatch.setattr("capabilities.singing.separation.demucs.preflight_runtime", _verified_runtime)
 
@@ -427,8 +577,12 @@ def test_demucs_missing_stems_timeout_cancel_and_model_preflight_are_bounded(
         with pytest.raises(SingingError, match="cancelled"):
             await separator.separate(SongAsset("song-01", source), asyncio.Event())
 
+        missing_repo = tmp_path / "missing-demucs-repo"
         missing_config = DemucsBackendConfig(
-            _runtime(tmp_path), "a" * 40, RuntimeModelDependency("demucs", tmp_path / "missing-model")
+            _runtime(tmp_path),
+            "a" * 40,
+            missing_repo,
+            (RuntimeModelDependency("demucs-bag", missing_repo / "htdemucs.yaml"),),
         )
         monkeypatch.setattr(
             "capabilities.singing.separation.demucs.preflight_runtime", preflight_runtime
@@ -456,3 +610,73 @@ def test_cli_config_failure_is_bounded_before_any_backend(capsys: pytest.Capture
     captured = capsys.readouterr()
     assert result == 2
     assert captured.out == '{"success": false, "error_code": "engine_unavailable"}\n'
+
+
+@pytest.mark.parametrize("key, value", [("model_id", "../model"), ("profile_id", "bad/profile")])
+def test_cli_preflight_rejects_invalid_private_provenance_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], key: str, value: str
+) -> None:
+    config = tmp_path / "singing_runtime" / "config.toml"
+    config.parent.mkdir()
+    profile_id = value if key == "profile_id" else "yogurt-singing-v1"
+    model_id = value if key == "model_id" else "seed-vc-f0-44k-ema-v2"
+    config.write_text(
+        "\n".join(
+            (
+                "[profile]",
+                f'profile_id = "{profile_id}"',
+                'reference_audio = "/private/reference.wav"',
+                "[samples.zh-proto]",
+                'language = "zh"',
+                'vocal_audio = "/private/vocal.wav"',
+                "[outputs]",
+                f'directory = "{tmp_path.as_posix()}"',
+                "[engines.seed_vc]",
+                f'model_id = "{model_id}"',
+            )
+        )
+    )
+    monkeypatch.chdir(tmp_path)
+    result = bakeoff_main(
+        ["--sample-id", "zh-proto", "--engine", "seed_vc", "--language", "zh", "--preflight-only"]
+    )
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == '{"success": false, "error_code": "engine_unavailable"}\n'
+
+
+def test_bakeoff_manifest_includes_model_and_profile_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEngine:
+        name = "seed_vc"
+
+        async def convert(self, source, profile, options, cancelled):
+            return VocalArtifact(_wav_bytes(), 100, 44100)
+
+    async def fake_preflight(*_args, **_kwargs):
+        return (
+            FakeEngine(),
+            VocalArtifact(_wav_bytes(), 100, 44100),
+            _runtime(tmp_path),
+            tmp_path,
+            "a" * 40,
+            "seed-vc-f0-44k-ema-v2",
+            "yogurt-singing-v1",
+        )
+
+    async def run() -> None:
+        monkeypatch.setattr("capabilities.singing.bakeoff_cli._preflight", fake_preflight)
+        manifest = await bakeoff_run(
+            argparse.Namespace(sample_id="zh-proto", engine="seed_vc", language="zh", transpose=0)
+        )
+        assert manifest.model_id == "seed-vc-f0-44k-ema-v2"
+        assert manifest.profile_id == "yogurt-singing-v1"
+        stored = json.loads((tmp_path / f"{manifest.run_id}.json").read_text())
+        assert stored["model_id"] == manifest.model_id
+        assert stored["profile_id"] == manifest.profile_id
+        serialized = json.dumps(stored)
+        for private_value in ("checkpoint", "reference", "working_directory", "checkpoints/hf_cache"):
+            assert private_value not in serialized
+
+    asyncio.run(run())

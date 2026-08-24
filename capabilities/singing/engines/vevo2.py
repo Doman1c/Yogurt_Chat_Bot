@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,11 @@ class Vevo2BackendConfig:
     model_root: Path
     reference_audio: Path
     dependencies: tuple[RuntimeModelDependency, ...] = ()
+    model_id: str = "local-model"
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[a-z][a-z0-9._-]{0,63}", self.model_id) is None:
+            raise ValueError("invalid_vevo2_model_id")
 
 
 class Vevo2Adapter:
@@ -43,6 +49,7 @@ class Vevo2Adapter:
     def __init__(self, config: Vevo2BackendConfig, *, revision: str) -> None:
         self._config = config
         self.version = revision
+        self.model_id = config.model_id
 
     async def preflight(self) -> str:
         config = self._config

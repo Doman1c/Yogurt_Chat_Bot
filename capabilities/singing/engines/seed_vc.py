@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,32 @@ from .runtime import (
 
 
 @dataclass(frozen=True)
+class SeedVCCacheLayout:
+    """The two cache roots hard-coded by the pinned Seed-VC inference path."""
+
+    checkpoints_root: Path
+    hf_cache_root: Path
+
+    @classmethod
+    def for_runtime(cls, runtime: TrustedRuntimeConfig) -> "SeedVCCacheLayout":
+        checkpoints_root = runtime.working_directory / "checkpoints"
+        return cls(checkpoints_root, checkpoints_root / "hf_cache")
+
+    def validate(self, dependencies: tuple[RuntimeModelDependency, ...]) -> None:
+        roots = {
+            "rmvpe": self.checkpoints_root,
+            "campplus": self.checkpoints_root,
+            "bigvgan": self.hf_cache_root,
+            "whisper": self.hf_cache_root,
+        }
+        for dependency in dependencies:
+            try:
+                dependency.local_path.relative_to(roots[dependency.component_id])
+            except ValueError as error:
+                raise RuntimePreflightFailure("seedvc_cache_layout_invalid") from error
+
+
+@dataclass(frozen=True)
 class SeedVCBackendConfig:
     """Application-owned pin for the official Seed-VC V1 SVC command."""
 
@@ -34,8 +61,10 @@ class SeedVCBackendConfig:
     model_config: Path
     reference_audio: Path
     dependencies: tuple[RuntimeModelDependency, ...]
+    model_id: str = "local-model"
     diffusion_steps: int = 30
     inference_cfg_rate: float = 0.7
+    cache_layout: SeedVCCacheLayout | None = None
 
     def __post_init__(self) -> None:
         if not 30 <= self.diffusion_steps <= 50:
@@ -45,6 +74,12 @@ class SeedVCBackendConfig:
         required_components = {"rmvpe", "campplus", "bigvgan", "whisper"}
         if {dependency.component_id for dependency in self.dependencies} != required_components:
             raise ValueError("incomplete_seedvc_dependency_inventory")
+        if not _is_provenance_id(self.model_id):
+            raise ValueError("invalid_seedvc_model_id")
+        expected_layout = SeedVCCacheLayout.for_runtime(self.runtime)
+        if self.cache_layout is not None and self.cache_layout != expected_layout:
+            raise ValueError("seedvc_cache_layout_must_match_runtime")
+        object.__setattr__(self, "cache_layout", expected_layout)
 
 
 class SeedVCAdapter:
@@ -55,10 +90,13 @@ class SeedVCAdapter:
     def __init__(self, config: SeedVCBackendConfig, *, revision: str) -> None:
         self._config = config
         self.version = revision
+        self.model_id = config.model_id
 
     async def preflight(self) -> str:
         config = self._config
         try:
+            assert config.cache_layout is not None
+            config.cache_layout.validate(config.dependencies)
             for path, label in (
                 (config.inference_script, "inference_script"),
                 (config.checkpoint, "checkpoint"),
@@ -125,3 +163,7 @@ class SeedVCAdapter:
             return read_validated_wav(
                 find_only_wav(output), config.runtime, expected_sample_rate=44_100
             )
+
+
+def _is_provenance_id(value: str) -> bool:
+    return re.fullmatch(r"[a-z][a-z0-9._-]{0,63}", value) is not None

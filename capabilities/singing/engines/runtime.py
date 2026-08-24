@@ -157,6 +157,8 @@ async def preflight_runtime(
 ) -> str:
     """Verify source provenance and all required local model/cache components."""
 
+    if not runtime.python_executable.is_file() or not runtime.working_directory.is_dir():
+        raise RuntimePreflightFailure("runtime_not_ready")
     for dependency in dependencies:
         if dependency.required and not dependency.local_path.exists():
             raise RuntimePreflightFailure("dependency_missing")

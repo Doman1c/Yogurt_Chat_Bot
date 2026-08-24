@@ -71,6 +71,8 @@ class BakeoffRunManifest(BaseModel):
     run_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9-]+$")
     engine: str = Field(min_length=1, max_length=32)
     engine_revision: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9._-]{0,63}$")
+    profile_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9._-]{0,63}$")
     sample_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     language: Literal["zh", "ja", "en"]
     source_duration_ms: int = Field(ge=0)

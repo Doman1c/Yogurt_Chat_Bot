@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,7 @@ class RVCBackendConfig:
     model: Path
     index: Path | None = None
     dependencies: tuple[RuntimeModelDependency, ...] = ()
+    model_id: str = "local-model"
     speaker_id: int = 0
     index_rate: float = 0.75
 
@@ -40,6 +42,8 @@ class RVCBackendConfig:
             raise ValueError("invalid_rvc_backend_config")
         if {dependency.component_id for dependency in self.dependencies} != {"rvc_runtime_assets"}:
             raise ValueError("incomplete_rvc_dependency_inventory")
+        if re.fullmatch(r"[a-z][a-z0-9._-]{0,63}", self.model_id) is None:
+            raise ValueError("invalid_rvc_model_id")
 
 
 class RVCAdapter:
@@ -50,6 +54,7 @@ class RVCAdapter:
     def __init__(self, config: RVCBackendConfig, *, revision: str) -> None:
         self._config = config
         self.version = revision
+        self.model_id = config.model_id
 
     async def preflight(self) -> str:
         config = self._config
