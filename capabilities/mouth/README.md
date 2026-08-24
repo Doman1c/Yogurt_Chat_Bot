@@ -67,10 +67,10 @@ Synthesis is separate from playback. A future `PlaybackController` can choose
 Mac speakers, Live2D, a robot speaker, or a streaming client without changing
 the Mouth synthesis contract.
 
-`MouthEvent` emits `synthesis_started` before calling the runtime and
-`playback_started` only after a trusted sink has actually started playback.
-`audio_chunk` remains reserved for a future streaming runtime and is not
-emitted by the current full-audio synthesis path.
+`MouthEvent` emits `synthesis_started` only after VoiceSession acquires the
+shared synthesis slot, and `playback_started` only after a trusted sink has
+actually started playback. `audio_chunk` remains reserved for a future
+streaming runtime and is not emitted by the current full-audio synthesis path.
 
 `amplitude_envelope()` provides deterministic, standard-library WAV/PCM RMS
 frames for future mouth-open animation. Amplitude lipsync is not phoneme or
@@ -82,3 +82,10 @@ viseme lipsync; this phase deliberately does not infer A/I/U/E/O mouth shapes.
 queueing, priority, trusted sink routing, playback cancellation, and safe
 observability. Its `session_id` and opaque utterance IDs are Yogurt voice IDs;
 they are never WeChat or OpenClaw session/message identifiers.
+
+Playback arbitration is per trusted sink inside `SinkRegistry`. All
+VoiceSessions in one process that target the same physical output must share the
+same application-level `SinkRegistry` / `OutputRouter` composition. Two
+separate registries representing the same physical speaker own independent
+locks and therefore do not provide cross-session serialization. This sharing
+rule is an application-composition contract rather than a global singleton.
