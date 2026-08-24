@@ -76,3 +76,10 @@ Only after Mac-local voice E2E passes, connect the observation-only final-output
 ## Training boundary
 
 Normal speech generation is inference only. Further GPU training is needed only when deliberately creating a new or improved voice checkpoint, additional singing models, or other adaptations. The Windows RTX host remains appropriate for that work.
+
+## Current status
+
+- P10-B0 bounded Orchestrator proof: Windows real-runtime accepted.
+- P10-B1 deployment decision: Mac-local runtime selected.
+- LAN Voice Bridge approach: abandoned; do not implement.
+- Next action: capture the exact working Windows GPT-SoVITS commit SHA, then install the matching revision on Mac.
