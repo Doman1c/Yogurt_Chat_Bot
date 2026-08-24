@@ -14,6 +14,8 @@ SingingErrorCode = Literal[
     "remix_failed",
     "timeout",
     "cancelled",
+    "queue_full",
+    "unsupported_transpose",
 ]
 
 

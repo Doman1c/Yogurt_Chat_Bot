@@ -47,9 +47,7 @@ assets/singing/reference/
 assets/singing/output/
 singing_runtime/
 singing_checkpoints/
-*.ckpt
-*.safetensors
-*.pth
+assets/singing/private/
 
 # Python
 __pycache__/

@@ -6,7 +6,7 @@ Checked 2026-08-25. This is a technical inventory, not legal advice.
 |---|---|---|
 | RVC WebUI | MIT plus project agreement/output-responsibility notice | Review bundled assets and every checkpoint separately. |
 | Seed-VC | GPL-3.0 | Keep it as an external local runtime unless distribution obligations are reviewed. Hugging Face weights have separate terms. |
-| Amphion / Vevo2 | Apache-2.0 | Review each released pretrained model/data card separately. |
+| Amphion / Vevo2 | MIT | Review each released pretrained model/data card separately. |
 | voicepaw so-vits-svc fork | MIT | Fork, dependencies and compatible models may differ in license/terms. |
 | DiffSinger | Apache-2.0 | Training data, dictionaries and pretrained packages need separate review. |
 | SOME | MIT | README explicitly requires consent for recordings used in training. |

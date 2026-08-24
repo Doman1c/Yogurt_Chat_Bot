@@ -7,8 +7,8 @@ separately before adoption.
 | Project | Type | License | Maintenance | Zero-shot | Fine-tune | F0 / transpose | Singing fidelity | Mac feasibility | Windows CUDA | Integration complexity | P10-S role |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | RVC WebUI | VC/SVC | MIT + project agreement | active repo | no primary zero-shot path | yes; project says <=10 min data can work | pitch models incl. RMVPE; semitone control | strong established baseline, retrieval can help timbre | possible but not first target | strong | medium; isolate its UI/CLI | bake-off candidate |
-| Seed-VC | VC/SVC | GPL-3.0 | active README/changelog | yes, 1–30 s reference | yes | 44.1k SVC model, F0 condition, semitone shift | purpose-built 44.1k SVC/BigVGAN path | official M-series requirements | recommended for real time | high; GPL and large checkpoint runtime | bake-off candidate |
-| Amphion Vevo2 | unified speech/singing TTS, SVS, VC/SVC | Apache-2.0 | actively developed | yes | research-oriented training options | prosody/melody controls | broadest control surface; needs proof | unknown until benchmark | preferred research host | high | advanced candidate / Native roadmap |
+| Seed-VC | VC/SVC | GPL-3.0 | archived/read-only (2025-11-21) | yes, 1–30 s reference | yes | 44.1k SVC model, F0 condition, semitone shift | purpose-built 44.1k SVC/BigVGAN path | official M-series requirements | recommended for real time | high; GPL, large checkpoint runtime, no upstream maintenance | zero-shot benchmark / POC candidate |
+| Amphion Vevo2 | unified speech/singing TTS, SVS, VC/SVC | MIT | actively developed | yes | research-oriented training options | prosody/melody controls | broadest control surface; needs proof | unknown until benchmark | preferred research host | high | advanced candidate / Native roadmap |
 | so-vits-svc fork | SVC | MIT | current releases, upstream family fragmented | no | yes | ContentVec, CREPE F0, VITS/NSF-style lineage | historical SVC baseline | possible, not priority | CUDA-oriented docs | medium/high | benchmark reference only |
 | DiffSinger | SVS | Apache-2.0 | maintained ecosystem | no | yes | lyrics + MIDI, pitch/variance labels | Native Singing rather than cover conversion | not target | training target | high | Native future |
 | SOME | singing-to-MIDI | MIT | successor GAME noted | n/a | custom training possible | extracts non-integer MIDI | analysis/labeling, not SVC | possible | strong | medium | MIDI extraction future |
@@ -40,6 +40,9 @@ separately before adoption.
   F0 conditioning and BigVGAN; its documented flags include F0 conditioning
   and semitone shift. README documents zero-shot SVC from a 1–30 second
   reference and custom fine-tuning.
+- Maintenance: upstream is archived/read-only as of 2025-11-21. It remains a
+  useful zero-shot SVC benchmark/POC candidate, not an unqualified production
+  dependency.
 - Suitability: first zero-shot SVC candidate, including the required source
   melody/timing preservation evaluation. Official README has an Apple Silicon
   requirements file, but real long-song speed/memory remains benchmark-only.
@@ -50,7 +53,7 @@ separately before adoption.
 
 - Repository: <https://github.com/open-mmlab/Amphion>
 - Checked revision: `26f6883110181f1dbfe95c70a7c7dbaf4de5f42a` (2026-08-25).
-- License: Apache-2.0 source; pretrained-data/model terms must be checked per
+- License: MIT source; pretrained-data/model terms must be checked per
   release.
 - Architecture: Vevo2 documents unified controllable speech and singing
   generation, including TTS, text-to-singing, VC/SVC, editing, singing style

@@ -21,8 +21,9 @@ class AudioMixer(Protocol):
 class RemixService:
     """Composition seam for a trusted in-process mixer, not a public ffmpeg wrapper."""
 
-    def __init__(self, mixer: AudioMixer) -> None:
+    def __init__(self, mixer: AudioMixer, *, supports_synchronized_transpose: bool = False) -> None:
         self._mixer = mixer
+        self.supports_synchronized_transpose = supports_synchronized_transpose
 
     async def mix(
         self,

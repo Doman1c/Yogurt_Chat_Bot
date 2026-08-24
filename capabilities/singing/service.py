@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from typing import Optional
 
@@ -22,6 +23,51 @@ class _CoverJob:
     completion: "asyncio.Future[SingingResult]"
     cancelled: asyncio.Event
     started_at: float
+    capacity: "_JobCapacity | None" = None
+    task: "asyncio.Task[None] | None" = None
+
+
+class _JobCapacity:
+    """A bounded per-event-loop cover-job gate with cancellation-aware waiting."""
+
+    def __init__(self, max_concurrent_jobs: int, max_pending_jobs: int) -> None:
+        self._semaphore = asyncio.Semaphore(max_concurrent_jobs)
+        self._max_outstanding = max_concurrent_jobs + max_pending_jobs
+        self._outstanding = 0
+        self._lock = asyncio.Lock()
+
+    async def reserve(self) -> bool:
+        async with self._lock:
+            if self._outstanding >= self._max_outstanding:
+                return False
+            self._outstanding += 1
+            return True
+
+    async def release_reservation(self) -> None:
+        async with self._lock:
+            assert self._outstanding > 0
+            self._outstanding -= 1
+
+    async def acquire_or_cancel(self, cancelled: asyncio.Event) -> bool:
+        if cancelled.is_set():
+            return False
+        acquire_task = asyncio.create_task(self._semaphore.acquire())
+        cancel_task = asyncio.create_task(cancelled.wait())
+        done, pending = await asyncio.wait(
+            {acquire_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        acquired = acquire_task in done and acquire_task.result() is True
+        if not acquired or cancelled.is_set():
+            if acquired:
+                self._semaphore.release()
+            return False
+        return True
+
+    def release_slot(self) -> None:
+        self._semaphore.release()
 
 
 class SingingHandle:
@@ -50,11 +96,23 @@ class SingingService:
         separator: SourceSeparator,
         engine: SingingConversionEngine,
         remixer: RemixService,
+        *,
+        max_concurrent_jobs: int = 1,
+        max_pending_jobs: int = 4,
     ) -> None:
+        if not (1 <= max_concurrent_jobs <= 4):
+            raise ValueError("invalid_max_concurrent_jobs")
+        if not (1 <= max_pending_jobs <= 8):
+            raise ValueError("invalid_max_pending_jobs")
         self._assets = assets
         self._separator = separator
         self._engine = engine
         self._remixer = remixer
+        self._max_concurrent_jobs = max_concurrent_jobs
+        self._max_pending_jobs = max_pending_jobs
+        self._capacities: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _JobCapacity]" = (
+            weakref.WeakKeyDictionary()
+        )
         self._events: list[SingingEvent] = []
 
     def events(self) -> tuple[SingingEvent, ...]:
@@ -68,15 +126,36 @@ class SingingService:
             cancelled=asyncio.Event(),
             started_at=time.monotonic(),
         )
+        handle = SingingHandle(job)
+        if (
+            request.output == "mixed"
+            and request.transpose_semitones != 0
+            and not self._remixer.supports_synchronized_transpose
+        ):
+            self._complete_failure(job, "unsupported_transpose")
+            return handle
+        capacity = self._capacity()
+        if not await capacity.reserve():
+            self._complete_failure(job, "queue_full")
+            return handle
+        job.capacity = capacity
         self._emit(job, "queued")
-        asyncio.create_task(self._run(job))
-        return SingingHandle(job)
+        job.task = asyncio.create_task(self._run(job))
+        return handle
 
     async def cover(self, request: CoverRequest) -> SingingResult:
         return await (await self.submit(request)).wait()
 
     async def _run(self, job: _CoverJob) -> None:
+        acquired_slot = False
         try:
+            assert job.capacity is not None
+            if not await job.capacity.acquire_or_cancel(job.cancelled):
+                self._complete_failure(job, "cancelled")
+                return
+            acquired_slot = True
+            if self._cancelled(job):
+                return
             asset = self._assets.resolve(job.request.asset_id)
             self._emit(job, "asset_ready")
             if self._cancelled(job):
@@ -133,6 +212,20 @@ class SingingService:
             self._complete_failure(job, "cancelled")
         except Exception:
             self._complete_failure(job, "conversion_failed")
+        finally:
+            if acquired_slot:
+                assert job.capacity is not None
+                job.capacity.release_slot()
+            if job.capacity is not None:
+                await job.capacity.release_reservation()
+
+    def _capacity(self) -> _JobCapacity:
+        loop = asyncio.get_running_loop()
+        capacity = self._capacities.get(loop)
+        if capacity is None:
+            capacity = _JobCapacity(self._max_concurrent_jobs, self._max_pending_jobs)
+            self._capacities[loop] = capacity
+        return capacity
 
     def _cancelled(self, job: _CoverJob) -> bool:
         if job.cancelled.is_set():

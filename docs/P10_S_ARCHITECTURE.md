@@ -28,11 +28,15 @@ Failures terminate once with `failed`; cancellation terminates once with
 `cancelled`. Paths, lyrics, model identifiers, stderr, and tracebacks are never
 events.
 
-The foundation treats engines as potentially non-cancellable Python inference:
-the service marks cancellation, stops starting later stages, and discards a
-later result. A future subprocess-backed adapter may implement real termination
-behind the same protocol, but must use a fixed trusted executable, argv lists,
-bounded timeout/output, a controlled temporary directory, and cleanup.
+The foundation has a per-service bounded heavy-job gate: one active full cover
+pipeline by default, with at most four pending jobs. Jobs awaiting the gate emit
+only `queued`. Their cancellation completes immediately and does not enter
+asset resolution, separation, conversion, or remix. A running non-cancellable
+separator/engine/mixer may finish its current call; the service then starts no
+later stage, discards late output, and returns `cancelled`. A future
+subprocess-backed adapter may implement real termination behind the same
+protocol, but must use a fixed trusted executable, argv lists, bounded
+timeout/output, a controlled temporary directory, and cleanup.
 
 ## Engine and separation composition
 
@@ -45,10 +49,11 @@ deferred.
 
 ## Transpose and Native Singing
 
-Schema supports `-12..+12` semitones. A production cover may only apply a
-transpose when its chosen pipeline can transpose both vocal and instrumental
-consistently; synchronized instrumental transposition is therefore deferred in
-this foundation. Native Singing is a separate future chain:
+Schema supports `-12..+12` semitones. Vocal-only output may use this directly.
+Mixed output with nonzero transpose is rejected until the trusted remix
+composition explicitly declares synchronized instrumental transposition;
+otherwise it would create an out-of-key cover. Native Singing is a separate
+future chain:
 
 ```text
 lyrics + MIDI/melody -> DiffSinger / Vevo2-like SVS -> Yogurt Singing

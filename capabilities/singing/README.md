@@ -23,10 +23,18 @@ SVC-engine, and remix seams. `RVCAdapter`, `SeedVCAdapter`, `Vevo2Adapter`, and
 application installs and explicitly composes an approved local runtime.
 They do not download models or start a web service.
 
-`SingingService.submit()` returns an opaque handle. Cancellation is immediate
-for the job state; a non-interruptible Python engine may finish its current
-operation, after which the service discards its output and emits `cancelled`.
-No adapter claims GPU cancellation unless it implements it.
+`SingingService.submit()` returns an opaque handle. A cancellation **request**
+is immediate: a queued job waiting for capacity completes immediately and never
+starts the pipeline. A running non-interruptible separator, engine, or mixer
+may finish its current call; the service then skips later stages, discards late
+output, and returns `cancelled`. No adapter claims GPU cancellation unless it
+implements it.
+
+Only one cover pipeline runs per service composition by default. The default
+pending bound is four jobs; further submissions receive `queue_full`. A mixed
+cover with nonzero transpose is rejected as `unsupported_transpose` unless the
+trusted remix composition explicitly declares synchronized instrumental
+transpose support. Vocal-only transpose remains valid.
 
 Current focus is SVC Cover Mode. Native Singing (`lyrics + MIDI/melody -> SVS`)
 is a future seam, not an implementation in P10-S foundation.
