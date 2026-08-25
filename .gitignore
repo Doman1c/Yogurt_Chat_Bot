@@ -45,7 +45,8 @@ social_layer/config/stickers.json
 assets/singing/source/
 assets/singing/reference/
 assets/singing/output/
-singing_runtime/
+singing_runtime/*
+!singing_runtime/config.example.toml
 singing_checkpoints/
 assets/singing/private/
 
