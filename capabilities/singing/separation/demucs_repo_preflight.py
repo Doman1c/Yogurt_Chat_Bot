@@ -26,9 +26,14 @@ def main(argv: list[str] | None = None) -> int:
             isinstance(signature, str) and signature for signature in signatures
         ):
             return 2
+
+        # Use Demucs' own LocalRepo load path rather than checking only that a
+        # matching filename exists. get_model() verifies the model checksum and
+        # deserializes the model, so READY cannot be produced for a truncated or
+        # otherwise unreadable local checkpoint.
         model_repo = LocalRepo(args.repo)
-        if not all(model_repo.has_model(signature) for signature in signatures):
-            return 2
+        for signature in signatures:
+            model_repo.get_model(signature)
     except Exception:
         return 2
     return 0
