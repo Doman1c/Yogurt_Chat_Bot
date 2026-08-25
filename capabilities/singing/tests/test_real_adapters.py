@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import importlib.util
 import inspect
 import io
 import json
@@ -25,7 +26,11 @@ from capabilities.singing.engines.runtime import (
     TrustedRuntimeConfig,
     preflight_runtime,
 )
-from capabilities.singing.engines.seed_vc import SeedVCAdapter, SeedVCBackendConfig
+from capabilities.singing.engines.seed_vc import (
+    SeedVCAdapter,
+    SeedVCBackendConfig,
+    preflight_seedvc_cache,
+)
 from capabilities.singing.engines.vevo2 import Vevo2Adapter, Vevo2BackendConfig
 from capabilities.singing.errors import SingingError
 from capabilities.singing.separation.demucs import DemucsBackendConfig, DemucsSeparator
@@ -64,15 +69,23 @@ async def _verified_runtime(*_args, **_kwargs) -> str:
     return "a" * 40
 
 
+async def _cache_ready(*_args, **_kwargs) -> None:
+    return None
+
+
+async def _demucs_repo_ready(*_args, **_kwargs) -> None:
+    return None
+
+
 def _seed_dependencies(tmp_path: Path) -> tuple[RuntimeModelDependency, ...]:
     paths = {
-        "rmvpe": tmp_path / "checkpoints" / "models--lj1995--VoiceConversionWebUI",
-        "campplus": tmp_path / "checkpoints" / "models--funasr--campplus",
-        "bigvgan": tmp_path / "checkpoints" / "hf_cache" / "models--nvidia--bigvgan",
-        "whisper": tmp_path / "checkpoints" / "hf_cache" / "models--openai--whisper-small",
+        "rmvpe": tmp_path / "checkpoints",
+        "campplus": tmp_path / "checkpoints",
+        "bigvgan": tmp_path / "checkpoints" / "hf_cache",
+        "whisper": tmp_path / "checkpoints" / "hf_cache",
     }
-    for path in paths.values():
-        path.mkdir(parents=True)
+    for path in set(paths.values()):
+        path.mkdir(parents=True, exist_ok=True)
     return tuple(RuntimeModelDependency(component, path) for component, path in paths.items())
 
 
@@ -93,10 +106,6 @@ def _demucs_config(tmp_path: Path) -> DemucsBackendConfig:
         _runtime(tmp_path),
         "a" * 40,
         repo,
-        (
-            RuntimeModelDependency("demucs-bag", bag),
-            RuntimeModelDependency("demucs-component", component),
-        ),
     )
 
 
@@ -133,6 +142,7 @@ def test_seedvc_preflight_accepts_actual_bound_cache_layout(
         model_config.write_text("model: seed")
         reference.write_bytes(_wav_bytes())
         monkeypatch.setattr("capabilities.singing.engines.seed_vc.preflight_runtime", _verified_runtime)
+        monkeypatch.setattr("capabilities.singing.engines.seed_vc.preflight_seedvc_cache", _cache_ready)
         adapter = SeedVCAdapter(
             SeedVCBackendConfig(
                 _runtime(tmp_path), script, checkpoint, model_config, reference, _seed_dependencies(tmp_path)
@@ -207,6 +217,73 @@ def test_real_subprocess_layer_is_fixed_argv_without_shell() -> None:
     assert "shell=True" not in source
 
 
+def test_seedvc_cache_runner_uses_huggingface_local_only_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_run(command, runtime, cancelled, *, environment) -> None:
+        runner = Path(command[1])
+        source = runner.read_text()
+        assert runner.name == "seed_vc_cache_preflight.py"
+        assert environment == {
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "HF_DATASETS_OFFLINE": "1",
+        }
+        assert source.count("local_files_only=True") == 6
+        assert 'repo_id="lj1995/VoiceConversionWebUI"' in source
+        assert 'filename="rmvpe.pt"' in source
+        assert 'repo_id="funasr/campplus"' in source
+        assert 'filename="campplus_cn_common.bin"' in source
+        assert 'repo_id="nvidia/bigvgan_v2_44khz_128band_512x"' in source
+        assert 'repo_id="openai/whisper-small"' in source
+
+    async def run() -> None:
+        monkeypatch.setattr("capabilities.singing.engines.seed_vc.run_trusted_process", fake_run)
+        await preflight_seedvc_cache(_runtime(tmp_path))
+
+    asyncio.run(run())
+
+
+def test_demucs_runner_parses_bag_and_requires_all_localrepo_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_modules = tmp_path / "fake-modules"
+    demucs_module = fake_modules / "demucs"
+    demucs_module.mkdir(parents=True)
+    (demucs_module / "__init__.py").write_text("")
+    (demucs_module / "repo.py").write_text(
+        """
+from pathlib import Path
+class LocalRepo:
+    def __init__(self, root):
+        self.root = Path(root)
+    def has_model(self, signature):
+        return any(path.suffix == '.th' and path.stem.split('-', 1)[0] == signature for path in self.root.iterdir())
+"""
+    )
+    (fake_modules / "yaml.py").write_text(
+        "def safe_load(value):\n    return {'models': ['one', 'two']}\n"
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "htdemucs.yaml").write_text("models:\n  - one\n  - two\n")
+    (repo / "one-verified.th").write_bytes(b"one")
+    (repo / "two.th").write_bytes(b"two")
+    runner = Path("capabilities/singing/separation/demucs_repo_preflight.py").resolve()
+    module_spec = importlib.util.spec_from_file_location("demucs_repo_preflight_test", runner)
+    assert module_spec is not None and module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    monkeypatch.syspath_prepend(str(fake_modules))
+    monkeypatch.delitem(sys.modules, "yaml", raising=False)
+    monkeypatch.delitem(sys.modules, "demucs", raising=False)
+    monkeypatch.delitem(sys.modules, "demucs.repo", raising=False)
+    arguments = ["--repo", str(repo), "--model-name", "htdemucs"]
+    assert module.main(arguments) == 0
+    (repo / "two.th").unlink()
+    assert module.main(arguments) == 2
+
+
 def test_demucs_adapter_uses_trusted_fixed_backend_and_validates_stems(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -224,6 +301,7 @@ def test_demucs_adapter_uses_trusted_fixed_backend_and_validates_stems(
         source.write_bytes(_wav_bytes())
         monkeypatch.setattr("capabilities.singing.separation.demucs.run_trusted_process", fake_run)
         monkeypatch.setattr("capabilities.singing.separation.demucs.preflight_runtime", _verified_runtime)
+        monkeypatch.setattr("capabilities.singing.separation.demucs.preflight_demucs_repo", _demucs_repo_ready)
         separator = DemucsSeparator(_demucs_config(tmp_path))
         result = await separator.separate(SongAsset("song-01", source), asyncio.Event())
         assert result.vocal.sample_rate == result.instrumental.sample_rate == 44100
@@ -319,7 +397,6 @@ def test_adapter_preflight_rejects_missing_python_before_backend_launch(tmp_path
                 unavailable,
                 demucs_config.revision,
                 demucs_config.model_repo,
-                demucs_config.model_dependencies,
             )
         )
         for adapter in (seed, rvc, vevo2):
@@ -347,10 +424,10 @@ def test_seedvc_preflight_rejects_missing_working_directory_before_backend_launc
         model_config.write_text("model: seed")
         reference.write_bytes(_wav_bytes())
         dependency_roots = {
-            "rmvpe": missing_directory / "checkpoints" / "models--rmvpe",
-            "campplus": missing_directory / "checkpoints" / "models--campplus",
-            "bigvgan": missing_directory / "checkpoints" / "hf_cache" / "models--bigvgan",
-            "whisper": missing_directory / "checkpoints" / "hf_cache" / "models--whisper",
+            "rmvpe": missing_directory / "checkpoints",
+            "campplus": missing_directory / "checkpoints",
+            "bigvgan": missing_directory / "checkpoints" / "hf_cache",
+            "whisper": missing_directory / "checkpoints" / "hf_cache",
         }
         adapter = SeedVCAdapter(
             SeedVCBackendConfig(
@@ -408,6 +485,7 @@ def test_seedvc_dependency_preflight_and_offline_environment(
         reference.write_bytes(_wav_bytes())
         dependencies = _seed_dependencies(tmp_path)
         monkeypatch.setattr("capabilities.singing.engines.seed_vc.preflight_runtime", _verified_runtime)
+        monkeypatch.setattr("capabilities.singing.engines.seed_vc.preflight_seedvc_cache", _cache_ready)
         adapter = SeedVCAdapter(
             SeedVCBackendConfig(_runtime(tmp_path), script, checkpoint, model_config, reference, dependencies),
             revision="a" * 40,
@@ -452,6 +530,7 @@ def test_seedvc_rejects_dependency_cache_outside_upstream_layout(
         outside.mkdir()
         dependencies[0] = RuntimeModelDependency("rmvpe", outside)
         monkeypatch.setattr("capabilities.singing.engines.seed_vc.preflight_runtime", _verified_runtime)
+        monkeypatch.setattr("capabilities.singing.engines.seed_vc.preflight_seedvc_cache", _cache_ready)
         adapter = SeedVCAdapter(
             SeedVCBackendConfig(_runtime(tmp_path), script, checkpoint, model_config, reference, tuple(dependencies)),
             revision="a" * 40,
@@ -531,6 +610,7 @@ def test_spawn_failure_and_demucs_failure_mapping_are_bounded(
         config = _demucs_config(tmp_path)
         separator = DemucsSeparator(config)
         monkeypatch.setattr("capabilities.singing.separation.demucs.preflight_runtime", _verified_runtime)
+        monkeypatch.setattr("capabilities.singing.separation.demucs.preflight_demucs_repo", _demucs_repo_ready)
 
         async def exited(*_args, **_kwargs):
             from capabilities.singing.engines.runtime import TrustedProcessFailure
@@ -555,6 +635,7 @@ def test_demucs_missing_stems_timeout_cancel_and_model_preflight_are_bounded(
         config = _demucs_config(tmp_path)
         separator = DemucsSeparator(config)
         monkeypatch.setattr("capabilities.singing.separation.demucs.preflight_runtime", _verified_runtime)
+        monkeypatch.setattr("capabilities.singing.separation.demucs.preflight_demucs_repo", _demucs_repo_ready)
 
         async def no_stems(*_args, **_kwargs):
             return None
@@ -582,7 +663,6 @@ def test_demucs_missing_stems_timeout_cancel_and_model_preflight_are_bounded(
             _runtime(tmp_path),
             "a" * 40,
             missing_repo,
-            (RuntimeModelDependency("demucs-bag", missing_repo / "htdemucs.yaml"),),
         )
         monkeypatch.setattr(
             "capabilities.singing.separation.demucs.preflight_runtime", preflight_runtime

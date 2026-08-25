@@ -8,7 +8,6 @@ from pathlib import Path
 from ..assets import InstrumentalArtifact, SeparatedSong, SongAsset
 from ..errors import SingingError
 from ..engines.runtime import (
-    RuntimeModelDependency,
     RuntimePreflightFailure,
     TrustedRuntimeConfig,
     TrustedProcessFailure,
@@ -19,6 +18,9 @@ from ..engines.runtime import (
 )
 
 
+_DEMUCS_REPO_PREFLIGHT_RUNNER = Path(__file__).with_name("demucs_repo_preflight.py").resolve()
+
+
 @dataclass(frozen=True)
 class DemucsBackendConfig:
     """Application-owned local Demucs command composition."""
@@ -26,7 +28,6 @@ class DemucsBackendConfig:
     runtime: TrustedRuntimeConfig
     revision: str
     model_repo: Path
-    model_dependencies: tuple[RuntimeModelDependency, ...]
     model_name: str = "htdemucs"
 
     def __post_init__(self) -> None:
@@ -34,24 +35,10 @@ class DemucsBackendConfig:
             raise ValueError("invalid_demucs_model")
         if not self.model_repo.is_absolute():
             raise ValueError("demucs_model_repo_must_be_absolute")
-        if not self.model_dependencies:
-            raise ValueError("incomplete_demucs_model_inventory")
 
     def validate_model_repo(self) -> None:
         if not self.model_repo.is_dir():
             raise RuntimePreflightFailure("demucs_repo_missing")
-        paths = tuple(dependency.local_path for dependency in self.model_dependencies)
-        if not any(path.name == f"{self.model_name}.yaml" for path in paths):
-            raise RuntimePreflightFailure("demucs_bag_missing")
-        if not any(path.suffix == ".th" for path in paths):
-            raise RuntimePreflightFailure("demucs_component_missing")
-        for path in paths:
-            try:
-                path.relative_to(self.model_repo)
-            except ValueError as error:
-                raise RuntimePreflightFailure("demucs_repo_binding_invalid") from error
-            if not path.is_file():
-                raise RuntimePreflightFailure("dependency_missing")
 
 
 class DemucsSeparator:
@@ -68,9 +55,9 @@ class DemucsSeparator:
             raise SingingError("separator_unavailable")
         try:
             config.validate_model_repo()
-            return await preflight_runtime(
-                config.runtime, config.revision, config.model_dependencies
-            )
+            revision = await preflight_runtime(config.runtime, config.revision, ())
+            await preflight_demucs_repo(config)
+            return revision
         except (RuntimePreflightFailure, SingingError):
             raise SingingError("separator_unavailable") from None
 
@@ -124,3 +111,26 @@ class DemucsSeparator:
                     sample_rate=instrumental.sample_rate,
                 ),
             )
+
+
+async def preflight_demucs_repo(config: DemucsBackendConfig) -> None:
+    """Use Demucs' own LocalRepo semantics to validate the selected bag."""
+
+    if not _DEMUCS_REPO_PREFLIGHT_RUNNER.is_file():
+        raise RuntimePreflightFailure("demucs_repo_preflight_runner_missing")
+    try:
+        await run_trusted_process(
+            (
+                config.runtime.python_executable,
+                _DEMUCS_REPO_PREFLIGHT_RUNNER,
+                "--repo",
+                config.model_repo,
+                "--model-name",
+                config.model_name,
+            ),
+            config.runtime,
+            asyncio.Event(),
+            environment=offline_environment(),
+        )
+    except (TrustedProcessFailure, SingingError) as error:
+        raise RuntimePreflightFailure("demucs_model_material_invalid") from error

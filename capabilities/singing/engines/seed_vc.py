@@ -25,6 +25,9 @@ from .runtime import (
 )
 
 
+_SEEDVC_CACHE_PREFLIGHT_RUNNER = Path(__file__).with_name("seed_vc_cache_preflight.py").resolve()
+
+
 @dataclass(frozen=True)
 class SeedVCCacheLayout:
     """The two cache roots hard-coded by the pinned Seed-VC inference path."""
@@ -45,10 +48,8 @@ class SeedVCCacheLayout:
             "whisper": self.hf_cache_root,
         }
         for dependency in dependencies:
-            try:
-                dependency.local_path.relative_to(roots[dependency.component_id])
-            except ValueError as error:
-                raise RuntimePreflightFailure("seedvc_cache_layout_invalid") from error
+            if dependency.local_path != roots[dependency.component_id]:
+                raise RuntimePreflightFailure("seedvc_cache_layout_invalid")
 
 
 @dataclass(frozen=True)
@@ -104,8 +105,10 @@ class SeedVCAdapter:
                 (config.reference_audio, "reference_audio"),
             ):
                 require_absolute_file(path, label=label)
-            return await preflight_runtime(config.runtime, self.version, config.dependencies)
-        except (RuntimePreflightFailure, SingingError):
+            revision = await preflight_runtime(config.runtime, self.version, config.dependencies)
+            await preflight_seedvc_cache(config.runtime)
+            return revision
+        except (RuntimePreflightFailure, TrustedProcessFailure, SingingError):
             raise SingingError("engine_unavailable") from None
 
     async def convert(
@@ -167,3 +170,15 @@ class SeedVCAdapter:
 
 def _is_provenance_id(value: str) -> bool:
     return re.fullmatch(r"[a-z][a-z0-9._-]{0,63}", value) is not None
+
+
+async def preflight_seedvc_cache(runtime: TrustedRuntimeConfig) -> None:
+    """Let the pinned runtime's Hugging Face stack resolve its offline cache."""
+
+    require_absolute_file(_SEEDVC_CACHE_PREFLIGHT_RUNNER, label="seedvc_cache_preflight_runner")
+    await run_trusted_process(
+        (runtime.python_executable, _SEEDVC_CACHE_PREFLIGHT_RUNNER),
+        runtime,
+        asyncio.Event(),
+        environment=offline_environment(),
+    )

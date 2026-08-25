@@ -25,20 +25,20 @@ inference_cfg_rate = 0.7
 
 [engines.seed_vc.dependencies.rmvpe]
 # Pinned inference.py calls hf_hub_download(cache_dir="./checkpoints").
-# Point to the already-populated HF repository cache under this exact root.
-local_path = "C:\\Yogurt_Singing_Runtime\\upstream\\seed-vc\\checkpoints\\models--lj1995--VoiceConversionWebUI"
+# The trusted runner uses HF local_files_only resolution for rmvpe.pt.
+local_path = "C:\\Yogurt_Singing_Runtime\\upstream\\seed-vc\\checkpoints"
 
 [engines.seed_vc.dependencies.campplus]
-# CAMPPlus uses the same ./checkpoints cache_dir as RMVPE.
-local_path = "C:\\Yogurt_Singing_Runtime\\upstream\\seed-vc\\checkpoints\\models--funasr--campplus"
+# The trusted runner uses the same cache root for campplus_cn_common.bin.
+local_path = "C:\\Yogurt_Singing_Runtime\\upstream\\seed-vc\\checkpoints"
 
 [engines.seed_vc.dependencies.bigvgan]
-# inference.py sets HF_HUB_CACHE=./checkpoints/hf_cache before BigVGAN loads.
-local_path = "C:\\Yogurt_Singing_Runtime\\upstream\\seed-vc\\checkpoints\\hf_cache\\models--nvidia--bigvgan_v2_44khz_128band_512x"
+# The trusted runner resolves the complete BigVGAN snapshot locally.
+local_path = "C:\\Yogurt_Singing_Runtime\\upstream\\seed-vc\\checkpoints\\hf_cache"
 
 [engines.seed_vc.dependencies.whisper]
-# WhisperModel/AutoFeatureExtractor use the same HF_HUB_CACHE root.
-local_path = "C:\\Yogurt_Singing_Runtime\\upstream\\seed-vc\\checkpoints\\hf_cache\\models--openai--whisper-small"
+# The trusted runner resolves the Whisper snapshot/config/feature extractor locally.
+local_path = "C:\\Yogurt_Singing_Runtime\\upstream\\seed-vc\\checkpoints\\hf_cache"
 
 [engines.rvc]
 revision = "81eed5e8f68b6bed1789f682fe78cdd324495afc"
@@ -77,9 +77,8 @@ python_executable = "C:\\Yogurt_Singing_Runtime\\envs\\demucs\\Scripts\\python.e
 working_directory = "C:\\Yogurt_Singing_Runtime\\upstream\\demucs"
 model_name = "htdemucs"
 model_repo = "C:\\Yogurt_Singing_Runtime\\models\\demucs\\repo"
-# List the selected bag and every component required by that bag. Paths are
-# relative to model_repo and must stay within it; replace placeholders locally.
-model_files = ["htdemucs.yaml", "REPLACE_WITH_EACH_BAG_COMPONENT.th"]
+# The trusted Demucs preflight reads htdemucs.yaml and verifies every referenced
+# LocalRepo .th component itself; do not maintain a duplicate manual list here.
 
 [outputs]
 directory = "C:\\Yogurt_Singing_Runtime\\outputs"

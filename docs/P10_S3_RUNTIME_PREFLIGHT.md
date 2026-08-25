@@ -35,13 +35,17 @@ The private config must declare present local cache/model locations for all of:
 - `whisper`.
 
 Those declarations are intentionally bound to the pinned upstream layout, not
-an arbitrary cache folder. `rmvpe` and `campplus` must be inside
+an arbitrary cache folder. `rmvpe` and `campplus` use
 `<seed-vc>/checkpoints`, because `hf_utils.load_custom_model_from_hf` passes
-`cache_dir="./checkpoints"`. `bigvgan` and `whisper` must be inside
+`cache_dir="./checkpoints"`. `bigvgan` and `whisper` use
 `<seed-vc>/checkpoints/hf_cache`, because `inference.py` sets `HF_HUB_CACHE`
-to that path before its `from_pretrained` calls. The committed example names
-the expected Hugging Face repository-cache roots. A cache outside these roots
-is rejected before any child process starts.
+to that path before its `from_pretrained` calls. A trusted runner in the
+Seed-VC Python environment asks Hugging Face to resolve RMVPE and CAMPPlus with
+`hf_hub_download(..., local_files_only=True)`, resolves local BigVGAN and
+Whisper snapshots with `snapshot_download(..., local_files_only=True)`, then
+resolves Whisper config/feature-extractor artifacts with Transformers'
+`local_files_only=True`. It does not infer Hugging Face cache internals from
+directory names. A missing or incomplete cache fails before engine launch.
 
 The child receives process-local `HF_HUB_OFFLINE=1`,
 `TRANSFORMERS_OFFLINE=1`, and `HF_DATASETS_OFFLINE=1`. It otherwise inherits
@@ -55,10 +59,10 @@ Demucs always invokes the fixed `python -m demucs.separate ... --repo
 <trusted-local-repo>` argument. The upstream `get_model` code uses
 `LocalRepo(repo)` for component `.th` files and `BagOnlyRepo(repo, model_repo)`
 for the selected bag YAML when `--repo` is supplied; it does not take the
-remote `files.txt` branch. The trusted repo must therefore contain the selected
-`htdemucs.yaml` (or `htdemucs_ft.yaml`) plus every `.th` component it names;
-the preflight requires each configured entry to be a file underneath the
-trusted repo. No remote fallback is available through this adapter.
+remote `files.txt` branch. A trusted runner in the Demucs Python environment
+parses the selected bag YAML, constructs Demucs' own `LocalRepo`, and requires
+every signature referenced by `models` to resolve through that repository.
+No duplicate hand-maintained component list or remote fallback is involved.
 
 Missing runtime/model maps to `separator_unavailable`, process exit or missing
 stems maps to `separation_failed`, and timeout/cancellation preserve their
