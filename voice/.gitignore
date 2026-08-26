@@ -4,10 +4,14 @@
 **/*.ckpt
 **/*.safetensors
 **/*.onnx
+**/*.bin
+**/*.gguf
 **/*.wav
 **/*.mp3
 **/*.flac
 **/*.m4a
+**/*.list
+**/private/
 **/cache/
 **/models/
 **/pretrained_models/
@@ -15,6 +19,7 @@
 **/dataset/
 **/training_source/
 **/training_runs/
+**/manifests/
 **/output/
 **/outputs/
 **/logs/
