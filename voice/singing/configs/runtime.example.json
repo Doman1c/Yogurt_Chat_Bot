@@ -5,6 +5,6 @@
   "python": "<path-to-python-3.10>",
   "checkpoint": "<path-to-local-checkpoint>",
   "config": "<path-to-local-seed-vc-config>",
-  "cache_dir": "<path-to-local-huggingface-cache>",
+  "cache_dir": "<path-to-seed-vc-clone>/checkpoints/hf_cache",
   "output_dir": "<path-to-local-output>"
 }
