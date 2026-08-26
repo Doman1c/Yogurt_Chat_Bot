@@ -3,7 +3,7 @@ param([string]$EnvFile = (Join-Path (Split-Path -Parent $PSScriptRoot) '.env'))
 
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $EnvFile)) { throw "Create a local .env from .env.example first: $EnvFile" }
-Get-Content -LiteralPath $EnvFile | ForEach-Object {
+Get-Content -LiteralPath $EnvFile -Encoding utf8 | ForEach-Object {
     if ($_ -match '^\s*([^#=]+)=(.*)$') { Set-Item -Path "Env:$($matches[1].Trim())" -Value $matches[2].Trim() }
 }
 if (-not $env:YOGURT_TTS_PYTHON) { $env:YOGURT_TTS_PYTHON = 'python' }
