@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -118,6 +119,7 @@ def test_partial_resume_reuses_existing_work(monkeypatch: pytest.MonkeyPatch, tm
     assert calls == [{"resume": True, "skip_mix": False, "separation_only": False, "keep_work": False}]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="drive-letter volume validation is Windows-specific")
 def test_managed_directories_must_share_a_volume() -> None:
     cfg = {"incoming_dir": r"E:\incoming", "processing_dir": r"E:\processing", "archive_dir": r"D:\archive", "failed_dir": r"E:\failed"}
     with pytest.raises(ValueError, match="share one volume"):
