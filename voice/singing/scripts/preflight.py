@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 
@@ -22,13 +21,21 @@ def main() -> int:
     parser.add_argument("--config", type=Path, required=True, help="local JSON derived from configs/runtime.example.json")
     args = parser.parse_args()
     data = json.loads(args.config.read_text(encoding="utf-8"))
-    root = Path(data["seed_vc_home"])
-    python = Path(data["python"])
+    root = Path(data["seed_vc_home"]).resolve()
+    python = Path(data["python"]).resolve()
     failures: list[str] = []
     check("Python", python.is_file(), str(python), failures)
     check("Seed-VC checkout", (root / "inference.py").is_file(), str(root), failures)
     for key in ("checkpoint", "config"):
         check(key, Path(data[key]).is_file(), data[key], failures)
+    expected_cache = (root / "checkpoints" / "hf_cache").resolve()
+    configured_cache = Path(data["cache_dir"]).resolve()
+    check(
+        "Seed-VC cache path",
+        configured_cache == expected_cache,
+        f"configured={configured_cache} / pinned-upstream={expected_cache}",
+        failures,
+    )
     for key in ("cache_dir", "output_dir"):
         path = Path(data[key])
         try:
