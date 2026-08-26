@@ -21,11 +21,24 @@ def main() -> int:
         if not item.is_file():
             raise SystemExit(f"missing audio: {item}")
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    home = Path(config["seed_vc_home"])
-    output = Path(config["output_dir"])
+    home = Path(config["seed_vc_home"]).resolve()
+    output = Path(config["output_dir"]).resolve()
+    configured_cache = Path(config["cache_dir"]).resolve()
+    upstream_cache = (home / "checkpoints" / "hf_cache").resolve()
+    if configured_cache != upstream_cache:
+        raise SystemExit(
+            "Pinned Seed-VC inference.py overrides HF_HUB_CACHE with "
+            f"{upstream_cache}. Set cache_dir to that path (or make it resolve "
+            "there via a local junction/symlink) before running offline."
+        )
     output.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
-    env.update({"HF_HOME": config["cache_dir"], "HF_HUB_CACHE": config["cache_dir"], "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
+    env.update({
+        "HF_HOME": str(upstream_cache),
+        "HF_HUB_CACHE": str(upstream_cache),
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+    })
     command = [
         config["python"], str(home / "inference.py"), "--source", str(args.source), "--target", str(args.target),
         "--output", str(output), "--checkpoint", config["checkpoint"], "--config", config["config"],
