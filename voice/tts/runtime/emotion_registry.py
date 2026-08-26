@@ -63,6 +63,7 @@ class EmotionRegistry:
         if not isinstance(self.routing, dict):
             raise ValueError("emotion registry routing_index.emotions must be a mapping")
         self.missing = {str(item) for item in raw.get("missing_emotions", [])}
+        self.semantic_rows: list[dict[str, object]] = []
         if "neutral" not in self.routing:
             raise ValueError("emotion registry must declare neutral routing")
         for emotion, group in self.routing.items():
@@ -76,6 +77,17 @@ class EmotionRegistry:
                     ref_id = str(row.get("id", "")) if isinstance(row, dict) else ""
                     if ref_id not in self.references:
                         raise ValueError(f"routing references unknown id: {ref_id or '<missing>'}")
+                    item = self.references[ref_id]
+                    if item.get("emotion") != emotion:
+                        raise ValueError(f"routing_semantic_mismatch: {emotion}.{role} -> {ref_id} has item.emotion={item.get('emotion')}")
+                    if item.get("role") is not None and item.get("role") != role:
+                        raise ValueError(f"routing_semantic_mismatch: {emotion}.{role} -> {ref_id} has item.role={item.get('role')}")
+                    self.semantic_rows.append({"routing_emotion": emotion, "reference_id": ref_id,
+                                               "item_emotion": item.get("emotion"), "routing_role": role,
+                                               "item_role": item.get("role"),
+                                               "human_intensity_hint": item.get("human_intensity_hint"),
+                                               "runtime_intensity": item.get("runtime_intensity"),
+                                               "enabled": bool(item.get("enabled"))})
         if not self._candidates("neutral"):
             raise ValueError("emotion registry requires an enabled neutral reference")
         for emotion in self.routing:
@@ -122,7 +134,7 @@ class EmotionRegistry:
                 ranked = self._ranked(candidates)
                 selected, role = ranked[round(intensity * (len(ranked) - 1))]
                 selection_mode = "human_rank_provisional"
-        return Route(requested=normalized, canonical=canonical, used=used, fallback=used != canonical,
+        return Route(requested=normalized, canonical=canonical, used=used, fallback=fallback_reason is not None,
                      reference_id=str(selected["id"]), role=role, selection_mode=selection_mode,
                      fallback_reason=fallback_reason, audio=Path(selected["audio"]),
                      prompt_text=str(selected["prompt_text"]), prompt_language=str(selected["prompt_lang"]))
@@ -145,4 +157,26 @@ class EmotionRegistry:
                  "|---|---|---|---:|---:|---|---:|"]
         for row in self.validation_rows:
             lines.append("| {reference_id} | {json_audio} | {resolved_path} | {exists} | {prompt_present} | {prompt_lang} | {enabled} |".format(**row))
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def write_semantic_audit(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["# Emotion routing semantic audit", "", "Result: PASS — routing metadata matches authoritative reference metadata.", "",
+                 "## Candidates", "", "| emotion | total | primary | secondary | min human hint | max human hint | available |",
+                 "|---|---:|---:|---:|---:|---:|---:|"]
+        for emotion in CANONICAL_EMOTIONS:
+            candidates = self._candidates(emotion) if emotion in self.routing else []
+            hints = [float(item.get("human_intensity_hint", 0.0)) for item, _ in candidates]
+            lines.append(f"| {emotion} | {len(candidates)} | {sum(role == 'primary' for _, role in candidates)} | "
+                         f"{sum(role == 'secondary' for _, role in candidates)} | "
+                         f"{min(hints) if hints else '-'} | {max(hints) if hints else '-'} | "
+                         f"{str(emotion not in self.missing and bool(candidates)).lower()} |")
+        lines.extend(["", "## Routing entries", "",
+                      "| routing emotion | reference id | item emotion | routing role | item role | human hint | runtime intensity | enabled |",
+                      "|---|---|---|---|---|---:|---:|---:|"])
+        for row in self.semantic_rows:
+            lines.append("| {routing_emotion} | {reference_id} | {item_emotion} | {routing_role} | {item_role} | "
+                         "{human_intensity_hint} | {runtime_intensity} | {enabled} |".format(**row))
+        lines.extend(["", "Policy: `upset` remains unavailable and falls back to `neutral`; no synthetic upset reference exists.",
+                      "Short references are padded only in a runtime TemporaryDirectory; private WAVs, prompts, and IDs remain unchanged."])
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")

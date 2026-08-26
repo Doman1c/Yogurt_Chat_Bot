@@ -56,3 +56,36 @@ def test_nested_schema_and_intensity_select_different_human_rank(tmp_path: Path)
 def test_schema_allows_future_49th_reference(tmp_path: Path) -> None:
     path, root = registry_file(tmp_path, count=49)
     assert len(MODULE.EmotionRegistry(path, root).references) == 49
+
+
+def test_semantic_mismatch_fails_closed(tmp_path: Path) -> None:
+    path, root = registry_file(tmp_path)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["references"][1]["emotion"] = "serious"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ValueError, match="routing_semantic_mismatch"):
+        MODULE.EmotionRegistry(path, root)
+
+
+def test_routing_role_mismatch_fails_closed(tmp_path: Path) -> None:
+    path, root = registry_file(tmp_path)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["references"][1]["role"] = "secondary"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ValueError, match="routing_semantic_mismatch"):
+        MODULE.EmotionRegistry(path, root)
+
+
+def test_historical_id_is_not_semantic_metadata_and_fallback_flags_are_correct(tmp_path: Path) -> None:
+    path, root = registry_file(tmp_path)
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value["references"][1]["id"] = "serious_historical_id"
+    for row in value["routing_index"]["happy"]["primary"]:
+        row["id"] = "serious_historical_id"
+    path.write_text(json.dumps(value), encoding="utf-8")
+    registry = MODULE.EmotionRegistry(path, root)
+    assert registry.route("happy").used == "happy"
+    unknown = registry.route("foobar")
+    assert (unknown.canonical, unknown.used, unknown.fallback, unknown.fallback_reason) == ("neutral", "neutral", True, "unknown_emotion")
+    assert registry.route("upset").fallback
+    assert not registry.route("neutral").fallback
