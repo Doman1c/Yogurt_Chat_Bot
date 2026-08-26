@@ -32,11 +32,16 @@ def test_bounded_mood_can_override_scene_emotion() -> None:
     assert request.speed is None
 
 
+def test_expanded_canonical_mood_is_accepted() -> None:
+    request = plan_voice(VoicePlanInput(text="太棒啦！", scene="casual", mood="excited"))
+    assert request.emotion == "excited"
+
+
 def test_unknown_scene_or_mood_is_rejected() -> None:
     with pytest.raises(ValidationError):
         VoicePlanInput(text="hello", scene="other")
     with pytest.raises(ValidationError):
-        VoicePlanInput(text="hello", mood="excited")
+        VoicePlanInput(text="hello", mood="ecstatic")
 
 
 def test_long_text_is_not_silently_truncated() -> None:
