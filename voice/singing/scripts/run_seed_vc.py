@@ -39,8 +39,16 @@ def main() -> int:
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
     })
+    # This runtime's embedded Python uses an isolated ``._pth`` configuration
+    # and ignores PYTHONPATH.  Bootstrap the pinned checkout directly in
+    # sys.path instead of changing Seed-VC or its environment.
+    bootstrap = (
+        "import runpy,sys; root=sys.argv[1]; script=sys.argv[2]; "
+        "sys.path.insert(0,root); sys.argv=[script,*sys.argv[3:]]; "
+        "runpy.run_path(script,run_name='__main__')"
+    )
     command = [
-        config["python"], str(home / "inference.py"), "--source", str(args.source), "--target", str(args.target),
+        config["python"], "-c", bootstrap, str(home), str(home / "inference.py"), "--source", str(args.source), "--target", str(args.target),
         "--output", str(output), "--checkpoint", config["checkpoint"], "--config", config["config"],
         "--diffusion-steps", str(args.diffusion_steps), "--f0-condition", "true", "--fp16", "true",
     ]

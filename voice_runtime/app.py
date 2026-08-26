@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 
 from .config import ConfigError, RuntimeConfig, load_config
-from .engines import GptSovitsAdapter, GptSovitsError
+from .engines import YogurtTtsAdapter, YogurtTtsError
 from .schemas import HealthResponse, SpeechRequest
 
 
@@ -20,7 +20,7 @@ def create_app(config: RuntimeConfig) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
-    adapter = GptSovitsAdapter(config.engine)
+    adapter = YogurtTtsAdapter(config.engine)
     semaphore = asyncio.Semaphore(config.limits.max_concurrent_requests)
 
     @app.get("/health", response_model=HealthResponse)
@@ -30,7 +30,7 @@ def create_app(config: RuntimeConfig) -> FastAPI:
             status="ok" if reachable else "degraded",
             engine_reachable=reachable,
             default_profile=config.default_profile,
-            profiles=sorted(config.profiles.keys()),
+            profiles=sorted(config.profiles.keys()) or ["yogurt"],
         )
 
     @app.post("/v1/speech")
@@ -38,9 +38,7 @@ def create_app(config: RuntimeConfig) -> FastAPI:
         if len(request.text) > config.limits.max_text_chars:
             raise HTTPException(status_code=422, detail="text_too_long")
 
-        profile = config.profiles.get(request.voice)
-        if profile is None:
-            raise HTTPException(status_code=404, detail="voice_not_found")
+        canonical_emotion = {"angry": "upset", "surprised": "excited"}.get(request.emotion, request.emotion)
 
         try:
             async with semaphore:
@@ -48,14 +46,14 @@ def create_app(config: RuntimeConfig) -> FastAPI:
                     adapter.synthesize(
                         text=request.text,
                         language=request.language,
-                        profile=profile,
-                        speed=request.speed,
+                        emotion=canonical_emotion,
+                        intensity=request.intensity,
                     ),
                     timeout=config.limits.max_request_seconds,
                 )
         except asyncio.TimeoutError as exc:
             raise HTTPException(status_code=504, detail="tts_timeout") from exc
-        except GptSovitsError as exc:
+        except YogurtTtsError as exc:
             # Intentionally do not relay local upstream response bodies or paths.
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -64,8 +62,11 @@ def create_app(config: RuntimeConfig) -> FastAPI:
             media_type=result.media_type,
             headers={
                 "X-Yogurt-Voice": request.voice,
-                "X-Yogurt-Language": request.language,
-                "X-Yogurt-Speed": f"{result.speed:.3f}",
+                "X-Yogurt-Language": result.language,
+                "X-Yogurt-Emotion-Requested": request.emotion,
+                "X-Yogurt-Emotion-Canonical": canonical_emotion,
+                "X-Yogurt-Emotion-Used": result.used_emotion,
+                "X-Yogurt-Intensity": "omitted" if request.intensity is None else f"{request.intensity:.3f}",
             },
         )
 

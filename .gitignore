@@ -58,3 +58,30 @@ build/
 *.backup
 *.tmp
 *.swp
+# Private TTS assets and model artefacts
+*.wav
+*.mp3
+*.flac
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+voice/tts/.env
+voice/tts/private/
+voice/tts/runtime_info/
+voice/tts/**/emotion_registry.v1.json
+voice/tts/**/references/
+
+# Local singing pipeline media, weights, and manifests
+**/incoming/
+**/processing/
+**/archive/
+**/work/
+**/outputs/
+**/failed/
+**/models/
+**/private/
+**/job_history.sqlite3
+**/*.local.json
+voice/singing/pipeline.json
+voice_runtime/config.toml.bak_before_rebuild

@@ -1,0 +1,41 @@
+{
+  "runtime_root": "E:/path/to/Yogurt_Singing_Runtime",
+  "incoming_dir": "E:/path/to/Yogurt_Singing_Runtime/incoming",
+  "processing_dir": "E:/path/to/Yogurt_Singing_Runtime/processing",
+  "archive_dir": "E:/path/to/Yogurt_Singing_Runtime/archive",
+  "work_dir": "E:/path/to/Yogurt_Singing_Runtime/work",
+  "output_dir": "E:/path/to/Yogurt_Singing_Runtime/outputs",
+  "failed_dir": "E:/path/to/Yogurt_Singing_Runtime/failed",
+  "runtime_info_dir": "E:/path/to/Yogurt_Singing_Runtime/runtime_info",
+  "stable_seconds": 2,
+  "ffmpeg": "auto",
+  "separation": {
+    "python": "E:/path/to/Yogurt_Singing_Runtime/separation/.venv/Scripts/python.exe",
+    "cli": "E:/path/to/Yogurt_Singing_Runtime/separation/.venv/Scripts/pymss.exe",
+    "engine": "pymss",
+    "quality": "maximum",
+    "model_dir": "E:/path/to/Yogurt_Singing_Runtime/models/pymss",
+    "download_source": "huggingface",
+    "vocal_models": ["bs_roformer_voc_hyperacev2", "model_vocals_mel_band_roformer_sdr_8.42"],
+    "instrumental_models": ["bs_roformer_inst_hyperacev2"],
+    "vocal_ensemble": "avg_fft",
+    "instrumental_ensemble": "avg_wave",
+    "cleanup_mode": "light",
+    "cleanup_model": null,
+    "tta": false
+  },
+  "seed_vc": {
+    "runtime_config": "C:/local/yogurt-singing-runtime.json",
+    "target_reference": "C:/local/yogurt-reference.wav",
+    "wrapper": "E:/path/to/Yogurt_Chat_Bot/voice/singing/scripts/run_seed_vc.py",
+    "diffusion_steps": 30,
+    "tail_pad_seconds": 5.0
+  },
+  "harmony": {
+    "enabled": true,
+    "mode": "preserve",
+    "separator_model": "UVR-BVE-4B_SN-44100-1",
+    "backing_gain_offset_db": -3.0
+  },
+  "mix": {"auto_gain": true, "max_gain_db": 6, "limiter_ceiling_db": -1}
+}

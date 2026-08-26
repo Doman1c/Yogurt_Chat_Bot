@@ -68,6 +68,14 @@ def test_all_public_scenes_are_accepted(scene: str) -> None:
     assert client.requests[0].voice == "yogurt"
 
 
+def test_english_request_is_forwarded_to_orchestrator() -> None:
+    client = FakeVoiceClient(_audio())
+    result = asyncio.run(MouthService(client).speak(SpeakRequest(text="Welcome back.", language="en")))
+
+    assert result.success is True
+    assert client.requests[0].language == "en"
+
+
 def test_empty_and_oversized_text_are_rejected() -> None:
     with pytest.raises(ValidationError):
         SpeakRequest(text="   ")
@@ -81,7 +89,7 @@ def test_invalid_scene_and_caller_endpoint_are_rejected() -> None:
     with pytest.raises(ValidationError):
         SpeakRequest(text="hello", endpoint="http://192.168.1.20:8770")
     with pytest.raises(ValidationError):
-        SpeakRequest(text="hello", language="en")
+        SpeakRequest(text="hello", language="fr")
 
 
 def test_orchestrator_failure_is_bounded_without_raw_body_leakage() -> None:

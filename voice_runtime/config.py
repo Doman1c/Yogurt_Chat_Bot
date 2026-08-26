@@ -46,8 +46,8 @@ class ServerConfig:
 
 @dataclass(frozen=True)
 class EngineConfig:
-    type: str = "gpt_sovits"
-    base_url: str = "http://127.0.0.1:9880"
+    type: str = "yogurt_tts"
+    base_url: str = "http://127.0.0.1:17861"
     timeout_seconds: float = 180.0
 
 
@@ -119,13 +119,19 @@ def load_config(
         raise ConfigError("server.port is invalid")
 
     engine_raw = _table(raw, "engine")
-    engine_type = str(engine_raw.get("type", "gpt_sovits"))
-    if engine_type != "gpt_sovits":
-        raise ConfigError("only engine.type='gpt_sovits' is enabled in P10-A3")
+    engine_type = str(engine_raw.get("type", "yogurt_tts"))
+    legacy_gpt_config = engine_type == "gpt_sovits"
+    # Older local files pointed at GPT-SoVITS api.py on 9880.  Silently keeping
+    # that transport would leak private reference routing out of the service;
+    # treat it as a compatibility spelling for the 17861 gateway instead.
+    if engine_type == "gpt_sovits":
+        engine_type = "yogurt_tts"
+    if engine_type != "yogurt_tts":
+        raise ConfigError("engine.type must be 'yogurt_tts'")
     engine = EngineConfig(
         type=engine_type,
         base_url=_validate_loopback_url(
-            str(engine_raw.get("base_url", "http://127.0.0.1:9880"))
+            "http://127.0.0.1:17861" if legacy_gpt_config else str(engine_raw.get("base_url", "http://127.0.0.1:17861"))
         ),
         timeout_seconds=float(engine_raw.get("timeout_seconds", 180)),
     )
@@ -178,7 +184,7 @@ def load_config(
             temperature=float(value.get("temperature", 1.0)),
         )
 
-    if default_profile not in profiles:
+    if profiles and default_profile not in profiles:
         raise ConfigError("voice.default_profile does not exist in [profiles]")
 
     return RuntimeConfig(

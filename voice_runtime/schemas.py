@@ -5,14 +5,18 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-Language = Literal["zh", "ja"]
+Language = Literal["auto", "zh", "ja", "en"]
 Emotion = Literal[
     "neutral",
     "happy",
+    "excited",
     "soft",
     "shy",
+    "upset",
     "sad",
-    "angry",
+    "serious",
+    "comforting",
+    "angry",  # compatibility aliases; normalized before the upstream call
     "surprised",
 ]
 
@@ -20,9 +24,9 @@ Emotion = Literal[
 class SpeechRequest(BaseModel):
     text: str = Field(min_length=1)
     voice: Literal["yogurt"] = "yogurt"
-    language: Language = "zh"
+    language: Language = "auto"
     emotion: Emotion = "neutral"
-    intensity: float = Field(default=0.7, ge=0.0, le=1.0)
+    intensity: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     speed: Optional[float] = Field(default=None, ge=0.80, le=1.30)
     stream: bool = False
 
@@ -45,7 +49,7 @@ class SpeechRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     runtime: Literal["ready"] = "ready"
-    engine: Literal["gpt_sovits"] = "gpt_sovits"
+    engine: Literal["yogurt_tts"] = "yogurt_tts"
     engine_reachable: bool
     default_profile: str
     profiles: list[str]

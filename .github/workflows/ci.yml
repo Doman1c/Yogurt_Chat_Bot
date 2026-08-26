@@ -31,7 +31,7 @@ jobs:
 
       - name: Install test dependencies
         run: |
-          python -m pip install pytest
+          python -m pip install pytest numpy soundfile
           python -m pip install -r voice_runtime/requirements.txt
 
       - name: Run P10 Mouth and VoiceSession tests
@@ -55,3 +55,4 @@ jobs:
           bash scripts/test-v4-runtime
           python -m pytest -q voice_runtime/tests
           python -m pytest -q voice_orchestrator/tests
+          python -m pytest -q voice/singing/tests voice/tts/tests
