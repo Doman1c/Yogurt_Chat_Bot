@@ -1,0 +1,5 @@
+{
+  "baseline": {},
+  "stable": {"sampling_profile": "stable"},
+  "conservative": {"sampling_profile": "conservative"}
+}

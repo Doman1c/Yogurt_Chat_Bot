@@ -55,3 +55,4 @@ jobs:
           bash scripts/test-v4-runtime
           python -m pytest -q voice_runtime/tests
           python -m pytest -q voice_orchestrator/tests
+          python -m pytest -q voice/singing/tests voice/tts/tests

@@ -84,3 +84,4 @@ voice/tts/**/references/
 **/job_history.sqlite3
 **/*.local.json
 voice/singing/pipeline.json
+voice_runtime/config.toml.bak_before_rebuild

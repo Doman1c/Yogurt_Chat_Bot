@@ -6,7 +6,6 @@ it never imports, modifies, or reimplements Seed-VC inference.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -18,10 +17,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
+from pipeline_state import JobHistory, PipelineAlreadyRunning, PipelineLock, sha256_file, write_json
+
 
 SUPPORTED_INPUTS = {".mp3", ".wav", ".flac", ".m4a"}
 SAMPLE_RATE = 44_100
 PIPELINE_VERSION = "2"
+IGNORED_SUFFIXES = {".tmp", ".part", ".crdownload"}
 
 
 def now() -> str:
@@ -90,9 +94,28 @@ def safe_name(name: str) -> str:
 
 
 def job_id_for(input_path: Path) -> str:
-    stat = input_path.stat()
-    digest = hashlib.sha256(f"{input_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()[:10]
-    return f"{safe_name(input_path.stem)}-{digest}"
+    return f"{safe_name(input_path.stem)}-{sha256_file(input_path)[:10]}"
+
+
+def is_candidate(path: Path) -> bool:
+    return (path.is_file() and not path.name.startswith(".") and path.suffix.lower() in SUPPORTED_INPUTS
+            and path.suffix.lower() not in IGNORED_SUFFIXES and not any(str(path).lower().endswith(s) for s in IGNORED_SUFFIXES))
+
+
+def wait_until_stable(path: Path, seconds: float) -> bool:
+    """Reject files still being copied; no hash or claim occurs before this check."""
+    if seconds < 2 or seconds > 5:
+        raise ValueError("stable_seconds must be between 2 and 5")
+    try:
+        before = (path.stat().st_size, path.stat().st_mtime_ns)
+    except FileNotFoundError:
+        return False
+    time.sleep(seconds)
+    try:
+        after = (path.stat().st_size, path.stat().st_mtime_ns)
+    except FileNotFoundError:
+        return False
+    return before == after and after[0] > 0
 
 
 def ffmpeg_path(config: dict[str, Any], separation_python: Path) -> Path:
@@ -145,7 +168,7 @@ def release_cuda(separation_python: Path, log: Path) -> None:
 def load_config(config_path: Path) -> tuple[dict[str, Any], Path]:
     data = json.loads(config_path.read_text(encoding="utf-8"))
     base = config_path.parent
-    for key in ("runtime_root", "incoming_dir", "work_dir", "output_dir", "failed_dir"):
+    for key in ("runtime_root", "incoming_dir", "processing_dir", "archive_dir", "work_dir", "output_dir", "failed_dir", "runtime_info_dir"):
         if key in data:
             data[key] = str(resolved(data[key], base))
     separation = data["separation"]
@@ -157,6 +180,124 @@ def load_config(config_path: Path) -> tuple[dict[str, Any], Path]:
         if key in seed:
             seed[key] = str(resolved(seed[key], base))
     return data, base
+
+
+def unique_destination(directory: Path, filename: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / filename
+    stem, suffix = candidate.stem, candidate.suffix
+    number = 2
+    while candidate.exists():
+        candidate = directory / f"{stem}-{number}{suffix}"
+        number += 1
+    return candidate
+
+
+def lifecycle_output(cfg: dict[str, Any], job_id: str) -> Path:
+    return Path(cfg["output_dir"]) / job_id
+
+
+def claim_from_inbox(cfg: dict[str, Any], history: JobHistory, incoming: Path, *, force: bool) -> tuple[str, Path, str, int] | None:
+    """Hash a stable inbox file, then atomically move it to its processing owner."""
+    digest = sha256_file(incoming)
+    canonical = history.successful_for_sha(digest)
+    attempt_number = history.next_attempt(digest)
+    base_id = f"{safe_name(incoming.stem)}-{digest[:10]}"
+    job_id = base_id if attempt_number == 1 else f"{base_id}-attempt{attempt_number}"
+    attempt_id = f"{job_id}:attempt{attempt_number}"
+    if canonical and not force:
+        destination = unique_destination(Path(cfg["archive_dir"]) / "duplicates", incoming.name)
+        os.replace(incoming, destination)
+        history.create(job_id=job_id, attempt_id=attempt_id, sha256=digest, original_filename=incoming.name,
+                       processing_path=destination, force=False, pipeline_version=PIPELINE_VERSION,
+                       state="success", stage="SKIP_DUPLICATE", canonical_job_id=str(canonical["job_id"]))
+        history.update(job_id, state="success", stage="SKIP_DUPLICATE", archive_path=destination,
+                       output_dir=Path(canonical["output_dir"]) if canonical["output_dir"] else None)
+        write_json(destination.with_suffix(destination.suffix + ".duplicate.json"), {
+            "job_id": job_id, "sha256": digest, "stage": "SKIP_DUPLICATE",
+            "canonical_job_id": canonical["job_id"], "canonical_output_dir": canonical["output_dir"],
+        })
+        print(f"[SKIP_DUPLICATE] {incoming.name} -> {destination}")
+        return None
+    processing_dir = Path(cfg["processing_dir"]) / job_id
+    processing_dir.mkdir(parents=True, exist_ok=False)
+    processing = processing_dir / incoming.name
+    # Same-volume os.replace is an atomic ownership claim. No source copy is made.
+    os.replace(incoming, processing)
+    history.create(job_id=job_id, attempt_id=attempt_id, sha256=digest, original_filename=incoming.name,
+                   processing_path=processing, force=force, pipeline_version=PIPELINE_VERSION)
+    return job_id, processing, digest, attempt_number
+
+
+def archive_success(cfg: dict[str, Any], source: Path, job_id: str) -> Path:
+    destination = unique_destination(Path(cfg["archive_dir"]), source.name)
+    os.replace(source, destination)
+    processing_parent = source.parent
+    try:
+        processing_parent.rmdir()
+    except OSError:
+        pass
+    return destination
+
+
+def archive_failure(cfg: dict[str, Any], source: Path, job_id: str) -> Path:
+    destination = Path(cfg["failed_dir"]) / job_id / "source" / source.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.exists():
+        os.replace(source, destination)
+    try:
+        source.parent.rmdir()
+    except OSError:
+        pass
+    return destination
+
+
+def process_claimed(cfg: dict[str, Any], history: JobHistory, job_id: str, source: Path, *, resume: bool,
+                    skip_mix: bool, separation_only: bool, keep_work: bool) -> bool:
+    output = lifecycle_output(cfg, job_id)
+    history.update(job_id, state="running", stage="PIPELINE")
+    succeeded = process_input(cfg, source, resume=resume, skip_mix=skip_mix,
+                              separation_only=separation_only, keep_work=True, job_id=job_id,
+                              output_override=output)
+    if succeeded and not separation_only and not skip_mix:
+        archived = archive_success(cfg, source, job_id)
+        history.update(job_id, state="success", stage="SUCCESS", archive_path=archived, output_dir=output)
+        if not keep_work:
+            shutil.rmtree(Path(cfg["work_dir"]) / job_id, ignore_errors=True)
+        return True
+    if succeeded:
+        history.update(job_id, state="partial", stage="SEPARATION_COMPLETE" if separation_only else "SEED_VC_COMPLETE",
+                       output_dir=output)
+        return True
+    archived = archive_failure(cfg, source, job_id)
+    history.update(job_id, state="failed", stage="FAILED", error="pipeline failed; see job manifest", archive_path=archived,
+                   output_dir=output)
+    return False
+
+
+def resume_jobs(cfg: dict[str, Any], history: JobHistory, *, skip_mix: bool, separation_only: bool,
+                keep_work: bool) -> list[bool]:
+    results: list[bool] = []
+    for row in history.resumable():
+        failed_job = Path(cfg["failed_dir"]) / row["job_id"]
+        source = failed_job / "source" / row["original_filename"]
+        if not source.is_file():
+            history.update(row["job_id"], state="recoverable", stage="RECOVERY_REQUIRED",
+                           error="recoverable state/files mismatch: failed source is missing")
+            results.append(False)
+            continue
+        work = Path(cfg["work_dir"]) / row["job_id"]
+        if work.exists():
+            history.update(row["job_id"], state="recoverable", stage="RECOVERY_REQUIRED",
+                           error="recoverable state/files mismatch: work directory already exists")
+            results.append(False)
+            continue
+        work.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(failed_job), str(work))
+        results.append(process_claimed(cfg, history, row["job_id"], work / "source" / row["original_filename"],
+                                       resume=True, skip_mix=skip_mix, separation_only=separation_only,
+                                       keep_work=keep_work))
+    return results
 
 
 def separation_stage(cfg: dict[str, Any], paths: dict[str, Path], source_duration: float,
@@ -280,9 +421,10 @@ def mix_stage(cfg: dict[str, Any], paths: dict[str, Path], source_duration: floa
 
 
 def process_input(cfg: dict[str, Any], input_path: Path, *, resume: bool, skip_mix: bool,
-                  separation_only: bool, keep_work: bool) -> bool:
+                  separation_only: bool, keep_work: bool, job_id: str | None = None,
+                  output_override: Path | None = None) -> bool:
     separation_python = Path(cfg["separation"]["python"])
-    job_id = job_id_for(input_path)
+    job_id = job_id or job_id_for(input_path)
     work = Path(cfg["work_dir"]) / job_id
     failed = Path(cfg["failed_dir"]) / job_id
     # A failed job is moved wholesale for diagnosis. --resume returns that same
@@ -290,7 +432,7 @@ def process_input(cfg: dict[str, Any], input_path: Path, *, resume: bool, skip_m
     if resume and not work.exists() and failed.exists():
         work.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(failed), str(work))
-    output = Path(cfg["output_dir"]) / safe_name(input_path.stem)
+    output = output_override or (Path(cfg["output_dir"]) / safe_name(input_path.stem))
     primary_manifest = output / "job_manifest.json"
     if output.exists() and (not primary_manifest.is_file() or json.loads(primary_manifest.read_text(encoding="utf-8")).get("job_id") != job_id):
         output = Path(cfg["output_dir"]) / job_id
@@ -383,19 +525,54 @@ def main() -> int:
     parser.add_argument("--input", type=Path, help="process one input instead of scanning incoming")
     parser.add_argument("--quality", choices=["maximum"], default="maximum")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--force", action="store_true", help="create a new attempt even when SHA-256 already succeeded")
     parser.add_argument("--keep-work", action="store_true")
     parser.add_argument("--skip-mix", action="store_true")
     parser.add_argument("--separation-only", action="store_true")
     args = parser.parse_args()
     cfg, _ = load_config(args.config.resolve())
-    candidates = [args.input.resolve()] if args.input else sorted(Path(cfg["incoming_dir"]).glob("*"))
-    inputs = [path for path in candidates if path.is_file() and path.suffix.lower() in SUPPORTED_INPUTS]
-    if not inputs:
-        print("No supported audio found.")
-        return 0
-    results = [process_input(cfg, path, resume=args.resume, skip_mix=args.skip_mix,
-                             separation_only=args.separation_only, keep_work=args.keep_work) for path in inputs]
-    return 0 if all(results) else 1
+    runtime_root = Path(cfg["runtime_root"])
+    cfg.setdefault("processing_dir", str(runtime_root / "processing"))
+    cfg.setdefault("archive_dir", str(runtime_root / "archive"))
+    cfg.setdefault("runtime_info_dir", str(runtime_root / "runtime_info"))
+    cfg.setdefault("stable_seconds", 2)
+    for key in ("incoming_dir", "processing_dir", "archive_dir", "work_dir", "output_dir", "failed_dir", "runtime_info_dir"):
+        Path(cfg[key]).mkdir(parents=True, exist_ok=True)
+    if args.input:
+        # Legacy one-file mode deliberately stays non-destructive for callers
+        # outside the managed inbox. Production jobs use the inbox branch below.
+        return 0 if process_input(cfg, args.input.resolve(), resume=args.resume, skip_mix=args.skip_mix,
+                                   separation_only=args.separation_only, keep_work=args.keep_work) else 1
+    try:
+        with PipelineLock(Path(cfg["runtime_info_dir"]) / "singing_pipeline.lock"), \
+                JobHistory(Path(cfg["runtime_info_dir"]) / "job_history.sqlite3") as history:
+            recovery = history.recover_interrupted()
+            for item in recovery:
+                print(f"[RECOVERY_REQUIRED] {item['job_id']}: {item['error']}", file=sys.stderr)
+            results: list[bool] = []
+            if args.resume:
+                results.extend(resume_jobs(cfg, history, skip_mix=args.skip_mix,
+                                           separation_only=args.separation_only, keep_work=args.keep_work))
+            candidates = sorted(Path(cfg["incoming_dir"]).iterdir())
+            for path in candidates:
+                if not is_candidate(path):
+                    continue
+                if not wait_until_stable(path, float(cfg["stable_seconds"])):
+                    print(f"[WAITING_FOR_STABLE_FILE] {path.name}")
+                    continue
+                claim = claim_from_inbox(cfg, history, path, force=args.force)
+                if claim is None:
+                    continue
+                job_id, source, _, _ = claim
+                results.append(process_claimed(cfg, history, job_id, source, resume=False,
+                                               skip_mix=args.skip_mix, separation_only=args.separation_only,
+                                               keep_work=args.keep_work))
+            if not results:
+                print("No stable supported audio found.")
+            return 0 if all(results) else 1
+    except PipelineAlreadyRunning as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

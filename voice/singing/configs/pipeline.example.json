@@ -1,9 +1,13 @@
 {
   "runtime_root": "E:/path/to/Yogurt_Singing_Runtime",
   "incoming_dir": "E:/path/to/Yogurt_Singing_Runtime/incoming",
+  "processing_dir": "E:/path/to/Yogurt_Singing_Runtime/processing",
+  "archive_dir": "E:/path/to/Yogurt_Singing_Runtime/archive",
   "work_dir": "E:/path/to/Yogurt_Singing_Runtime/work",
   "output_dir": "E:/path/to/Yogurt_Singing_Runtime/outputs",
   "failed_dir": "E:/path/to/Yogurt_Singing_Runtime/failed",
+  "runtime_info_dir": "E:/path/to/Yogurt_Singing_Runtime/runtime_info",
+  "stable_seconds": 2,
   "ffmpeg": "auto",
   "separation": {
     "python": "E:/path/to/Yogurt_Singing_Runtime/separation/.venv/Scripts/python.exe",
