@@ -18,7 +18,7 @@ python .\voice\singing\scripts\run_seed_vc.py `
 
 The wrapper invokes the separately installed upstream `inference.py` in offline Hugging Face mode and bounds diffusion steps to 1–100. See [runtime-baseline.md](docs/runtime-baseline.md) for the measured 4080 baseline.
 
-## Singing Pipeline v2
+## Singing Pipeline v2.1
 
 Pipeline v2 adds a sequential, failure-isolated orchestration layer around the existing wrapper. It uses a separate pymss environment for CUDA RoFormer separation and never modifies the stable Seed-VC environment.
 
@@ -29,6 +29,39 @@ E:\Yogurt_Chat_Bot\voice\singing\scripts\start_singing_pipeline.ps1
 ```
 
 Use `--Resume` to continue a verified separation or Seed-VC stage. Every job writes an output-local `job_manifest.json`; failed jobs retain their work and `logs\pipeline.log` in `E:\Yogurt_Singing_Runtime\failed\<job_id>`.
+
+### Harmony-aware vocal conversion
+
+V2.1 is opt-in. If the local-only pipeline configuration has no `harmony`
+object, the prior V2 path is retained unchanged: `vocals_for_seedvc.wav` goes
+to Seed-VC and the resulting vocal is mixed with the instrumental.
+
+With the example `harmony` object enabled, the pipeline first uses the
+configured local pymss model to split the already-isolated
+`stems\vocals_for_seedvc.wav` into `stems\lead_vocals.wav` and
+`stems\backing_vocals.wav`. Only `lead_vocals.wav` is copied into Seed-VC.
+`backing_vocals.wav` never enters Seed-VC:
+
+- `"mode": "preserve"` mixes it back in at `backing_gain_offset_db` (the
+  recommended starting value is `-3.0`).
+- `"mode": "remove"` omits it from the final mix.
+
+`convert` is intentionally not a supported mode. A fresh harmony-enabled job
+fails closed if its harmony split cannot be produced or validated; it does not
+silently send mixed vocals to Seed-VC. `--skip-harmony-separation` is only a
+debug guard and therefore also causes a fresh harmony-enabled job to fail.
+
+Provision the selected separator model in the local `separation.model_dir`
+before enabling it. The checked example uses the pymss catalog model
+`UVR-BVE-4B_SN-44100-1`, whose BVE output is mapped as `Instrumental` = lead
+residual and `Vocals` = backing extract. Other separator models must declare
+both `lead_stem_tokens` and `backing_stem_tokens` in the `harmony` object.
+
+Each harmony-enabled manifest records the separator engine/model, mode,
+backing gain offset, lead/backing metrics, `no_backing_detected`, and that the
+Seed-VC input type was `lead_only`. `--Resume` validates and reuses existing
+lead/backing stems when available, then reuses later verified Seed-VC output
+as usual.
 
 ### Seed-VC artifact diagnostics
 

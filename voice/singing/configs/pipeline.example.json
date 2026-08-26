@@ -31,5 +31,11 @@
     "diffusion_steps": 30,
     "tail_pad_seconds": 5.0
   },
+  "harmony": {
+    "enabled": true,
+    "mode": "preserve",
+    "separator_model": "UVR-BVE-4B_SN-44100-1",
+    "backing_gain_offset_db": -3.0
+  },
   "mix": {"auto_gain": true, "max_gain_db": 6, "limiter_ceiling_db": -1}
 }
