@@ -1,0 +1,12 @@
+{
+  "name": "Yogurt Daily TTS v1",
+  "engine": "GPT-SoVITS v2Pro",
+  "training": "80% Asuna Japanese / 20% Mandarin support",
+  "gpt_model": "<path-to-gpt-weight>",
+  "sovits_model": "<path-to-sovits-weight>",
+  "reference_audio": "<path-to-confirmed-reference-audio>",
+  "reference_text": "<exact-transcript-for-reference-audio>",
+  "reference_language": "ja",
+  "host": "127.0.0.1",
+  "port": 17861
+}

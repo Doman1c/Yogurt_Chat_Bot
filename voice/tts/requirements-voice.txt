@@ -1,0 +1,7 @@
+# Wrapper dependencies only. Install GPT-SoVITS and its pinned dependencies separately.
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+numpy>=1.24
+soundfile>=0.12
+pydantic>=2,<3
+pyyaml>=6

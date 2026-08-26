@@ -1,0 +1,3 @@
+# Wrapper dependencies only. Seed-VC's full pinned requirements remain upstream-managed.
+pyyaml
+soundfile>=0.12

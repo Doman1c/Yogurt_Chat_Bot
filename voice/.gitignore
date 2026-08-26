@@ -1,0 +1,34 @@
+# Private local voice assets and generated artifacts (scoped to voice/)
+**/*.pth
+**/*.pt
+**/*.ckpt
+**/*.safetensors
+**/*.onnx
+**/*.bin
+**/*.gguf
+**/*.wav
+**/*.mp3
+**/*.flac
+**/*.m4a
+**/*.list
+**/private/
+**/cache/
+**/models/
+**/pretrained_models/
+**/datasets/
+**/dataset/
+**/training_source/
+**/training_runs/
+**/manifests/
+**/output/
+**/outputs/
+**/logs/
+**/temp/
+**/tmp/
+**/.env
+**/.env.*
+!**/.env.example
+
+# Runtime source is code, not generated runtime state.
+!tts/runtime/
+!tts/runtime/*.py

@@ -1,0 +1,10 @@
+{
+  "runtime_root": "<path-to-local-yogurt-singing-runtime>",
+  "seed_vc_home": "<path-to-seed-vc-clone>",
+  "seed_vc_commit": "51383efd921027683c89e5348211d93ff12ac2a8",
+  "python": "<path-to-python-3.10>",
+  "checkpoint": "<path-to-local-checkpoint>",
+  "config": "<path-to-local-seed-vc-config>",
+  "cache_dir": "<path-to-seed-vc-clone>/checkpoints/hf_cache",
+  "output_dir": "<path-to-local-output>"
+}
