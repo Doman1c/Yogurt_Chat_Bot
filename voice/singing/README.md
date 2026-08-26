@@ -17,3 +17,15 @@ python .\voice\singing\scripts\run_seed_vc.py `
 ```
 
 The wrapper invokes the separately installed upstream `inference.py` in offline Hugging Face mode and bounds diffusion steps to 1–100. See [runtime-baseline.md](docs/runtime-baseline.md) for the measured 4080 baseline.
+
+## Singing Pipeline v2
+
+Pipeline v2 adds a sequential, failure-isolated orchestration layer around the existing wrapper. It uses a separate pymss environment for CUDA RoFormer separation and never modifies the stable Seed-VC environment.
+
+Copy `configs/pipeline.example.json` to a local-only `E:\Yogurt_Singing_Runtime\pipeline.json`, fill in the local Seed-VC runtime config and target reference, then put `.mp3`, `.wav`, `.flac`, or `.m4a` files in `E:\Yogurt_Singing_Runtime\incoming` and run:
+
+```powershell
+E:\Yogurt_Chat_Bot\voice\singing\scripts\start_singing_pipeline.ps1
+```
+
+Use `--Resume` to continue a verified separation or Seed-VC stage. Every job writes an output-local `job_manifest.json`; failed jobs retain their work and `logs\pipeline.log` in `E:\Yogurt_Singing_Runtime\failed\<job_id>`.
