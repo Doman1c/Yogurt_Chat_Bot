@@ -84,3 +84,41 @@ def test_interrupted_state_is_recoverable_and_lock_is_exclusive(tmp_path: Path) 
     with pytest.raises(PIPELINE.PipelineAlreadyRunning, match="PIPELINE_ALREADY_RUNNING"):
         PIPELINE.PipelineLock(lock.path).acquire()
     lock.release()
+
+
+def test_duplicate_chain_keeps_original_canonical_job(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = config(tmp_path)
+    with PIPELINE.JobHistory(Path(cfg["runtime_info_dir"]) / "job_history.sqlite3") as history:
+        claim = PIPELINE.claim_from_inbox(cfg, history, inbox_file(cfg, "original.mp3"), force=False)
+        assert claim is not None
+        monkeypatch.setattr(PIPELINE, "process_input", lambda *args, **kwargs: True)
+        assert PIPELINE.process_claimed(cfg, history, claim[0], claim[1], resume=False, skip_mix=False,
+                                        separation_only=False, keep_work=False)
+        assert PIPELINE.claim_from_inbox(cfg, history, inbox_file(cfg, "duplicate-a.mp3", b"audio"), force=False) is None
+        assert PIPELINE.claim_from_inbox(cfg, history, inbox_file(cfg, "duplicate-b.mp3", b"audio"), force=False) is None
+        rows = history.connection.execute("SELECT job_id,canonical_job_id,stage FROM jobs ORDER BY created_at").fetchall()
+        duplicates = [row for row in rows if row["stage"] == "SKIP_DUPLICATE"]
+        assert len(duplicates) == 2
+        assert {row["canonical_job_id"] for row in duplicates} == {claim[0]}
+
+
+def test_partial_resume_reuses_existing_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = config(tmp_path)
+    job_id = "partial-job"
+    source = tmp_path / "processing" / job_id / "song.mp3"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"audio")
+    (tmp_path / "work" / job_id).mkdir(parents=True)
+    calls: list[dict] = []
+    with PIPELINE.JobHistory(Path(cfg["runtime_info_dir"]) / "job_history.sqlite3") as history:
+        history.create(job_id=job_id, attempt_id="partial-job:attempt1", sha256="b" * 64, original_filename="song.mp3",
+                       processing_path=source, force=False, pipeline_version="2", state="partial", stage="SEPARATION_COMPLETE")
+        monkeypatch.setattr(PIPELINE, "process_claimed", lambda *args, **kwargs: calls.append(kwargs) or True)
+        assert PIPELINE.resume_jobs(cfg, history, skip_mix=False, separation_only=False, keep_work=False) == [True]
+    assert calls == [{"resume": True, "skip_mix": False, "separation_only": False, "keep_work": False}]
+
+
+def test_managed_directories_must_share_a_volume() -> None:
+    cfg = {"incoming_dir": r"E:\incoming", "processing_dir": r"E:\processing", "archive_dir": r"D:\archive", "failed_dir": r"E:\failed"}
+    with pytest.raises(ValueError, match="share one volume"):
+        PIPELINE.validate_managed_volumes(cfg)

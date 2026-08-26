@@ -182,6 +182,15 @@ def load_config(config_path: Path) -> tuple[dict[str, Any], Path]:
     return data, base
 
 
+def validate_managed_volumes(cfg: dict[str, Any]) -> None:
+    """The inbox protocol relies on same-volume os.replace ownership claims."""
+    keys = ("incoming_dir", "processing_dir", "archive_dir", "failed_dir")
+    drives = {key: Path(cfg[key]).resolve().drive.casefold() for key in keys}
+    if len(set(drives.values())) != 1:
+        details = ", ".join(f"{key}={drive or '<none>'}" for key, drive in drives.items())
+        raise ValueError(f"managed Singing directories must share one volume for atomic claims: {details}")
+
+
 def unique_destination(directory: Path, filename: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     candidate = directory / filename
@@ -279,6 +288,18 @@ def resume_jobs(cfg: dict[str, Any], history: JobHistory, *, skip_mix: bool, sep
                 keep_work: bool) -> list[bool]:
     results: list[bool] = []
     for row in history.resumable():
+        if row["state"] == "partial":
+            source = Path(row["processing_path"])
+            work = Path(cfg["work_dir"]) / row["job_id"]
+            if not source.is_file() or not work.exists():
+                history.update(row["job_id"], state="recoverable", stage="RECOVERY_REQUIRED",
+                               error="recoverable partial-job mismatch: processing source or work is missing")
+                results.append(False)
+                continue
+            results.append(process_claimed(cfg, history, row["job_id"], source, resume=True,
+                                           skip_mix=skip_mix, separation_only=separation_only,
+                                           keep_work=keep_work))
+            continue
         failed_job = Path(cfg["failed_dir"]) / row["job_id"]
         source = failed_job / "source" / row["original_filename"]
         if not source.is_file():
@@ -309,7 +330,7 @@ def separation_stage(cfg: dict[str, Any], paths: dict[str, Path], source_duratio
         raise RuntimeError("isolated pymss Python/CLI is unavailable")
     model_dir = Path(sep["model_dir"])
     tta = bool(sep.get("tta", False))
-    results = paths["work"] / "separation_results"
+    results = paths["work"] / "separation"
     vocal_files: list[Path] = []
     for model in sep["vocal_models"]:
         stem_dir = pymss_infer(cli, model, paths["decoded"], results, model_dir, log, tta=tta,
@@ -538,6 +559,7 @@ def main() -> int:
     cfg.setdefault("stable_seconds", 2)
     for key in ("incoming_dir", "processing_dir", "archive_dir", "work_dir", "output_dir", "failed_dir", "runtime_info_dir"):
         Path(cfg[key]).mkdir(parents=True, exist_ok=True)
+    validate_managed_volumes(cfg)
     if args.input:
         # Legacy one-file mode deliberately stays non-destructive for callers
         # outside the managed inbox. Production jobs use the inbox branch below.

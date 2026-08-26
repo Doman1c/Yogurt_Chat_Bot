@@ -149,7 +149,8 @@ class JobHistory:
 
     def successful_for_sha(self, sha256: str) -> sqlite3.Row | None:
         return self.connection.execute(
-            "SELECT * FROM jobs WHERE sha256 = ? AND state = 'success' ORDER BY updated_at DESC LIMIT 1", (sha256,)
+            """SELECT * FROM jobs WHERE sha256 = ? AND state = 'success' AND stage = 'SUCCESS'
+               AND canonical_job_id IS NULL ORDER BY updated_at DESC LIMIT 1""", (sha256,)
         ).fetchone()
 
     def create(self, *, job_id: str, attempt_id: str, sha256: str, original_filename: str,
@@ -200,5 +201,5 @@ class JobHistory:
 
     def resumable(self) -> list[sqlite3.Row]:
         return self.connection.execute(
-            "SELECT * FROM jobs WHERE state IN ('failed','recoverable') ORDER BY updated_at"
+            "SELECT * FROM jobs WHERE state IN ('failed','recoverable','partial') ORDER BY updated_at"
         ).fetchall()
