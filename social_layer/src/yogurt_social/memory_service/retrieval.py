@@ -185,7 +185,10 @@ class FtsMemoryIndex:
     @staticmethod
     def _fts_query(message: str) -> str | None:
         terms = MemoryStore._tokens(message)
-        safe = [term.replace('"', '') for term in terms if len(term) >= 2]
+        # MemoryStore._tokens intentionally returns a set.  Keep the derived FTS
+        # query stable so equivalent recalls (and their benchmark scores) do not
+        # vary with Python's hash iteration order.
+        safe = sorted(term.replace('"', '') for term in terms if len(term) >= 2)
         return " OR ".join(f'"{term}"' for term in safe[:12]) or None
 
     def search(self, *, canonical_user_id: str, message: str, limit: int = 8) -> list[SearchDocument]:

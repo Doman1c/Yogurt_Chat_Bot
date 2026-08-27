@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "dataset_version": "memory-recall-v1",
+  "dataset": {
+    "seed_sha256": "4e3a3d9ec9b0f30ea9c353bfa6d43d99b50a2cd159164ad4e51a3e1ec4964166",
+    "cases_sha256": "d09709f4c626f1653146dbb084ec385f9d4af1308cb6b8b93c41229712020e1c"
+  },
+  "summary": {
+    "cases": 123,
+    "top1_accuracy": 0.7108,
+    "recall_at_3": 0.747,
+    "mrr": 0.7269,
+    "false_recall_rate": 0.0,
+    "no_recall_precision": 0.367,
+    "recall_decision_rate": 0.1138
+  },
+  "thresholds": {
+    "max_false_recall_rate": 0.0,
+    "min_stale_inactive_safety": 1.0,
+    "min_low_info_pre_gate": 1.0,
+    "min_high_risk_suppression": 1.0
+  }
+}
