@@ -1,17 +1,39 @@
 # Yogurt Chat Bot（酸奶）
 
-酸奶是一个运行在 **OpenClaw + Ollama + 微信官方 Bot** 之上的本地 AI 角色项目。
+酸奶是一个本地运行的 AI 角色项目。当前仓库同时包含微信文字聊天层、社交与记忆系统、独立语音能力、Daily TTS Runtime 和 Singing Runtime。
 
-项目在只进行一次正常聊天模型推理的前提下，为酸奶提供：
+**微信只是酸奶的文字交互端。** 它负责文字聊天、表情、多气泡、记忆与社交上下文，不接入 Mouth、TTS 或 Singing，也不会把微信作为语音输出通道。
 
-- 可解释、可回滚的社交上下文；
-- 基于最终回复的表情发送决策；
-- 自动长期记忆候选与审计；
-- 自然的微信多气泡回复；
-- 技术、严肃和高风险场景保护；
-- Python、SQLite、Catalog 或媒体发送异常时的 fail-open 文本链路。
+语音能力属于酸奶自身的独立能力层，面向未来的 Native Chat、桌面 Live2D、桌面应用、机器人或其他本地载体。
 
-实时聊天不会调用视觉模型，也不会为了自动记忆或多气泡再调用一次聊天模型。
+## 设计边界
+
+当前架构明确把“微信文字端”和“酸奶本体能力”分开：
+
+```text
+                    Yogurt Brain / Local LLM
+                             │
+              ┌──────────────┴──────────────┐
+              │                             │
+       WeChat Text Surface           Native / Embodiment
+              │                             │
+      Social / Memory / Sticker             ├─ Mouth
+      Multi-bubble / Text Output            ├─ VoiceSession
+              │                             ├─ Daily TTS
+              │                             ├─ Singing
+              │                             └─ future Ears / Eyes / Body
+              │
+      微信文字与表情输出
+```
+
+核心原则：
+
+- 微信保持 **text-first / text-only**，不调用 Mouth；
+- Mouth 不实现微信 Hook，也不依赖微信 Session；
+- Daily TTS 与 Singing 是独立 Runtime；
+- Singing 不进入实时聊天链路；
+- 未来 Live2D、桌面应用和机器人可以直接调用 Mouth / VoiceSession；
+- 语音、视觉或实体化能力失败时，不影响微信文字聊天。
 
 ## 当前版本
 
@@ -20,9 +42,11 @@ Yogurt Chat Bot: V3
 OpenClaw 插件: yogurt-social-injector 0.5.0-alpha.1
 Sticker Runtime: V2.1
 Catalog Schema: 1.0
+Yogurt Daily TTS: V1
+Yogurt Singing Pipeline: V2.1
 ```
 
-当前实机环境：
+当前微信实机环境：
 
 - macOS Apple Silicon；
 - OpenClaw `2026.7.1-2`；
@@ -31,96 +55,117 @@ Catalog Schema: 1.0
 - `qwen3.5:9b`；
 - 微信官方 Bot 私聊。
 
-V3 已完成实机验证：
+当前独立 Voice / Singing Runtime 已在 Windows + RTX 4080 环境完成实际推理验证。模型、参考音频、训练数据、歌曲、Stem、生成音频和本地 Runtime 配置均保持在 Git 之外。
 
-- 自动记忆候选写入、晋升、待确认和修订审计；
-- 2～3 个微信文字气泡按顺序发送；
-- 原始整段回复不重复发送；
-- 表情决策先读取完整回复，再拆分气泡；
-- 文字气泡发送完成后发送表情图片；
-- 一轮最多选择并发送一张表情；
-- `celebration` 意图可以从“弄好了、太开心、夸夸我”等表达中触发；
-- 图片发送失败不影响已经生成的文字。
+## 当前项目状态
 
-## V3 新增能力
+### 微信文字聊天
 
-### 自动记忆
+已完成：
 
-V3 使用确定性规则从用户消息中提取有限类型的长期信息，不调用第二个模型。
+- OpenClaw + Ollama + 微信官方 Bot；
+- 社交上下文与场景路由；
+- 自动长期记忆候选、晋升、冲突与修订审计；
+- 2～3 个自然微信文字气泡；
+- 基于最终回复的表情发送决策；
+- 表情与多气泡顺序协调；
+- 技术、严肃和高风险场景保护；
+- Python、SQLite、Catalog、表情发送异常时的 fail-open 文本链路。
 
-支持：
+微信链路有意停留在文字与图片层，不接入 Mouth / TTS。
 
-- 用户事实；
-- 用户偏好；
-- 重要里程碑；
-- 重复确认；
-- 新旧事实冲突检测；
-- 稳定记忆更新；
-- 不可变修订记录。
+### Yogurt Mouth / VoiceSession
 
-候选状态：
+Mouth 是酸奶的独立说话能力，不是微信 TTS 插件。
 
 ```text
-pending     尚未达到自动晋升条件
-promoted    已写入稳定记忆
-merged      与已有稳定记忆合并
-conflict    与已有记忆冲突，等待确认或后续更新
+Trusted Caller
+  ↓
+Yogurt Mouth
+  ↓
+Voice Orchestrator
+  ↓
+Voice Runtime
+  ↓
+Yogurt Daily TTS
+  ↓
+In-memory audio
 ```
 
-自动记忆不会：
+当前支持：
 
-- 把酸奶自己的回复写成用户事实；
-- 保存密码、Token、验证码、密钥、身份证件或支付信息；
-- 建立原始聊天全文表；
-- 因提取失败而阻断正常回复。
+- typed `SpeakRequest` / `SpeakResult`；
+- scene 到 bounded voice plan 的映射；
+- 本地 loopback Voice Runtime；
+- PlaybackController；
+- VoiceSession queue / priority / cancellation；
+- amplitude envelope，为未来 Live2D 嘴型提供接口；
+- 不向调用方暴露模型、参考音频和本地路径。
 
-临时信息可以保留为低重要度候选。例如“现在回重庆了”可以记录为 `current_location=重庆` 的 pending 候选，而不会直接覆盖长期居住地。
+潜在调用方包括 Native Chat、Live2D 桌宠、桌面应用和机器人。微信不是 Mouth caller。
 
-### 自然多气泡
+### Yogurt Daily TTS V1
 
-V3 可以把适合微信私聊的短回复拆成 2～3 个自然气泡。
-
-默认不会拆分：
-
-- 代码块；
-- Markdown 列表；
-- 链接；
-- 长技术回复；
-- 已携带媒体的消息；
-- 不足以形成两个自然语义段的短句。
-
-递归发送的子气泡会通过一次性通行标记跳过再次拆分，因此不会无限递归或重复发送。
-
-### 表情与多气泡协调
-
-OpenClaw 的关键发送顺序：
+当前 Daily TTS 使用 GPT-SoVITS 80:20 双语模型作为正式基线。
 
 ```text
-完整的模型回复
+{text, language, emotion, intensity}
   ↓
-message_sending priority 80
-  ├── 复用入站上下文
-  ├── V2.1 读取完整回复
-  ├── StickerSendDecider 判断是否适合发送
-  ├── Ranker 选择最相关候选
-  └── Delivery Policy 检查阈值、分差、冷却和小时上限
+Emotion Router
   ↓
-message_sending priority 70
-  ├── 拆成 2～3 个自然文字气泡
-  ├── 依次调用微信 sendText
-  └── 取消原始整段消息
+Reference Selection
   ↓
-延迟发送已选表情图片
+GPT-SoVITS
+  ↓
+WAV
 ```
 
-这样可以保证：
+当前已验证：
 
-- 表情评分看到的是完整回复，而不是某个子气泡；
-- 子气泡不会重复触发表情决策；
-- 文字先到达，表情随后到达；
-- 原始整段消息不会和子气泡一起重复出现。
+- 中文 / 日文 / 英文；
+- 48 条启用的情绪参考；
+- `neutral / happy / excited / soft / shy / sad / serious / comforting`；
+- intensity reference routing；
+- unknown emotion 与 `upset` 的安全 fallback；
+- CUDA warmup 与模型常驻；
+- private reference / transcript / model path 不通过公共接口暴露。
 
-## 完整架构
+### Yogurt Singing Pipeline V2.1
+
+当前 Singing 使用稳定 Seed-VC Runtime，并在外层加入完整 Pipeline：
+
+```text
+Source Song
+  ↓
+Vocal / Instrumental Separation
+  ↓
+Lead / Backing Separation
+  ├─ Lead → Seed-VC → Yogurt Lead
+  └─ Backing → preserve / remove
+  ↓
+Yogurt Lead + Original Backing + Instrumental
+  ↓
+Final WAV / MP3
+```
+
+V2.1 当前支持：
+
+- `incoming / processing / archive / failed` 生命周期；
+- SHA-256 去重；
+- SQLite job history；
+- 单实例锁；
+- `--resume`；
+- 分阶段失败恢复；
+- Harmony-aware lead-only Seed-VC；
+- `preserve` / `remove` 两种和声模式；
+- harmony separation fail-closed；
+- 最终 WAV / MP3 自动混音。
+
+实际试听中，Lead-only + 原和声回混已经解决了此前绝大多数和声区域的机械音问题。
+
+## 微信 V3 架构
+
+微信端只负责文字与表情输出：
 
 ```text
 微信官方 Bot 私聊消息
@@ -158,49 +203,68 @@ WeChat outbound adapter
   └── sendMedia：表情图片
 ```
 
-## V1 社交层
+**这里没有 Mouth、Voice Runtime、GPT-SoVITS 或 Seed-VC。**
 
-本地 Router 使用以下场景：
+实时微信聊天不会调用视觉模型，也不会为了自动记忆或多气泡再调用一次聊天模型。
+
+## V3 自动记忆
+
+V3 使用确定性规则从用户消息中提取有限类型的长期信息，不调用第二个模型。
+
+支持：
+
+- 用户事实；
+- 用户偏好；
+- 重要里程碑；
+- 重复确认；
+- 新旧事实冲突检测；
+- 稳定记忆更新；
+- 不可变修订记录。
+
+候选状态：
 
 ```text
-casual
-technical
-playful
-comfort
-celebration
-serious
+pending     尚未达到自动晋升条件
+promoted    已写入稳定记忆
+merged      与已有稳定记忆合并
+conflict    与已有记忆冲突，等待确认或后续更新
 ```
 
-社交层根据场景输出语气、长度、技术细节、是否优先安慰，以及是否避免机械化建议。
+自动记忆不会：
 
-Python、SQLite 或 bridge 异常时，OpenClaw + Qwen 的原始文本链路继续运行。
+- 把酸奶自己的回复写成用户事实；
+- 保存密码、Token、验证码、密钥、身份证件或支付信息；
+- 建立原始聊天全文表；
+- 因提取失败而阻断正常回复。
+
+## V3 自然多气泡
+
+V3 可以把适合微信私聊的短回复拆成 2～3 个自然气泡。
+
+默认不会拆分：
+
+- 代码块；
+- Markdown 列表；
+- 链接；
+- 长技术回复；
+- 已携带媒体的消息；
+- 不足以形成两个自然语义段的短句。
+
+递归发送的子气泡通过一次性通行标记跳过再次拆分，避免无限递归或重复发送。
 
 ## V2.1 表情系统
 
-### 两阶段决策
-
-第一阶段回答：
+表情决策分成两步：
 
 ```text
-这一轮是否适合发表情？
-```
-
-输入包括：
-
-- 用户当前消息；
-- 酸奶最终回复；
-- Scene 和 Mood；
-- 候选质量与 Top1/Top2 分差；
-- 技术、严肃和高风险标记；
-- 用户显式请求或禁止请求。
-
-第二阶段回答：
-
-```text
+是否适合发表情？
+        ↓
 如果要发，哪张最相关？
 ```
 
-### 主动发送通道
+输入包括用户消息、酸奶最终回复、Scene、Mood、候选质量、Top1/Top2 分差、技术/严肃/高风险标记以及显式请求。
+
+主动发送策略：
 
 - `celebration`：积极；
 - `playful`：积极；
@@ -210,8 +274,6 @@ Python、SQLite 或 bridge 异常时，OpenClaw + Qwen 的原始文本链路继�
 - `serious`：主动发送硬阻断。
 
 高风险求助词在任何 Scene 和显式模式下都不会触发表情发送。
-
-### 语义优先 Ranker
 
 候选排序大致优先级：
 
@@ -228,45 +290,41 @@ Python、SQLite 或 bridge 异常时，OpenClaw + Qwen 的原始文本链路继�
 
 Scene 不会压过“无语、疲惫、拥抱、惊讶、生气”等具体语义。
 
-### 显式请求模式
+## 表情与多气泡协调
 
 ```text
-explicit_specific
-例如：发一个无语的表情
-→ 必须达到最低相关性
-→ 找不到时不强行发送
-
-explicit_generic
-例如：随便发个表情包
-→ 在安全候选中结合当前聊天氛围选择
-
-proactive
-用户没有要求
-→ 在最终回复生成后由 Send Decider 判断
+完整模型回复
+  ↓
+message_sending priority 80
+  ├── V2.1 读取完整回复
+  ├── StickerSendDecider
+  ├── Ranker
+  └── Delivery Policy
+  ↓
+message_sending priority 70
+  ├── 拆成 2～3 个自然文字气泡
+  ├── 微信 sendText
+  └── 取消原始整段消息
+  ↓
+延迟发送已选表情图片
 ```
 
-### 默认 `auto` 模式
-
-- `choose_sticker` 不暴露给模型；
-- Qwen 只进行一次聊天推理；
-- VLM 不进入实时聊天；
-- 不向模型注入候选绝对路径；
-- 正文发送后由 outbound adapter 发送图片。
-
-`tool` 模式保留 `choose_sticker(sticker_id)` 用于调试，不建议作为 9B 本地模型的日常模式。
+这样保证表情评分看到完整回复，子气泡不会重复触发表情决策，文字先到达，表情随后到达。
 
 ## 两个仓库的职责
 
 ### Yogurt Chat Bot
 
-负责实时聊天：
+本仓库负责：
 
+- 微信文字聊天；
 - OpenClaw 社交上下文注入；
-- 自动记忆候选与稳定记忆；
-- 多气泡发送；
-- 表情发送决策和候选选择；
-- 冷却、安全和路径校验；
-- 调用微信频道发送文字与图片。
+- 自动记忆与稳定记忆；
+- 多气泡与表情发送；
+- Mouth / VoiceSession；
+- Daily TTS Runtime 接口；
+- Singing Pipeline；
+- 未来 Native / Live2D / Robot 的能力接口。
 
 ### Yogurt Sticker Tagger
 
@@ -290,73 +348,47 @@ proactive
 Yogurt_Chat_Bot/
 ├── README.md
 ├── workspace/                         # OpenClaw 人格和行为规则
-├── social_layer/
-│   ├── config/
-│   │   ├── stickers.example.json
-│   │   └── stickers.json              # 本地运行配置，可不提交
-│   ├── src/yogurt_social/
-│   │   ├── memory.py
-│   │   ├── memory_review.py
-│   │   ├── auto_memory.py
-│   │   ├── auto_memory_extended.py
-│   │   ├── router.py
-│   │   ├── service.py
-│   │   ├── openclaw_adapter.py
-│   │   └── stickers/
-│   │       ├── catalog.py
-│   │       ├── config.py
-│   │       ├── decision.py
-│   │       ├── models.py
-│   │       ├── retriever.py
-│   │       └── runtime.py
-│   └── tests/
-├── assets/stickers/
-│   ├── images/                        # 本地表情资产，不提交 Git
-│   ├── stickers.json                  # 正式 Catalog，可不提交 Git
-│   └── README.md
-├── integrations/openclaw/
-│   ├── index-v2.ts                    # V2.1 表情运行时
-│   ├── index-v3.ts                    # 当前插件入口和协调器
-│   ├── v3-runtime.ts                  # 自动记忆与多气泡
-│   ├── v3-memory-extended.ts           # 额外确定性记忆召回
-│   ├── multi-bubble.ts
-│   ├── sticker-selection.ts
-│   ├── sticker-plugin-utils.ts
-│   ├── sticker-turn.ts
-│   ├── sticker-v21-utils.ts
-│   ├── openclaw.plugin.json
-│   ├── package.json
-│   └── config.example.json
+├── social_layer/                      # 社交、记忆、表情运行时
+├── integrations/openclaw/             # 微信/OpenClaw Hook
+├── capabilities/
+│   ├── mouth/                         # 独立语音合成能力
+│   └── voice_session/                 # 队列、优先级、播放与取消
+├── voice_orchestrator/                # scene → bounded voice plan
+├── voice_runtime/                     # 统一本地 Voice Runtime gateway
+├── voice/
+│   ├── tts/                           # Yogurt Daily TTS Runtime
+│   └── singing/                       # Singing Pipeline V2.1
+├── assets/stickers/                   # 本地表情资产
 ├── scripts/
-│   ├── install-openclaw-adapter
-│   ├── yogurt-memory
-│   ├── watch-sticker-scores
-│   ├── test-openclaw-adapter
-│   ├── test-sticker-explicit-fallback
-│   ├── test-sticker-auto-delivery
-│   ├── test-sticker-v21
-│   ├── test-v3
-│   ├── test-v3-runtime
-│   └── test-v3-sticker-bubble-order
 └── docs/
-    ├── V1_DESIGN.md
-    ├── V2_DESIGN.md
-    ├── V2_1_DESIGN.md
-    ├── V3_RESEARCH_PLAN.md
-    └── OPENCLAW_ADAPTER.md
 ```
 
+模型权重、参考音频、歌曲、Stem、生成 WAV/MP3、SQLite runtime database 和私有配置不得提交到仓库。
+
 ## 前置条件
+
+微信文字端：
 
 - OpenClaw `>=2026.7.1-0`；
 - Node.js `>=22.22.3`；
 - Python `>=3.9`；
 - Ollama；
 - 已配置可用聊天模型；
-- 已连接 `openclaw-weixin`；
-- 管理表情资产时可选 Yogurt Sticker Tagger。
+- 已连接 `openclaw-weixin`。
 
-## 首次安装
+Voice / Singing Runtime 有独立环境与依赖，请分别参考：
+
+```text
+capabilities/mouth/README.md
+voice/README.md
+voice/tts/README.md
+voice/singing/README.md
+voice_runtime/README.md
+```
+
+不要把 GPT-SoVITS、Seed-VC、pymss/RoFormer 等依赖混装进微信聊天 Runtime。
+
+## 微信首次安装
 
 ```bash
 cd ~/Yogurt_Chat_Bot
@@ -373,7 +405,7 @@ bash scripts/install-openclaw-adapter
 - 创建 owner 用户；
 - 运行基础测试。
 
-首次安装默认保持高风险功能关闭：
+首次安装默认保持可选功能关闭：
 
 ```json
 {
@@ -383,7 +415,7 @@ bash scripts/install-openclaw-adapter
 }
 ```
 
-## 已安装环境升级
+## 已安装微信环境升级
 
 插件通过本地路径链接到仓库，普通升级不需要重新运行安装脚本：
 
@@ -407,7 +439,7 @@ openclaw gateway restart
 
 不要在仅升级代码时重复运行完整安装脚本，因为安装脚本会把可选功能恢复为安全默认关闭状态。
 
-## 必需的 OpenClaw Hook 权限
+## OpenClaw Hook 权限
 
 ```json
 {
@@ -433,11 +465,9 @@ openclaw config set \
   --strict-json
 ```
 
-## 启用功能
+## 启用微信功能
 
 ### 表情系统
-
-确认 `assets/stickers/stickers.json`、图片目录和运行配置已经同步后：
 
 ```bash
 openclaw config set \
@@ -460,11 +490,7 @@ openclaw config set \
   --strict-json
 ```
 
-默认自动晋升阈值：
-
-```text
-0.78
-```
+默认自动晋升阈值：`0.78`。
 
 ### 多气泡
 
@@ -486,20 +512,16 @@ openclaw config set \
 }
 ```
 
-修改配置后执行：
+修改配置后：
 
 ```bash
 openclaw config validate
 openclaw gateway restart
 ```
 
-## 运行时配置
+## 微信运行时配置
 
-插件 ID：
-
-```text
-yogurt-social-injector
-```
+插件 ID：`yogurt-social-injector`
 
 | 配置项 | 作用 | 默认值 |
 |---|---|---|
@@ -525,50 +547,18 @@ yogurt-social-injector
 | `multiBubbleMaxBubbles` | 单轮最大气泡数 | `3` |
 | `multiBubbleDelayMs` | 气泡发送间隔 | `420` |
 
-完整示例：
-
-```text
-integrations/openclaw/config.example.json
-```
+完整示例：`integrations/openclaw/config.example.json`。
 
 ## 自动记忆检查
 
-只读检查命令不会修改数据库。
-
-查看全部候选：
-
 ```bash
-bash scripts/yogurt-memory --pretty \
-  candidates --user-id owner
+bash scripts/yogurt-memory --pretty candidates --user-id owner
+bash scripts/yogurt-memory --pretty candidates --user-id owner --status pending
+bash scripts/yogurt-memory --pretty snapshot --user-id owner
+bash scripts/yogurt-memory --pretty revisions --user-id owner --limit 50
 ```
 
-只看 pending：
-
-```bash
-bash scripts/yogurt-memory --pretty \
-  candidates --user-id owner --status pending
-```
-
-查看稳定记忆快照：
-
-```bash
-bash scripts/yogurt-memory --pretty \
-  snapshot --user-id owner
-```
-
-查看最近修订：
-
-```bash
-bash scripts/yogurt-memory --pretty \
-  revisions --user-id owner --limit 50
-```
-
-通过环境变量检查其他数据库：
-
-```bash
-YOGURT_SOCIAL_DB=/path/to/memory.sqlite3 \
-  bash scripts/yogurt-memory --pretty snapshot --user-id owner
-```
+这些只读检查不会修改数据库。
 
 ## 表情评分观察
 
@@ -577,7 +567,7 @@ cd ~/Yogurt_Chat_Bot
 bash scripts/watch-sticker-scores
 ```
 
-该脚本会打印当前实际运行配置，并过滤：
+常见日志：
 
 ```text
 send decision trigger=
@@ -588,27 +578,14 @@ sticker media send failed
 multi bubble sent
 ```
 
-示例：
-
-```text
-send decision trigger=agent_end mode=proactive
-shouldSend=true score=6.85 threshold=5.80
-intents=celebration
-post-reply sticker selected sticker=...
-multi bubble sent count=2
-sticker media sent trigger=channel_outbound_adapter
-```
-
-仓库默认阈值和本地调参可能不同，以实时日志中的 `threshold` 以及 `watch-sticker-scores` 打印的配置为准。
-
 常见拒绝原因：
 
 ```text
-proactive_threshold   候选最高分低于主动发送下限
-score_margin          第一、第二名分差不足
-global_cooldown       全局冷却
-candidate_cooldown    单图或场景冷却
-hourly_limit          每小时发送上限
+proactive_threshold
+score_margin
+global_cooldown
+candidate_cooldown
+hourly_limit
 ```
 
 ## 从 Tagger 部署表情资产
@@ -622,27 +599,13 @@ hourly_limit          每小时发送上限
 → 导出并发布到酸奶
 ```
 
-手工同步只作为备用：
-
-```bash
-cp \
-  ~/Yogurt_Sticker_Tagger/data/stickers.json \
-  ~/Yogurt_Chat_Bot/assets/stickers/stickers.json
-
-rsync -a \
-  ~/Yogurt_Sticker_Tagger/data/images/ \
-  ~/Yogurt_Chat_Bot/assets/stickers/images/
-```
-
 Catalog 和 `images/` 必须一起同步。
 
 ## 测试
 
-完整测试：
+微信 / 社交层：
 
 ```bash
-cd ~/Yogurt_Chat_Bot
-
 bash scripts/test-openclaw-adapter
 bash scripts/test-sticker-explicit-fallback
 bash scripts/test-sticker-auto-delivery
@@ -652,7 +615,16 @@ bash scripts/test-v3-runtime
 bash scripts/test-v3-sticker-bubble-order
 ```
 
-CI 使用：
+Voice / Mouth / Singing：
+
+```bash
+python -m pytest -q voice_runtime/tests
+python -m pytest -q voice_orchestrator/tests
+python -m pytest -q capabilities/mouth capabilities/voice_session
+python -m pytest -q voice/singing/tests voice/tts/tests
+```
+
+CI 当前覆盖：
 
 - Python 3.9；
 - Python 3.10；
@@ -660,78 +632,25 @@ CI 使用：
 - Python 3.12；
 - Node.js 22。
 
-## 实机检查
+## 安全与隐私边界
 
-查看插件入口和 Hook：
-
-```bash
-openclaw plugins inspect \
-  yogurt-social-injector \
-  --runtime \
-  --json
-```
-
-正常情况下可以看到：
-
-```text
-source: .../integrations/openclaw/index-v3.ts
-version: 0.5.0-alpha.1
-message_sending priority 80
-message_sending priority 70
-```
-
-Gateway 启动后应出现：
-
-```text
-yogurt-social-injector: V3 sticker finalizer captured=true
-```
-
-## 回滚
-
-不需要卸载插件即可关闭 V3 功能：
-
-```bash
-openclaw config set \
-  'plugins.entries.yogurt-social-injector.config.autoMemoryEnabled' \
-  'false' \
-  --strict-json
-
-openclaw config set \
-  'plugins.entries.yogurt-social-injector.config.multiBubbleEnabled' \
-  'false' \
-  --strict-json
-
-openclaw config validate
-openclaw gateway restart
-```
-
-如需同时关闭表情：
-
-```bash
-openclaw config set \
-  'plugins.entries.yogurt-social-injector.config.stickerEnabled' \
-  'false' \
-  --strict-json
-
-openclaw gateway restart
-```
-
-关闭 V3 开关不会删除已有稳定记忆、候选或修订记录。
-
-## 安全边界
-
+- 微信不接入 Mouth、TTS 或 Singing；
 - 不把密码、Token、验证码、密钥、身份文件和支付信息写入长期记忆；
 - 不允许助手回复成为用户事实；
-- 不在实时聊天中调用 VLM；
+- 不在实时微信聊天中调用 VLM；
 - 不向聊天模型暴露表情绝对路径；
+- 不向公共接口暴露模型权重、参考音频和私有路径；
 - 技术和严肃场景默认不主动发表情；
 - 高风险求助场景禁止发表情；
-- 一轮最多选择一张图片；
 - 图片失败保留文字；
 - 自动记忆失败保留聊天；
-- 多气泡部分发送失败时避免重复发送整段原文。
+- 多气泡部分发送失败时避免重复发送整段原文；
+- Singing 失败不会影响 Daily TTS；
+- Voice Runtime 失败不会影响微信文字聊天。
 
 ## 版本演进
+
+微信文字端：
 
 ```text
 V1    社交上下文、关系和显式记忆
@@ -739,6 +658,40 @@ V2    微信真实图片发送链路
 V2.1  最终回复后的发送决策、语义 Ranker 和 Delivery Policy
 V3    自动记忆候选、修订审计、自然多气泡和表情/气泡协调器
 ```
+
+Voice / Embodiment：
+
+```text
+Daily TTS V1       GPT-SoVITS 80:20 + Emotion Router
+Mouth              独立说话能力与安全 API
+VoiceSession       队列、优先级、播放与取消
+Singing V2.1       Lead-only Seed-VC + 原和声 preserve/remove
+Future Ears        STT / VAD / realtime input
+Future Body        Live2D / desktop / robot embodiment
+Future Eyes        screen / camera / environment vision
+```
+
+## 下一阶段方向
+
+微信继续保持文字输出，不把语音链路塞进 OpenClaw/微信发送路径。
+
+下一阶段优先围绕酸奶本体能力继续扩展：
+
+```text
+Native / Desktop host
+  ↓
+Mouth + VoiceSession
+  ↓
+Live2D lipsync / expression
+  ↓
+Ears (STT / VAD / interruption)
+  ↓
+Eyes (screen / camera)
+  ↓
+Robot / physical embodiment
+```
+
+Singing V2.1 和 Daily TTS V1 作为相对稳定的独立 Runtime 保留，后续以音质调优为主，而不是继续改变微信架构。
 
 ## License
 
