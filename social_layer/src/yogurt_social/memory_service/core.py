@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import json
+import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +16,17 @@ from .retrieval import FtsMemoryIndex
 
 
 _LOW_INFORMATION = {"好", "好的", "嗯", "收到", "继续", "ok", "okay", "在吗", "哈哈", "行", "可以", "明白"}
+_CONTROL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memory_observe_requests (
+    idempotency_key TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    canonical_user_id TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(idempotency_key, operation)
+);
+"""
 
 
 @dataclass(frozen=True)
@@ -36,6 +50,17 @@ class MemoryService:
         self.states = ConversationStateRuntimeStore(self.db_path)
         self.index = FtsMemoryIndex(self.db_path)
         self.gate = MemoryRecallGate(self.db_path, min_score=config.recall_min_score)
+        with closing(self._connect()) as connection:
+            connection.executescript(_CONTROL_SCHEMA)
+            connection.commit()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA busy_timeout = 3000")
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
 
     def canonical_user_id(self, persona_id: str, user_id: str) -> str:
         persona = self._identifier(persona_id, "persona_id")
@@ -73,6 +98,72 @@ class MemoryService:
         non_cjk = re.sub(r"[\u3400-\u9fff]", " ", text)
         return cjk + len(re.findall(r"[A-Za-z0-9_]+|[^\s]", non_cjk))
 
+    @staticmethod
+    def _idempotency_key(value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 180:
+            raise ValueError("idempotency_key must be a non-empty bounded string")
+        return value.strip()
+
+    def _load_idempotent(
+        self,
+        key: str | None,
+        operation: str,
+        canonical_user: str | None = None,
+        scoped_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        if key is None:
+            return None
+        query = "SELECT result_json FROM memory_observe_requests WHERE idempotency_key = ? AND operation = ?"
+        values: list[str] = [key, operation]
+        if canonical_user is not None and scoped_key is not None:
+            query += " AND canonical_user_id = ? AND conversation_key = ?"
+            values.extend((canonical_user, scoped_key))
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                query, values,
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(str(row["result_json"]))
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        value["idempotent"] = True
+        return value
+
+    def _store_idempotent(
+        self,
+        key: str | None,
+        operation: str,
+        canonical_user: str,
+        scoped_key: str,
+        result: dict[str, Any],
+    ) -> None:
+        if key is None:
+            return
+        from datetime import datetime, timezone
+
+        stored = {name: value for name, value in result.items() if name != "idempotent"}
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO memory_observe_requests(
+                    idempotency_key, operation, canonical_user_id, conversation_key,
+                    result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    key, operation, canonical_user, scoped_key,
+                    json.dumps(stored, ensure_ascii=False, sort_keys=True),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            connection.commit()
+
     def observe(
         self,
         *,
@@ -83,30 +174,48 @@ class MemoryService:
         phase: str,
         user_message: str = "",
         assistant_reply: str = "",
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         canonical_user = self.canonical_user_id(persona_id, user_id)
         scoped_key = self.scoped_conversation_key(surface, conversation_key)
         if phase not in {"user", "assistant"}:
             raise ValueError("phase must be user or assistant")
+        key = self._idempotency_key(idempotency_key)
+        operation = f"observe_{phase}"
+        existing = self._load_idempotent(key, operation, canonical_user, scoped_key)
+        if existing is not None:
+            return existing
         if phase == "user":
             state = self.states.observe_user_turn(canonical_user, scoped_key, user_message)
-            writes: list[dict[str, Any]] = []
+            result = {
+                "ok": True, "phase": phase, "conversation_key": scoped_key,
+                "state_version": state.state_version, "canonical_write": False,
+                "index_updated": False, "index_dirty": False, "candidate_count": 0,
+                "promoted_count": 0, "conflict_count": 0, "idempotent": False,
+            }
         else:
             state = self.states.observe_assistant_turn(canonical_user, scoped_key, assistant_reply)
             writes = [item.to_dict() for item in self.auto_memory.process_chat(
                 user_id=canonical_user, user_message=user_message, assistant_reply=assistant_reply,
             )]
-            self.index.rebuild_user(canonical_user_id=canonical_user, persona_id=persona_id)
-        return {
-            "ok": True,
-            "phase": phase,
-            "conversation_key": scoped_key,
-            "state_version": state.state_version,
-            "candidate_count": len(writes),
-            "promoted_count": sum(item["status"] == "promoted" for item in writes),
-            "conflict_count": sum(item["status"] == "conflict" for item in writes),
-            "writes": writes,
-        }
+            try:
+                self.index.rebuild_user(canonical_user_id=canonical_user, persona_id=persona_id)
+                index_updated = True
+            except Exception:
+                # Canonical V3 work has committed. A derived-index outage must
+                # neither invalidate this response nor invite a duplicate retry.
+                index_updated = False
+            result = {
+                "ok": True, "phase": phase, "conversation_key": scoped_key,
+                "state_version": state.state_version, "canonical_write": True,
+                "index_updated": index_updated, "index_dirty": not index_updated,
+                "candidate_count": len(writes),
+                "promoted_count": sum(item["status"] == "promoted" for item in writes),
+                "conflict_count": sum(item["status"] == "conflict" for item in writes),
+                "idempotent": False,
+            }
+        self._store_idempotent(key, operation, canonical_user, scoped_key, result)
+        return result
 
     def recall(
         self,
@@ -118,19 +227,25 @@ class MemoryService:
         message: str,
         max_tokens: int | None = None,
         max_items: int | None = None,
+        turn_id: str | None = None,
     ) -> dict[str, Any]:
         canonical_user = self.canonical_user_id(persona_id, user_id)
         scoped_key = self.scoped_conversation_key(surface, conversation_key)
         budget = max(0, min(350, max_tokens if max_tokens is not None else self.config.recall_token_budget))
-        items_limit = max(1, min(3, max_items if max_items is not None else self.config.recall_max_items))
+        del max_items  # V5-A/B is intentionally top-1 only.
         blocked = self._pre_gate(message)
         if blocked:
             return {"decision": "skip", "memories": [], "token_estimate": 0, "reason": blocked, "mode": "pre_gate"}
 
         self.index.rebuild_user(canonical_user_id=canonical_user, persona_id=persona_id)
-        state = self.states.get(canonical_user, scoped_key)
+        observed = self._load_idempotent(
+            self._idempotency_key(turn_id), "observe_user", canonical_user, scoped_key,
+        )
+        state = self.states.get(canonical_user, scoped_key) if observed is not None else None
+        # Every real recall turn must reflect its current message. A caller that
+        # already used /observe phase=user supplies the same turn_id and is not
+        # observed twice.
         if state is None:
-            # A direct API caller can recall safely without a prior observe request.
             state = self.states.observe_user_turn(canonical_user, scoped_key, message)
         explicit = self.gate._explicit_request(message)
         documents = self.index.search(canonical_user_id=canonical_user, message=message, limit=8)
@@ -144,18 +259,6 @@ class MemoryService:
                 quality=document.quality,
                 explicit_request=explicit,
             )
-            # RRF is intentionally only a candidate-generation tiebreaker; it
-            # never replaces the deterministic gate's relevance threshold.
-            score = min(1.0, score + (0.015 / max(1, document.rrf_rank)))
-            # An FTS/exact entity hit (for example ``显卡`` in the derived GPU
-            # aliases) is stronger evidence than the old all-token overlap
-            # score, which penalizes naturally long Chinese questions.
-            query_tokens = MemoryStore._tokens(message)
-            entity_tokens = MemoryStore._tokens(
-                f"{document.memory_key} {document.search_text}"
-            )
-            if query_tokens & entity_tokens:
-                score = max(score, 0.60)
             candidates.append(RecallCandidate(
                 "stable" if document.source_kind != "episode" else "episodic",
                 document.source_kind, document.source_id, document.memory_key,
@@ -171,17 +274,24 @@ class MemoryService:
         )
         if decision.decision != "allow" or decision.candidate is None:
             return {"decision": decision.decision, "memories": [], "token_estimate": 0, "reason": list(decision.reasons), "mode": "shadow_candidate"}
-        chosen: list[dict[str, Any]] = []
-        used = 0
-        for candidate in candidates[:items_limit]:
-            estimate = self._token_estimate(candidate.text)
-            if used + estimate > budget:
-                continue
-            chosen.append({"kind": candidate.kind, "key": candidate.memory_key, "text": candidate.text, "score": round(candidate.score, 4), "source_id": candidate.source_id})
-            used += estimate
-        # Gate selects the best candidate; do not inject an un-gated tail.
-        chosen = chosen[:1]
-        return {"decision": "allow", "memories": chosen, "token_estimate": used if chosen else 0, "reason": list(decision.reasons), "mode": "gate_allow"}
+        candidate = decision.candidate
+        estimate = self._token_estimate(candidate.text)
+        if estimate > budget:
+            return {
+                "decision": "blocked", "memories": [], "token_estimate": 0,
+                "reason": [*decision.reasons, "token_budget_exceeded"],
+                "mode": "budget_blocked",
+            }
+        return {
+            "decision": "allow",
+            "memories": [{
+                "kind": candidate.kind, "key": candidate.memory_key,
+                "text": candidate.text, "score": round(candidate.score, 4),
+                "source_id": candidate.source_id,
+            }],
+            "token_estimate": estimate,
+            "reason": list(decision.reasons), "mode": "gate_allow",
+        }
 
     def snapshot(self, *, persona_id: str, user_id: str) -> dict[str, Any]:
         return self.memory.snapshot(self.canonical_user_id(persona_id, user_id))

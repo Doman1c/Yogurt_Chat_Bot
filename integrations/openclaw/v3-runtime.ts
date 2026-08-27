@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { delimiter, join } from "node:path";
 
 import { splitNaturalBubbles } from "./multi-bubble.ts";
@@ -42,6 +43,7 @@ type PendingTurn = {
   aliases: string[];
   conversationKey: string;
   surface: string;
+  turnId: string;
   createdAt: number;
 };
 
@@ -316,6 +318,7 @@ function runAutoMemory(
         user_id: turn.userId,
         user_message: turn.message,
         assistant_reply: assistantReply,
+        idempotency_key: turn.turnId,
       }),
     );
   });
@@ -340,6 +343,7 @@ async function runMemoryServiceObserve(
         phase: "assistant",
         user_message: turn.message,
         assistant_reply: assistantReply,
+        idempotency_key: turn.turnId,
       }),
       signal: controller.signal,
     });
@@ -375,10 +379,14 @@ export function registerV3Runtime(api: any): void {
       const serviceResult = config.memoryServiceEnabled
         ? await runMemoryServiceObserve(config, turn, assistantReply)
         : undefined;
-      const result = serviceResult || await runAutoMemory(api, turn, assistantReply, config);
+      // A timeout is ambiguous: the service may have committed canonical V3
+      // state after the client stopped waiting. Do not run a second writer and
+      // inflate occurrences/revisions. Chat itself always remains fail-open.
       if (config.memoryServiceEnabled && !serviceResult) {
-        api.logger.warn(`${PLUGIN_ID}: v5 memory service write unavailable; used local V3 fallback`);
+        api.logger.warn(`${PLUGIN_ID}: v5 memory service write outcome unknown; duplicate fallback skipped`);
+        return false;
       }
+      const result = serviceResult || await runAutoMemory(api, turn, assistantReply, config);
       api.logger.info(
         `${PLUGIN_ID}: auto memory trigger=${trigger} candidates=${result.candidate_count || 0} promoted=${result.promoted_count || 0} pending=${result.pending_count || 0} conflicts=${result.conflict_count || 0}`,
       );
@@ -410,6 +418,7 @@ export function registerV3Runtime(api: any): void {
         message: prompt,
         conversationKey: preferredPolicyKey(aliases),
         surface: channel === WEIXIN_CHANNEL ? "wechat" : "native",
+        turnId: randomUUID(),
       };
       if (config.autoMemoryEnabled) memoryTurns.register(aliases, turn);
       if (config.multiBubbleEnabled && channel === WEIXIN_CHANNEL) {

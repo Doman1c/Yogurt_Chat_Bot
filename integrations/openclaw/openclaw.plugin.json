@@ -226,11 +226,6 @@
         "type": "string",
         "default": "http://127.0.0.1:17621"
       },
-      "memoryServiceMode": {
-        "type": "string",
-        "enum": ["shadow", "real"],
-        "default": "shadow"
-      },
       "memoryServiceTimeoutMs": {
         "type": "integer",
         "minimum": 100,

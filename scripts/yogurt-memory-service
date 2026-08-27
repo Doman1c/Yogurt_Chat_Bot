@@ -3,8 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${YOGURT_MEMORY_PYTHON:-python3}"
-HOST="${YOGURT_MEMORY_HOST:-127.0.0.1}"
 PORT="${YOGURT_MEMORY_PORT:-17621}"
 
 export PYTHONPATH="$REPO_ROOT/social_layer/src${PYTHONPATH:+:$PYTHONPATH}"
-exec "$PYTHON_BIN" -m uvicorn yogurt_social.memory_service.app:app --host "$HOST" --port "$PORT"
+exec "$PYTHON_BIN" -m uvicorn yogurt_social.memory_service.app:create_default_app --factory --host 127.0.0.1 --port "$PORT"

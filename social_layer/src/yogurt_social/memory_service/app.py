@@ -57,4 +57,6 @@ def create_app(service: MemoryService | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+def create_default_app() -> FastAPI:
+    """Uvicorn factory that defers database creation until service startup."""
+    return create_app()

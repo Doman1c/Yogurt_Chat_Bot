@@ -153,12 +153,16 @@ class FtsMemoryIndex:
 
             connection.execute("BEGIN IMMEDIATE")
             old_rows = connection.execute(
-                "SELECT rowid FROM memory_search_documents WHERE canonical_user_id = ?",
+                "SELECT rowid, search_text FROM memory_search_documents WHERE canonical_user_id = ?",
                 (canonical_user_id,),
             ).fetchall()
             if self.fts_available:
                 for old in old_rows:
-                    connection.execute("INSERT INTO memory_search_fts(memory_search_fts, rowid, search_text) VALUES('delete', ?, '')", (int(old["rowid"]),))
+                    connection.execute(
+                        "INSERT INTO memory_search_fts(memory_search_fts, rowid, search_text) "
+                        "VALUES('delete', ?, ?)",
+                        (int(old["rowid"]), str(old["search_text"])),
+                    )
             connection.execute("DELETE FROM memory_search_documents WHERE canonical_user_id = ?", (canonical_user_id,))
             for generation, row in enumerate(rows, start=1):
                 cursor = connection.execute(

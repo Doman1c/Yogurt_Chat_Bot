@@ -50,7 +50,6 @@
           "memoryRecallMaxCandidates": 5,
           "memoryServiceEnabled": false,
           "memoryServiceUrl": "http://127.0.0.1:17621",
-          "memoryServiceMode": "shadow",
           "memoryServiceTimeoutMs": 450,
           "memoryServicePersonaId": "yogurt",
           "memoryServiceRecallMaxItems": 3,

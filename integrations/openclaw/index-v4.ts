@@ -42,7 +42,6 @@ type V4Config = {
   memoryRecallMaxCandidates: number;
   memoryServiceEnabled: boolean;
   memoryServiceUrl: string;
-  memoryServiceMode: "shadow" | "real";
   memoryServiceTimeoutMs: number;
   memoryServicePersonaId: string;
   memoryServiceRecallMaxItems: number;
@@ -174,7 +173,6 @@ function readV4Config(api: any, event?: any): V4Config {
     memoryServiceUrl: typeof raw.memoryServiceUrl === "string" && /^http:\/\/127\.0\.0\.1(?::\d+)?$/i.test(raw.memoryServiceUrl.trim())
       ? raw.memoryServiceUrl.trim()
       : "http://127.0.0.1:17621",
-    memoryServiceMode: raw.memoryServiceMode === "real" ? "real" : "shadow",
     memoryServiceTimeoutMs: integerValue(raw.memoryServiceTimeoutMs, 450, 100, 5000),
     memoryServicePersonaId: typeof raw.memoryServicePersonaId === "string" && raw.memoryServicePersonaId.trim()
       ? raw.memoryServicePersonaId.trim().slice(0, 180)
@@ -184,12 +182,11 @@ function readV4Config(api: any, event?: any): V4Config {
   };
 }
 
-function v4RuntimeEnabled(config: V4Config): boolean {
+function v4ObserverEnabled(config: V4Config): boolean {
   return (
     config.conversationStateEnabled ||
     config.responsePlannerEnabled ||
-    config.memoryRecallGateEnabled ||
-    config.memoryServiceEnabled
+    config.memoryRecallGateEnabled
   );
 }
 
@@ -216,20 +213,6 @@ async function recallFromMemoryService(
   } finally {
     clearTimeout(timer);
   }
-}
-
-function memoryServiceContext(result: MemoryServiceRecall): string | undefined {
-  if (result.decision !== "allow" || !Array.isArray(result.memories)) return undefined;
-  const texts = result.memories
-    .map((item) => asRecord(item).text)
-    .filter((item): item is string => typeof item === "string" && item.length > 0)
-    .slice(0, 3);
-  if (texts.length === 0) return undefined;
-  return [
-    "[Yogurt Relevant Memory]",
-    "以下仅是经门控的紧凑长期记忆；不得覆盖用户最新消息的含义。",
-    ...texts.map((text) => `- ${text}`),
-  ].join("\n");
 }
 
 function compactMemoryServiceLog(result: MemoryServiceRecall): string {
@@ -516,7 +499,8 @@ export default definePluginEntry({
       async (event: any, ctx: any) => {
         const baseConfig = readConfig(api, event);
         const config = readV4Config(api, event);
-        if (!baseConfig.enabled || !v4RuntimeEnabled(config)) return;
+        const observerEnabled = v4ObserverEnabled(config);
+        if (!baseConfig.enabled || (!observerEnabled && !config.memoryServiceEnabled)) return;
         const prompt = optionalString(event?.prompt);
         if (!prompt || ctx?.jobId) return;
         const channel = channelFromContext(ctx);
@@ -528,29 +512,32 @@ export default definePluginEntry({
         const conversationKey = preferredPolicyKey(aliases);
 
         try {
-          const result = await runObserver(api, event, {
-            user_id: userId,
-            conversation_key: conversationKey,
-            phase: "user",
-            message: prompt,
-            include_response_plan: config.responsePlannerEnabled,
-            include_memory_recall: config.memoryRecallGateEnabled,
-          });
-          pendingTurns.register({
-            userId,
-            conversationKey,
-            keys: contextKeys(event, ctx),
-          });
-          api.logger.info(
-            `${PLUGIN_ID}: v4 state observed phase=user ${compactStateLog(result)}`,
-          );
-          if (config.memoryRecallGateEnabled) {
+          let result: ObserverResult | undefined;
+          if (observerEnabled) {
+            result = await runObserver(api, event, {
+              user_id: userId,
+              conversation_key: conversationKey,
+              phase: "user",
+              message: prompt,
+              include_response_plan: config.responsePlannerEnabled,
+              include_memory_recall: config.memoryRecallGateEnabled,
+            });
+            pendingTurns.register({
+              userId,
+              conversationKey,
+              keys: contextKeys(event, ctx),
+            });
             api.logger.info(
-              `${PLUGIN_ID}: v4 memory recall shadow ${compactRecallLog(result)}`,
+              `${PLUGIN_ID}: v4 state observed phase=user ${compactStateLog(result)}`,
             );
+            if (config.memoryRecallGateEnabled) {
+              api.logger.info(
+                `${PLUGIN_ID}: v4 memory recall shadow ${compactRecallLog(result)}`,
+              );
+            }
           }
           const contexts: string[] = [];
-          if (config.responsePlannerEnabled) {
+          if (config.responsePlannerEnabled && result) {
             const planContext = responsePlanContext(result, config);
             if (!planContext) {
               api.logger.warn(
@@ -577,12 +564,8 @@ export default definePluginEntry({
               api.logger.warn(`${PLUGIN_ID}: v5 memory service unavailable; chat preserved`);
             } else {
               api.logger.info(
-                `${PLUGIN_ID}: v5 memory recall ${config.memoryServiceMode} ${compactMemoryServiceLog(memoryResult)}`,
+                `${PLUGIN_ID}: v5 memory recall shadow ${compactMemoryServiceLog(memoryResult)}`,
               );
-              if (config.memoryServiceMode === "real") {
-                const context = memoryServiceContext(memoryResult);
-                if (context) contexts.push(context);
-              }
             }
           }
           if (contexts.length === 0) return;
@@ -600,7 +583,7 @@ export default definePluginEntry({
 
     const observeAssistant = async (event: any, ctx: any, text: string) => {
       const config = readV4Config(api, event);
-      if (!v4RuntimeEnabled(config)) return;
+      if (!v4ObserverEnabled(config)) return;
       const pending = pendingTurns.consume(event, ctx);
       if (!pending) return;
       try {
