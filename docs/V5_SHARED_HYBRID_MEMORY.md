@@ -93,3 +93,15 @@ and regression protections for false recalls, inactive rows, low-information
 turns, and high-risk suppression. It also adds an aggregate-only audit reader
 for existing shadow events. See [Memory Recall Benchmark](MEMORY_RECALL_BENCHMARK.md).
 Neither Vector/RRF nor Real Prompt Recall has been implemented.
+
+## V5-B.6 Recall Gate analysis
+
+V5-B.6 keeps the B.5 corpus fixed and adds an offline, isolated-SQLite analysis
+tool for the real service/index/Gate path. It partitions positive failures into
+pre-gate, retrieval, ranking, clean Gate-blocked, success, and inconsistent
+states; reports privacy-safe candidate diagnostics; and runs threshold sweeps
+and one-at-a-time blocker ablations without changing production behavior. The
+service remains shadow-only, Real Recall remains closed, Vector/RRF remains
+unintroduced, and the production threshold is unchanged. The next phase must
+be determined by these benchmark results; see
+[Recall Gate Analysis](MEMORY_RECALL_GATE_ANALYSIS.md).
