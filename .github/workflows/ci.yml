@@ -42,7 +42,9 @@ jobs:
             social_layer/tests/test_auto_memory.py \
             social_layer/tests/test_conversation_state.py \
             social_layer/tests/test_memory_recall_gate.py \
-            social_layer/tests/test_memory_service.py
+            social_layer/tests/test_memory_service.py \
+            social_layer/tests/test_memory_benchmark.py \
+            social_layer/tests/test_memory_shadow_audit.py
 
       - name: Run P10 Mouth and VoiceSession tests
         run: |

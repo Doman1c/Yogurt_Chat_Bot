@@ -84,3 +84,12 @@ shadow-audit acceptance. Before vector work, add the versioned
 approximately-100-case corpus and report Top-1, Recall@3/5, MRR, false-recall
 rate, and no-recall precision. Vector must be a provider-abstracted, rebuildable
 derived index; future source fusion uses RRF before the V4.2 gate.
+
+## V5-B.5 benchmark and shadow audit
+
+V5-B.5 adds an offline, versioned recall baseline with a sanitized corpus,
+real `MemoryService.recall()` execution, category metrics, latency reporting,
+and regression protections for false recalls, inactive rows, low-information
+turns, and high-risk suppression. It also adds an aggregate-only audit reader
+for existing shadow events. See [Memory Recall Benchmark](MEMORY_RECALL_BENCHMARK.md).
+Neither Vector/RRF nor Real Prompt Recall has been implemented.
