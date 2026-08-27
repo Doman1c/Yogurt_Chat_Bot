@@ -22,13 +22,70 @@ The wrapper invokes the separately installed upstream `inference.py` in offline 
 
 Pipeline v2 adds a sequential, failure-isolated orchestration layer around the existing wrapper. It uses a separate pymss environment for CUDA RoFormer separation and never modifies the stable Seed-VC environment.
 
-Copy `configs/pipeline.example.json` to a local-only `E:\Yogurt_Singing_Runtime\pipeline.json`, fill in the local Seed-VC runtime config and target reference, then put `.mp3`, `.wav`, `.flac`, or `.m4a` files in `E:\Yogurt_Singing_Runtime\incoming` and run:
+Copy `configs/pipeline.example.json` to a local-only `E:\Yogurt_Singing_Runtime\pipeline.json`, fill in the local Seed-VC runtime config and target reference, then put audio files in `E:\Yogurt_Singing_Runtime\incoming` and run:
 
 ```powershell
 E:\Yogurt_Chat_Bot\voice\singing\scripts\start_singing_pipeline.ps1
 ```
 
+The managed pipeline itself continues to consume one standard audio file per job. The launcher now runs a lightweight playlist/input preprocessor first, so the inbox accepts the original `.mp3`, `.wav`, `.flac`, and `.m4a` inputs plus `.weba`, `.webm`, `.ogg`, and `.opus`. Extra containers are converted losslessly to 44.1 kHz stereo PCM WAV before the normal Singing lifecycle begins.
+
 Use `--Resume` to continue a verified separation or Seed-VC stage. Every job writes an output-local `job_manifest.json`; failed jobs retain their work and `logs\pipeline.log` in `E:\Yogurt_Singing_Runtime\failed\<job_id>`.
+
+### Timestamped playlists / chapter splitting
+
+A long playlist can be split into independent Singing jobs before source separation. Put the playlist audio and one chapter sidecar next to each other in `incoming`.
+
+For `playlist.weba`, either of these names is accepted:
+
+```text
+playlist.chapters.txt
+playlist.weba.chapters.txt
+```
+
+Text sidecars use one track per line. `MM:SS`, `HH:MM:SS`, and fractional seconds are accepted:
+
+```text
+00:00 | Track One
+03:42.500 | Track Two
+07:18 | Track Three
+12:05 | Track Four
+```
+
+The next chapter start is used as the current track end. The final chapter runs to end-of-file. If exact ends are required, use:
+
+```text
+00:10 --> 03:40 | Track One
+03:45 --> 07:10 | Track Two
+```
+
+JSON is also supported through `playlist.chapters.json` or `playlist.weba.chapters.json`:
+
+```json
+{
+  "chapters": [
+    {"start": "00:00", "title": "Track One"},
+    {"start": "03:42.500", "title": "Track Two"},
+    {"start": "07:18", "title": "Track Three"}
+  ]
+}
+```
+
+The preprocessor validates strictly increasing timestamps, overlapping explicit ranges, minimum track duration, ambiguous sidecars, and file stability before publishing any derived track to the real inbox. Each track is decoded to a unique 44.1 kHz stereo PCM WAV and then enters the existing SHA-256/job-history/archive/resume flow independently.
+
+The original playlist and its chapter sidecar are preserved under the local-only `playlist_sources` directory together with a `playlist_manifest.json`. They are not committed to Git. The derived WAV jobs use the original playlist name, track number, title, and source hash in their filename to avoid collisions.
+
+Example resulting inbox entries:
+
+```text
+playlist__01__Track_One__a1b2c3d4.wav
+playlist__02__Track_Two__a1b2c3d4.wav
+playlist__03__Track_Three__a1b2c3d4.wav
+```
+
+If an extra input such as `.weba` has no chapter sidecar, it is simply transcoded as one full-song WAV job. Existing `.mp3/.wav/.flac/.m4a` files without a sidecar are left untouched.
+
+Playlist preprocessing is enabled by default and can be configured under the local-only `playlist` object in `pipeline.json`. `-SkipPlaylistPreprocess` on `start_singing_pipeline.ps1` is available only as a debug/maintenance escape hatch.
 
 ### Harmony-aware vocal conversion
 
