@@ -28,7 +28,7 @@ PYTHONPATH=social_layer/src python -m yogurt_social.memory_benchmark \
   --report-output outputs/memory_benchmark_v5b.md
 ```
 
-`--fail-on-regression` compares the run to `social_layer/tests/baselines/memory_recall_v5b.json`. The protection line is false recall rate at most 5%, plus 100% inactive-stale safety, low-information pre-gate behavior, and high-risk suppression. It deliberately does not require perfect paraphrase or cross-language recall.
+`--fail-on-regression` compares the run to `social_layer/tests/baselines/memory_recall_v5b.json`. It first requires an exact match for dataset version, seed SHA256, and cases SHA256; any mismatch is an explicit failure rather than a comparison against a different corpus. The protection line is false recall rate at most 5%, plus 100% inactive-stale safety, low-information pre-gate behavior, and high-risk suppression. It deliberately does not require perfect paraphrase or cross-language recall.
 
 The harness runs the real `MemoryService.recall()` decision. It separately uses the existing derived index for candidate ranking, so Top1/Recall@3/MRR measure retrieval while allow/block measures the gate.
 
@@ -45,7 +45,7 @@ False Recall Rate and No-Recall Precision are intentionally more important than 
 
 ## Shadow audit
 
-The gate writes identity-free event metadata (decision, candidate kind, score, reasons, and scope) without raw user messages or memory text. Summarize it locally:
+The underlying gate events retain scope and identity fields for local operation, alongside decision, candidate kind, score, and reasons; they do not store raw user messages or memory text. The audit export intentionally emits only anonymous aggregates, never identity or raw text. Summarize it locally:
 
 ```bash
 PYTHONPATH=social_layer/src python -m yogurt_social.memory_shadow_audit \

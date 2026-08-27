@@ -388,7 +388,26 @@ def _load_baseline(path: Path) -> Dict[str, Any]:
     return payload
 
 
+def validate_baseline_dataset(report: Dict[str, Any], baseline: Dict[str, Any]) -> None:
+    """Reject metric comparisons made against a different benchmark corpus."""
+    report_dataset = report.get("dataset", {})
+    baseline_dataset = baseline.get("dataset", {})
+    checks = (
+        ("dataset_version", report.get("dataset_version"), baseline.get("dataset_version")),
+        ("seed_sha256", report_dataset.get("seed_sha256"), baseline_dataset.get("seed_sha256")),
+        ("cases_sha256", report_dataset.get("cases_sha256"), baseline_dataset.get("cases_sha256")),
+    )
+    mismatches = [
+        "%s (report=%r baseline=%r)" % (name, actual, expected)
+        for name, actual, expected in checks
+        if not actual or not expected or actual != expected
+    ]
+    if mismatches:
+        raise ValueError("benchmark dataset mismatch: " + "; ".join(mismatches))
+
+
 def has_regression(report: Dict[str, Any], baseline: Dict[str, Any]) -> bool:
+    validate_baseline_dataset(report, baseline)
     thresholds = baseline.get("thresholds", {})
     summary = report["summary"]
     if summary["false_recall_rate"] > float(thresholds.get("max_false_recall_rate", 1.0)):
@@ -420,8 +439,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.report_output.write_text(markdown_report(report), encoding="utf-8")
     print(json.dumps({"summary": report["summary"], "latency_ms": report["latency_ms"], "recommendation": recommendation(report)}, ensure_ascii=False, indent=2))
     if args.fail_on_regression:
-        baseline = _load_baseline(args.baseline)
-        return 2 if has_regression(report, baseline) else 0
+        try:
+            baseline = _load_baseline(args.baseline)
+            return 2 if has_regression(report, baseline) else 0
+        except ValueError as error:
+            parser.error(str(error))
     return 0
 
 

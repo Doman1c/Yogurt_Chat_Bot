@@ -1,4 +1,5 @@
 import json
+import copy
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from yogurt_social.memory_benchmark import (
     load_seed,
     run_benchmark,
     seed_service,
+    validate_baseline_dataset,
 )
 from yogurt_social.memory_service.core import MemoryService, MemoryServiceConfig
 
@@ -46,6 +48,24 @@ def test_metrics_cover_rank_false_recall_and_no_recall_precision():
     assert report["mrr"] == 0.75
     assert report["false_recall_rate"] == 0.5
     assert report["no_recall_precision"] == 0.5
+
+
+@pytest.mark.parametrize("field", ["dataset_version", "seed_sha256", "cases_sha256"])
+def test_dataset_mismatch_blocks_regression_comparison(field):
+    report = {
+        "dataset_version": "memory-recall-v1",
+        "dataset": {"seed_sha256": "seed-a", "cases_sha256": "cases-a"},
+        "summary": {"false_recall_rate": 0.0},
+        "safety": {},
+    }
+    baseline = copy.deepcopy(report)
+    baseline["thresholds"] = {}
+    if field == "dataset_version":
+        baseline[field] = "memory-recall-v2"
+    else:
+        baseline["dataset"][field] = "different"
+    with pytest.raises(ValueError, match="benchmark dataset mismatch"):
+        validate_baseline_dataset(report, baseline)
 
 
 def test_benchmark_uses_real_service_and_keeps_surface_state_isolated(tmp_path):
