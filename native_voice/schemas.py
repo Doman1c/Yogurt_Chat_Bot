@@ -35,6 +35,29 @@ def normalize_language(value: str) -> str:
     return language
 
 
+def resolve_transcript_language(text: str, requested_language: str) -> str:
+    """Resolve whisper auto output deterministically before it reaches TTS."""
+    requested = normalize_language(requested_language)
+    if requested != "auto":
+        return requested
+    # Japanese kana is decisive, including half-width/phonetic extensions.
+    if any(
+        ("\u3040" <= character <= "\u30ff")
+        or ("\u31f0" <= character <= "\u31ff")
+        or ("\uff66" <= character <= "\uff9d")
+        for character in text
+    ):
+        return "ja"
+    # Han without kana is routed conservatively as Chinese.
+    if any(("\u3400" <= character <= "\u9fff") or ("\uf900" <= character <= "\ufaff") for character in text):
+        return "zh"
+    latin = sum(character.isascii() and character.isalpha() for character in text)
+    non_space = sum(not character.isspace() for character in text)
+    if latin and latin * 2 >= non_space:
+        return "en"
+    return "zh"
+
+
 @dataclass(frozen=True)
 class TranscriptResult:
     """In-memory STT output. It is never included in NativeVoiceEvent."""
@@ -50,7 +73,7 @@ class TranscriptResult:
         if len(text) > 4000:
             raise ValueError("transcript_too_long")
         object.__setattr__(self, "text", text)
-        object.__setattr__(self, "language", normalize_language(self.language))
+        object.__setattr__(self, "language", resolve_transcript_language(text, self.language))
 
 
 @dataclass(frozen=True)

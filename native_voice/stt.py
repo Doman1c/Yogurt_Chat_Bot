@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol, Sequence
 
 from .config import STTConfig
-from .schemas import TranscriptResult
+from .schemas import TranscriptResult, resolve_transcript_language
 
 
 class STTError(RuntimeError):
@@ -115,7 +115,7 @@ class WhisperCppSTT:
         try:
             text = output.decode("utf-8", errors="replace")
             return TranscriptResult(
-                text=text, language=self._config.language,
+                text=text, language=resolve_transcript_language(text, self._config.language),
                 duration_ms=round((time.monotonic() - started) * 1000),
             )
         except ValueError as error:

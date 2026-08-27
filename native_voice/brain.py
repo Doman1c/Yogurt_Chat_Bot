@@ -37,12 +37,47 @@ class BrainClient(Protocol):
         ...
 
 
+def _visible_payload_text(payloads: Any) -> Optional[str]:
+    """Read only visible assistant text fields from the Gateway payload envelope."""
+    if not isinstance(payloads, list):
+        return None
+    texts = []
+    hidden_kinds = {"tool", "tool_call", "tool_result", "reasoning", "analysis", "trace"}
+    for item in payloads:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        kind = item.get("kind", item.get("type", ""))
+        if isinstance(role, str) and role.lower() not in {"assistant", ""}:
+            continue
+        normalized_kind = kind.lower() if isinstance(kind, str) else ""
+        if normalized_kind in hidden_kinds or any(
+            marker in normalized_kind for marker in ("tool", "reason", "analysis", "trace")
+        ):
+            continue
+        if any(
+            marker in str(key).lower()
+            for key in item
+            for marker in ("tool", "reason", "analysis", "trace")
+        ):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            texts.append(text.strip())
+    # Joining visible payloads preserves their normal Gateway ordering.
+    return "\n".join(texts) if texts else None
+
+
 def _final_text(payload: Any) -> Optional[str]:
-    """Extract only named final-text fields, never reasoning/tool trace fields."""
+    """Extract final visible text, never metadata, reasoning, or tool traces."""
     if isinstance(payload, str):
         return payload
     if not isinstance(payload, dict):
         return None
+    if "payloads" in payload:
+        # A Gateway envelope is authoritative: no valid visible text is a failure,
+        # not a reason to fall back to possibly non-user-visible metadata.
+        return _visible_payload_text(payload.get("payloads"))
     for key in ("reply", "final", "text"):
         value = payload.get(key)
         if isinstance(value, str):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import wave
 from pathlib import Path
@@ -9,10 +10,10 @@ import pytest
 
 from capabilities.voice_session.schemas import UtteranceState
 from native_voice.audio import RecordedAudio
-from native_voice.brain import BrainError, BrainRequest, OpenClawAgentBrain
-from native_voice.config import BrainConfig, NativeVoiceConfig, STTConfig
+from native_voice.brain import BrainError, BrainRequest, OpenClawAgentBrain, _final_text
+from native_voice.config import BrainConfig, NativeVoiceConfig, STTConfig, _toml_loader
 from native_voice.memory import DisabledNativeMemory
-from native_voice.schemas import BrainReply, TranscriptResult, TurnPhase, TurnStatus
+from native_voice.schemas import BrainReply, TranscriptResult, TurnPhase, TurnStatus, resolve_transcript_language
 from native_voice.service import NativeVoiceBusyError, NativeVoiceService
 from native_voice.stt import STTError, WhisperCppSTT
 
@@ -311,6 +312,92 @@ def test_brain_timeout_and_non_delivery_argv() -> None:
     asyncio.run(run())
 
 
+def test_gateway_payload_envelope_prefers_visible_assistant_text() -> None:
+    payload = {
+        "payloads": [
+            {"role": "assistant", "text": "第一段"},
+            {"role": "assistant", "text": "第二段"},
+        ],
+        "reply": "must-not-win-over-visible-payloads",
+        "meta": {"text": "metadata-is-not-a-reply"},
+    }
+    assert _final_text(payload) == "第一段\n第二段"
+    assert _final_text({"reply": "legacy", "result": {"text": "nested"}}) == "legacy"
+
+
+def test_gateway_payload_envelope_rejects_tool_reasoning_and_metadata() -> None:
+    assert _final_text({
+        "payloads": [
+            {"type": "tool_result", "text": "tool-output"},
+            {"type": "tool_use", "text": "tool-use-output"},
+            {"type": "reasoning", "text": "private-analysis"},
+            {"role": "user", "text": "user-message"},
+        ],
+        "reply": "must-not-fallback",
+    }) is None
+    assert _final_text({"meta": {"text": "metadata-only"}}) is None
+    with pytest.raises(ValueError):
+        BrainReply(_final_text({"payloads": [{"text": "x" * 501}]}))
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("こんにちは、酸奶", "ja"),
+        ("今天继续做项目", "zh"),
+        ("please continue the project", "en"),
+        ("hello 世界", "zh"),
+        ("hello こんにちは", "ja"),
+        ("123 !!!", "zh"),
+    ],
+)
+def test_auto_language_resolution_is_deterministic(text: str, expected: str) -> None:
+    assert resolve_transcript_language(text, "auto") == expected
+    assert TranscriptResult(text, "auto").language == expected
+
+
+def test_explicit_transcript_language_is_preserved() -> None:
+    assert TranscriptResult("hello", "ja").language == "ja"
+    assert TranscriptResult("こんにちは", "en").language == "en"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [("こんにちは", "ja"), ("你好", "zh"), ("hello", "en")],
+)
+def test_real_whisper_adapter_auto_output_resolves_language(tmp_path: Path, text: str, expected: str) -> None:
+    audio = tmp_path / "input.wav"
+    audio.write_bytes(b"wav")
+
+    class OutputWhisper(WhisperCppSTT):
+        def _argv(self, audio_path):
+            del audio_path
+            return (sys.executable, "-c", "print(%s)" % json.dumps(text))
+
+    async def run() -> None:
+        stt = OutputWhisper(STTConfig("whisper_cpp", Path(sys.executable), Path("/tmp/model.bin")))
+        result = await stt.transcribe(audio)
+        assert result.text == text
+        assert result.language == expected
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [("こんにちは", "ja"), ("你好", "zh"), ("hello", "en")],
+)
+def test_auto_language_reaches_speak_request(text: str, expected: str) -> None:
+    async def run() -> None:
+        voice = FakeVoiceSession()
+        service = _service(stt=FakeSTT(text, "auto"), voice=voice)
+        await service.start_listening()
+        assert (await service.stop_listening_and_process()).status == TurnStatus.FINISHED
+        assert voice.requests[0].language == expected
+
+    asyncio.run(run())
+
+
 def test_memory_is_off_and_native_scope_only() -> None:
     memory = DisabledNativeMemory()
     assert memory.scope("abc") == "native:voice:abc"
@@ -335,3 +422,8 @@ def test_openclaw_native_guard_is_present_for_memory_hooks() -> None:
     assert 'value.includes("native:voice:")' in helper
     for name in ("index-v4.ts", "v3-runtime.ts", "v3-memory-extended.ts"):
         assert "if (isNativeVoiceContext(ctx, event)) return;" in (root / name).read_text(encoding="utf-8")
+
+
+def test_toml_loader_is_explicit_on_supported_python_versions() -> None:
+    expected = "tomllib" if sys.version_info >= (3, 11) else "tomli"
+    assert _toml_loader().__name__ == expected

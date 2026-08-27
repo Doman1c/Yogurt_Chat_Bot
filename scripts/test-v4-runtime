@@ -58,6 +58,11 @@ export function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+export function isNativeVoiceContext(ctx: any, event?: any): boolean {
+  const sessionKey = optionalString(ctx?.sessionKey) || optionalString(event?.sessionKey);
+  return Boolean(sessionKey && sessionKey.includes("native:voice:"));
+}
+
 export function senderIdFromContext(ctx: any): string | undefined {
   return optionalString(ctx?.senderId);
 }
@@ -274,6 +279,13 @@ await dispatch(
   },
   { channelId: "openclaw-weixin" },
 );
+
+const nativeResult = await dispatch(
+  "before_prompt_build",
+  { prompt: "native turn must not reach B.7" },
+  { channelId: "native", sessionKey: "native:voice:smoke" },
+);
+assert.equal(nativeResult, undefined);
 
 assert.ok(
   existsSync(process.env.V4_OBSERVER_LOG),
