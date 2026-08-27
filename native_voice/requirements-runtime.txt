@@ -1,3 +1,4 @@
 # Real local PTT runtime. CI installs requirements.txt only and never opens a device.
 -r requirements.txt
+numpy>=1.22
 sounddevice>=0.4.6

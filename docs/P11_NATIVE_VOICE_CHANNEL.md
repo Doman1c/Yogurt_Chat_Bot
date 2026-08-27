@@ -43,8 +43,9 @@ model. The real config is Git-ignored. P11-A1 never downloads whisper.cpp or a
 model.
 
 For an actual Mac microphone runtime, install the explicit Native Voice runtime
-dependencies first. This only installs the Python backend; it does not download
-or access microphone hardware during installation or CI.
+dependencies first. This installs the Python audio backend and its array
+runtime; it does not download or access microphone hardware during installation
+or CI.
 
 ```bash
 python3 -m pip install -r native_voice/requirements-runtime.txt

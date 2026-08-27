@@ -434,6 +434,14 @@ def test_missing_microphone_backend_is_bounded(tmp_path: Path, monkeypatch: pyte
         SoundDeviceMicrophone().start(tmp_path)
 
 
+def test_runtime_requirements_include_sounddevice_array_stack() -> None:
+    requirements = (Path(__file__).resolve().parents[1] / "requirements-runtime.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "numpy>=1.22" in requirements
+    assert "sounddevice>=0.4.6" in requirements
+
+
 def test_memory_is_off_and_native_scope_only() -> None:
     memory = DisabledNativeMemory()
     assert memory.scope("abc") == "native:voice:abc"
