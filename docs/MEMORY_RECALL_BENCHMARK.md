@@ -28,15 +28,15 @@ PYTHONPATH=social_layer/src python -m yogurt_social.memory_benchmark \
   --report-output outputs/memory_benchmark_v5b.md
 ```
 
-`--fail-on-regression` compares the run to `social_layer/tests/baselines/memory_recall_v5b.json`. It first requires an exact match for dataset version, seed SHA256, and cases SHA256; any mismatch is an explicit failure rather than a comparison against a different corpus. The protection line is false recall rate at most 5%, plus 100% inactive-stale safety, low-information pre-gate behavior, and high-risk suppression. It deliberately does not require perfect paraphrase or cross-language recall.
+`--fail-on-regression` compares the run to `social_layer/tests/baselines/memory_recall_v5b.json`. It first requires an exact match for dataset version, seed SHA256, and cases SHA256; any mismatch is an explicit failure rather than a comparison against a different corpus. The protection line requires zero false recalls, plus 100% inactive-stale safety, low-information pre-gate behavior, and high-risk suppression. It deliberately does not require perfect paraphrase or cross-language recall.
 
-The harness runs the real `MemoryService.recall()` decision. It separately uses the existing derived index for candidate ranking, so Top1/Recall@3/MRR measure retrieval while allow/block measures the gate.
+The harness runs the real `MemoryService.recall()` decision. It separately reconstructs the same pre-gate candidate scoring/ranking path used by the service, so Top1/Recall@3/MRR measure pre-gate candidate ranking quality, while allow/block measures the final Recall Gate decision. A retrieval miss means the expected memory never entered the ranked candidate set; it should not be conflated with a gate false negative.
 
 ## Metrics
 
-- **Top1 Accuracy:** among `should_recall` cases, expected/acceptable ID is the first ranked candidate.
-- **Recall@3:** expected/acceptable ID occurs in the first three candidates.
-- **MRR:** reciprocal rank of the first expected/acceptable candidate.
+- **Top1 Accuracy:** among `should_recall` cases, expected/acceptable ID is the first ranked pre-gate candidate.
+- **Recall@3:** expected/acceptable ID occurs in the first three pre-gate candidates.
+- **MRR:** reciprocal rank of the first expected/acceptable pre-gate candidate.
 - **False Recall Rate:** `should_recall=false` cases whose final gate decision is `allow`.
 - **No-Recall Precision:** among all final non-allow decisions, the fraction that were truly `should_recall=false`.
 - **Recall Decision Rate:** share of all cases whose final decision is allow.
