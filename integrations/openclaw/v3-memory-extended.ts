@@ -7,6 +7,7 @@ import {
   channelFromContext,
   channelIsAllowed,
   contextAliases,
+  isNativeVoiceContext,
   optionalString,
   readConfig,
   resolveUserId,
@@ -264,6 +265,7 @@ export function registerExtendedMemoryRuntime(api: any): void {
   api.on(
     "before_prompt_build",
     async (event: any, ctx: any) => {
+      if (isNativeVoiceContext(ctx, event)) return;
       const baseConfig = readConfig(api, event);
       const config = readExtensionConfig(api, event);
       if (!baseConfig.enabled || !config.enabled) return;

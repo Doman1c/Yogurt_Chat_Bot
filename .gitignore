@@ -86,3 +86,6 @@ voice/tts/**/references/
 **/*.local.json
 voice/singing/pipeline.json
 voice_runtime/config.toml.bak_before_rebuild
+
+# Native Voice trusted local STT/Brain paths and microphone runtime data
+native_voice/config.toml

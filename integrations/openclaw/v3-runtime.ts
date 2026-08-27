@@ -9,6 +9,7 @@ import {
   channelFromContext,
   channelIsAllowed,
   contextAliases,
+  isNativeVoiceContext,
   optionalString,
   preferredPolicyKey,
   readConfig,
@@ -422,6 +423,7 @@ export function registerV3Runtime(api: any): void {
   api.on(
     "before_prompt_build",
     async (event: any, ctx: any) => {
+      if (isNativeVoiceContext(ctx, event)) return;
       const baseConfig = readConfig(api, event);
       const config = readV3Config(api, event);
       if (!baseConfig.enabled || (!config.autoMemoryEnabled && !config.multiBubbleEnabled)) {

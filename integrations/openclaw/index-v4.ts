@@ -11,6 +11,7 @@ import {
   channelFromContext,
   channelIsAllowed,
   contextAliases,
+  isNativeVoiceContext,
   optionalString,
   preferredPolicyKey,
   readConfig,
@@ -497,6 +498,7 @@ export default definePluginEntry({
     api.on(
       "before_prompt_build",
       async (event: any, ctx: any) => {
+        if (isNativeVoiceContext(ctx, event)) return;
         const baseConfig = readConfig(api, event);
         const config = readV4Config(api, event);
         const observerEnabled = v4ObserverEnabled(config);

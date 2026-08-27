@@ -16,6 +16,7 @@ import {
   channelFromContext,
   channelIsAllowed,
   contextAliases,
+  isNativeVoiceContext,
   messageExplicitlyRequestsSticker,
   messageForbidsSticker,
   optionalString,
@@ -210,6 +211,7 @@ export default definePluginEntry({
     api.on(
       "before_prompt_build",
       async (event, ctx) => {
+        if (isNativeVoiceContext(ctx, event)) return;
         const config = readConfig(api, event);
         if (!config.enabled) return;
         const prompt = typeof event.prompt === "string" ? event.prompt : "";

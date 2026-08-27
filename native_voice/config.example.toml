@@ -1,0 +1,18 @@
+# Copy to native_voice/config.toml (ignored by Git) and provide trusted local paths.
+[stt]
+backend = "whisper_cpp"
+executable = "/absolute/path/to/whisper-cli"
+model = "/absolute/path/to/ggml-model.bin"
+language = "auto" # auto, zh, ja, en
+timeout_seconds = 45
+
+[brain]
+executable = "/opt/homebrew/bin/openclaw"
+agent_id = "main" # current Yogurt agent; no delivery/channel is used
+timeout_seconds = 90
+
+[memory]
+mode = "off" # P11-A1 must not enter the live B.7 audit database.
+
+[voice]
+sink_id = "macos"

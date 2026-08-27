@@ -191,6 +191,17 @@ export function sessionKeyFromContext(ctx: any): string | undefined {
   return optionalString(ctx?.sessionKey) || optionalString(asRecord(ctx?.deliveryContext).sessionKey);
 }
 
+/** Native Voice turns are local-only and must bypass social and Memory hooks. */
+export function isNativeVoiceContext(ctx: any, event?: any): boolean {
+  const candidates = [
+    sessionKeyFromContext(ctx),
+    optionalString(event?.sessionKey),
+    optionalString(asRecord(event?.context).sessionKey),
+    optionalString(asRecord(ctx?.deliveryContext).sessionKey),
+  ];
+  return candidates.some((value) => Boolean(value && value.includes("native:voice:")));
+}
+
 export function channelFromContext(ctx: any): string {
   const delivery = asRecord(ctx?.deliveryContext);
   return (
