@@ -6,11 +6,16 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from ..auto_memory import AutoMemoryStore
 from ..conversation_state_runtime import ConversationStateRuntimeStore
 from ..memory import MemoryStore
+from ..memory_gate_experiment import (
+    GateExperimentStore,
+    evaluate_counterfactual,
+    resolve_gate_experiment,
+)
 from ..memory_recall_gate import MemoryRecallGate, RecallCandidate
 from .retrieval import FtsMemoryIndex
 
@@ -38,6 +43,7 @@ class MemoryServiceConfig:
     recall_min_score: float = 0.52
     recall_max_items: int = 3
     recall_token_budget: int = 220
+    recall_gate_experiment: Optional[str] = None
 
 
 class MemoryService:
@@ -51,6 +57,16 @@ class MemoryService:
         self.states = ConversationStateRuntimeStore(self.db_path)
         self.index = FtsMemoryIndex(self.db_path)
         self.gate = MemoryRecallGate(self.db_path, min_score=config.recall_min_score)
+        self.gate_experiment_profile = resolve_gate_experiment(config.recall_gate_experiment)
+        self.gate_experiment_store: Optional[GateExperimentStore] = None
+        self._gate_experiment_degraded_reason: Optional[str] = None
+        if self.gate_experiment_profile is not None:
+            try:
+                self.gate_experiment_store = GateExperimentStore(self.db_path)
+            except Exception:
+                # An experiment audit must never turn Recall into a service
+                # outage. Readiness exposes this degraded state without text.
+                self._gate_experiment_degraded_reason = "audit_store_unavailable"
         with closing(self._connect()) as connection:
             connection.executescript(_CONTROL_SCHEMA)
             columns = {
@@ -219,6 +235,49 @@ class MemoryService:
             )
             connection.commit()
 
+    def _record_gate_experiment(
+        self,
+        *,
+        baseline_decision: str,
+        baseline_threshold: Optional[float],
+        explicit_request: bool,
+        high_risk: bool,
+        production_reasons: list[str],
+        candidate: Optional[RecallCandidate],
+        pre_gate: bool = False,
+    ) -> None:
+        """Best-effort B.7 audit; it has no path back into recall output/state."""
+        profile = self.gate_experiment_profile
+        store = self.gate_experiment_store
+        if profile is None:
+            return
+        if store is None:
+            self._gate_experiment_degraded_reason = "audit_store_unavailable"
+            return
+        try:
+            evaluation = evaluate_counterfactual(
+                candidate=candidate,
+                baseline_decision=baseline_decision,
+                explicit_request=explicit_request,
+                high_risk=high_risk,
+                production_reasons=production_reasons,
+                candidate_base_min_score=profile.candidate_base_min_score,
+                pre_gate=pre_gate,
+            )
+            store.record(
+                profile=profile,
+                baseline_base_threshold=self.gate.min_score,
+                baseline_decision=baseline_decision,
+                baseline_threshold=baseline_threshold,
+                explicit_request=explicit_request,
+                production_reasons=production_reasons,
+                candidate=candidate,
+                evaluation=evaluation,
+            )
+            self._gate_experiment_degraded_reason = None
+        except Exception:
+            self._gate_experiment_degraded_reason = "audit_write_failed"
+
     def observe(
         self,
         *,
@@ -292,6 +351,11 @@ class MemoryService:
         del max_items  # V5-A/B is intentionally top-1 only.
         blocked = self._pre_gate(message)
         if blocked:
+            self._record_gate_experiment(
+                baseline_decision="skip", baseline_threshold=None,
+                explicit_request=False, high_risk=False, production_reasons=[],
+                candidate=None, pre_gate=True,
+            )
             return {"decision": "skip", "memories": [], "token_estimate": 0, "reason": blocked, "mode": "pre_gate"}
 
         self.index.rebuild_user(canonical_user_id=canonical_user, persona_id=persona_id)
@@ -330,16 +394,30 @@ class MemoryService:
             candidates_override=candidates,
         )
         if decision.decision != "allow" or decision.candidate is None:
-            return {"decision": decision.decision, "memories": [], "token_estimate": 0, "reason": list(decision.reasons), "mode": "shadow_candidate"}
+            result = {"decision": decision.decision, "memories": [], "token_estimate": 0, "reason": list(decision.reasons), "mode": "shadow_candidate"}
+            self._record_gate_experiment(
+                baseline_decision=decision.decision, baseline_threshold=decision.threshold,
+                explicit_request=decision.explicit_request,
+                high_risk=self.gate._high_risk_topic(message),
+                production_reasons=list(decision.reasons), candidate=decision.candidate,
+            )
+            return result
         candidate = decision.candidate
         estimate = self._token_estimate(candidate.text)
         if estimate > budget:
-            return {
+            result = {
                 "decision": "blocked", "memories": [], "token_estimate": 0,
                 "reason": [*decision.reasons, "token_budget_exceeded"],
                 "mode": "budget_blocked",
             }
-        return {
+            self._record_gate_experiment(
+                baseline_decision=decision.decision, baseline_threshold=decision.threshold,
+                explicit_request=decision.explicit_request,
+                high_risk=self.gate._high_risk_topic(message),
+                production_reasons=list(decision.reasons), candidate=decision.candidate,
+            )
+            return result
+        result = {
             "decision": "allow",
             "memories": [{
                 "kind": candidate.kind, "key": candidate.memory_key,
@@ -349,6 +427,13 @@ class MemoryService:
             "token_estimate": estimate,
             "reason": list(decision.reasons), "mode": "gate_allow",
         }
+        self._record_gate_experiment(
+            baseline_decision=decision.decision, baseline_threshold=decision.threshold,
+            explicit_request=decision.explicit_request,
+            high_risk=self.gate._high_risk_topic(message),
+            production_reasons=list(decision.reasons), candidate=decision.candidate,
+        )
+        return result
 
     def snapshot(self, *, persona_id: str, user_id: str) -> dict[str, Any]:
         return self.memory.snapshot(self.canonical_user_id(persona_id, user_id))
@@ -369,4 +454,16 @@ class MemoryService:
         return [dict(row) for row in rows]
 
     def readiness(self) -> dict[str, Any]:
-        return {"ok": True, "db": "ready", "index": self.index.status(), "service": "yogurt-memory-v5"}
+        profile = self.gate_experiment_profile
+        return {
+            "ok": True, "db": "ready", "index": self.index.status(),
+            "service": "yogurt-memory-v5",
+            "gate_experiment": {
+                "enabled": profile is not None,
+                "name": profile.name if profile is not None else "off",
+                "candidate_base_min_score": (
+                    profile.candidate_base_min_score if profile is not None else None
+                ),
+                "degraded": self._gate_experiment_degraded_reason is not None,
+            },
+        }
