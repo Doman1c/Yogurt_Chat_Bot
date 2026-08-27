@@ -55,6 +55,11 @@ type AutoMemoryResult = {
   conflict_count?: number;
 };
 
+type MemoryServiceWriteOutcome =
+  | { kind: "success"; result: AutoMemoryResult }
+  | { kind: "definite_unavailable" }
+  | { kind: "ambiguous" };
+
 function booleanValue(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -328,7 +333,7 @@ async function runMemoryServiceObserve(
   config: V3Config,
   turn: PendingTurn,
   assistantReply: string,
-): Promise<AutoMemoryResult | undefined> {
+): Promise<MemoryServiceWriteOutcome> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.memoryServiceTimeoutMs);
   try {
@@ -347,18 +352,29 @@ async function runMemoryServiceObserve(
       }),
       signal: controller.signal,
     });
-    if (!response.ok) return undefined;
+    if (!response.ok) return { kind: "ambiguous" };
     const value: unknown = await response.json();
-    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return { kind: "ambiguous" };
+    }
     const item = value as Record<string, unknown>;
+    if (item.ok !== true || item.in_progress === true) return { kind: "ambiguous" };
     return {
-      ok: item.ok === true,
-      candidate_count: typeof item.candidate_count === "number" ? item.candidate_count : 0,
-      promoted_count: typeof item.promoted_count === "number" ? item.promoted_count : 0,
-      conflict_count: typeof item.conflict_count === "number" ? item.conflict_count : 0,
+      kind: "success",
+      result: {
+        ok: true,
+        candidate_count: typeof item.candidate_count === "number" ? item.candidate_count : 0,
+        promoted_count: typeof item.promoted_count === "number" ? item.promoted_count : 0,
+        conflict_count: typeof item.conflict_count === "number" ? item.conflict_count : 0,
+      },
     };
-  } catch {
-    return undefined;
+  } catch (error) {
+    const cause = error && typeof error === "object"
+      ? (error as { cause?: { code?: unknown } }).cause
+      : undefined;
+    return cause?.code === "ECONNREFUSED"
+      ? { kind: "definite_unavailable" }
+      : { kind: "ambiguous" };
   } finally {
     clearTimeout(timer);
   }
@@ -376,17 +392,22 @@ export function registerV3Runtime(api: any): void {
     const turn = memoryTurns.consume(aliases);
     if (!turn) return false;
     try {
-      const serviceResult = config.memoryServiceEnabled
+      const serviceOutcome = config.memoryServiceEnabled
         ? await runMemoryServiceObserve(config, turn, assistantReply)
-        : undefined;
+        : null;
       // A timeout is ambiguous: the service may have committed canonical V3
       // state after the client stopped waiting. Do not run a second writer and
       // inflate occurrences/revisions. Chat itself always remains fail-open.
-      if (config.memoryServiceEnabled && !serviceResult) {
+      if (serviceOutcome?.kind === "ambiguous") {
         api.logger.warn(`${PLUGIN_ID}: v5 memory service write outcome unknown; duplicate fallback skipped`);
         return false;
       }
-      const result = serviceResult || await runAutoMemory(api, turn, assistantReply, config);
+      if (serviceOutcome?.kind === "definite_unavailable") {
+        api.logger.warn(`${PLUGIN_ID}: v5 memory service refused connection; using local V3 fallback`);
+      }
+      const result = serviceOutcome?.kind === "success"
+        ? serviceOutcome.result
+        : await runAutoMemory(api, turn, assistantReply, config);
       api.logger.info(
         `${PLUGIN_ID}: auto memory trigger=${trigger} candidates=${result.candidate_count || 0} promoted=${result.promoted_count || 0} pending=${result.pending_count || 0} conflicts=${result.conflict_count || 0}`,
       );

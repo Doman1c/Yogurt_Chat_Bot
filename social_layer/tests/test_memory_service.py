@@ -1,6 +1,7 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from yogurt_social.memory_recall_gate import RecallCandidate, RecallDecision
@@ -110,6 +111,28 @@ def test_observe_idempotency_and_index_failure_do_not_duplicate_canonical_write(
     assert first["canonical_write"] is True
     assert first["index_updated"] is False and first["index_dirty"] is True
     assert second["idempotent"] is True
+    with sqlite3.connect(service.db_path) as connection:
+        assert connection.execute("SELECT occurrences FROM memory_candidates").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM memory_revisions").fetchone()[0] == 1
+
+
+def test_in_progress_idempotency_record_prevents_crash_retry_replay(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    original_complete = service._complete_idempotent
+    monkeypatch.setattr(service, "_complete_idempotent", lambda *args: (_ for _ in ()).throw(RuntimeError("crash window")))
+    with pytest.raises(RuntimeError, match="crash window"):
+        service.observe(
+            persona_id="yogurt", user_id="owner", surface="wechat", conversation_key="chat",
+            phase="assistant", user_message="我的显卡是 RTX 4080", assistant_reply="收到",
+            idempotency_key="crash-safe-turn",
+        )
+    monkeypatch.setattr(service, "_complete_idempotent", original_complete)
+    retry = service.observe(
+        persona_id="yogurt", user_id="owner", surface="wechat", conversation_key="chat",
+        phase="assistant", user_message="我的显卡是 RTX 4080", assistant_reply="收到",
+        idempotency_key="crash-safe-turn",
+    )
+    assert retry["in_progress"] is True
     with sqlite3.connect(service.db_path) as connection:
         assert connection.execute("SELECT occurrences FROM memory_candidates").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM memory_revisions").fetchone()[0] == 1

@@ -66,16 +66,20 @@ or any SQLite/FTS/service failure skip memory and preserve normal Qwen reply.
 Install `social_layer/requirements-memory-service.txt`, then run
 `scripts/yogurt-memory-service` with `YOGURT_SOCIAL_DB` set. Enable OpenClaw
 with `memoryServiceEnabled=true` and the loopback URL. The startup script
-enforces `127.0.0.1` and ignores any host override. If an observe result is
-ambiguous (for example client timeout), OpenClaw does not run a local V3 retry,
-which prevents duplicate canonical writes. Native/Desktop/Live2D/VoiceSession use the
+enforces `127.0.0.1` and ignores any host override. OpenClaw distinguishes a
+successful service write, a definite `ECONNREFUSED` (safe local V3 fallback),
+and an ambiguous outcome such as timeout or malformed response (no fallback,
+which prevents duplicate canonical writes). Native/Desktop/Live2D/VoiceSession use the
 same Python client and their own `native:*` state scope. WebUI remains an admin
 client rather than a second memory implementation.
 
 `test_memory_service.py` and CI cover sharing, scope isolation/current-turn
 state, pre-gate, emotion/high-risk/unrelated blocking, WAL, loopback client,
 idempotent observe, index failure, FTS stale-token deletion, token consistency,
-and FastAPI HTTP smoke endpoints. Real Recall is deferred until benchmark and
+and FastAPI HTTP smoke endpoints. Observe first claims a persistent
+`processing` record under `BEGIN IMMEDIATE`; a concurrent or post-crash retry
+does not replay a canonical write. Processing records are intentionally retained
+for now (TTL/max-row pruning is future maintenance work). Real Recall is deferred until benchmark and
 shadow-audit acceptance. Before vector work, add the versioned
 approximately-100-case corpus and report Top-1, Recall@3/5, MRR, false-recall
 rate, and no-recall precision. Vector must be a provider-abstracted, rebuildable

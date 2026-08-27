@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS memory_observe_requests (
     canonical_user_id TEXT NOT NULL,
     conversation_key TEXT NOT NULL,
     result_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'completed',
     created_at TEXT NOT NULL,
     PRIMARY KEY(idempotency_key, operation)
 );
@@ -52,6 +53,15 @@ class MemoryService:
         self.gate = MemoryRecallGate(self.db_path, min_score=config.recall_min_score)
         with closing(self._connect()) as connection:
             connection.executescript(_CONTROL_SCHEMA)
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(memory_observe_requests)")
+            }
+            if "status" not in columns:
+                connection.execute(
+                    "ALTER TABLE memory_observe_requests "
+                    "ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'"
+                )
             connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -106,7 +116,7 @@ class MemoryService:
             raise ValueError("idempotency_key must be a non-empty bounded string")
         return value.strip()
 
-    def _load_idempotent(
+    def _load_completed_idempotent(
         self,
         key: str | None,
         operation: str,
@@ -115,7 +125,10 @@ class MemoryService:
     ) -> dict[str, Any] | None:
         if key is None:
             return None
-        query = "SELECT result_json FROM memory_observe_requests WHERE idempotency_key = ? AND operation = ?"
+        query = """
+            SELECT result_json FROM memory_observe_requests
+            WHERE idempotency_key = ? AND operation = ? AND status = 'completed'
+        """
         values: list[str] = [key, operation]
         if canonical_user is not None and scoped_key is not None:
             query += " AND canonical_user_id = ? AND conversation_key = ?"
@@ -135,7 +148,55 @@ class MemoryService:
         value["idempotent"] = True
         return value
 
-    def _store_idempotent(
+    def _claim_idempotent(
+        self,
+        key: str | None,
+        operation: str,
+        canonical_user: str,
+        scoped_key: str,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        if key is None:
+            return None, True
+        from datetime import datetime, timezone
+
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT status, result_json FROM memory_observe_requests
+                WHERE idempotency_key = ? AND operation = ?
+                  AND canonical_user_id = ? AND conversation_key = ?
+                """,
+                (key, operation, canonical_user, scoped_key),
+            ).fetchone()
+            if row is not None:
+                connection.commit()
+                if str(row["status"]) == "completed":
+                    try:
+                        result = json.loads(str(row["result_json"]))
+                    except (TypeError, json.JSONDecodeError):
+                        result = None
+                    if isinstance(result, dict):
+                        result["idempotent"] = True
+                        return result, False
+                return {
+                    "ok": True, "in_progress": True, "idempotent": True,
+                    "canonical_write": False, "index_updated": False,
+                    "index_dirty": False,
+                }, False
+            connection.execute(
+                """
+                INSERT INTO memory_observe_requests(
+                    idempotency_key, operation, canonical_user_id, conversation_key,
+                    result_json, status, created_at
+                ) VALUES (?, ?, ?, ?, '{}', 'processing', ?)
+                """,
+                (key, operation, canonical_user, scoped_key, datetime.now(timezone.utc).isoformat()),
+            )
+            connection.commit()
+        return None, True
+
+    def _complete_idempotent(
         self,
         key: str | None,
         operation: str,
@@ -145,22 +206,16 @@ class MemoryService:
     ) -> None:
         if key is None:
             return
-        from datetime import datetime, timezone
-
         stored = {name: value for name, value in result.items() if name != "idempotent"}
         with closing(self._connect()) as connection:
             connection.execute(
                 """
-                INSERT OR IGNORE INTO memory_observe_requests(
-                    idempotency_key, operation, canonical_user_id, conversation_key,
-                    result_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                UPDATE memory_observe_requests
+                SET status = 'completed', result_json = ?
+                WHERE idempotency_key = ? AND operation = ?
+                  AND canonical_user_id = ? AND conversation_key = ?
                 """,
-                (
-                    key, operation, canonical_user, scoped_key,
-                    json.dumps(stored, ensure_ascii=False, sort_keys=True),
-                    datetime.now(timezone.utc).isoformat(),
-                ),
+                (json.dumps(stored, ensure_ascii=False, sort_keys=True), key, operation, canonical_user, scoped_key),
             )
             connection.commit()
 
@@ -182,9 +237,11 @@ class MemoryService:
             raise ValueError("phase must be user or assistant")
         key = self._idempotency_key(idempotency_key)
         operation = f"observe_{phase}"
-        existing = self._load_idempotent(key, operation, canonical_user, scoped_key)
+        existing, claimed = self._claim_idempotent(key, operation, canonical_user, scoped_key)
         if existing is not None:
             return existing
+        if not claimed:
+            raise RuntimeError("idempotency_claim_failed")
         if phase == "user":
             state = self.states.observe_user_turn(canonical_user, scoped_key, user_message)
             result = {
@@ -214,7 +271,7 @@ class MemoryService:
                 "conflict_count": sum(item["status"] == "conflict" for item in writes),
                 "idempotent": False,
             }
-        self._store_idempotent(key, operation, canonical_user, scoped_key, result)
+        self._complete_idempotent(key, operation, canonical_user, scoped_key, result)
         return result
 
     def recall(
@@ -238,7 +295,7 @@ class MemoryService:
             return {"decision": "skip", "memories": [], "token_estimate": 0, "reason": blocked, "mode": "pre_gate"}
 
         self.index.rebuild_user(canonical_user_id=canonical_user, persona_id=persona_id)
-        observed = self._load_idempotent(
+        observed = self._load_completed_idempotent(
             self._idempotency_key(turn_id), "observe_user", canonical_user, scoped_key,
         )
         state = self.states.get(canonical_user, scoped_key) if observed is not None else None
