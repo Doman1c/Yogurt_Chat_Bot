@@ -1,0 +1,12 @@
+{"id":"fact_gpu","type":"fact","key":"gpu","value":"RTX 4080","active":true,"aliases":["显卡","GPU","AI 显卡","本地推理设备"]}
+{"id":"fact_model_old","type":"fact","key":"local_model_v4","value":"Qwen3.5 4B","active":false,"superseded_by":"fact_model_current","aliases":["旧模型","4B"]}
+{"id":"fact_model_current","type":"fact","key":"local_model","value":"Qwen3.5 9B","active":true,"aliases":["本地模型","Qwen","9B"]}
+{"id":"fact_memory_old","type":"fact","key":"memory_architecture_v3","value":"local deterministic writer","active":false,"superseded_by":"fact_memory_current","aliases":["V3","旧记忆架构"]}
+{"id":"fact_memory_current","type":"fact","key":"memory_architecture","value":"Shared Memory Service with SQLite Exact and FTS5","active":true,"aliases":["V5","Memory Service","FTS5"]}
+{"id":"fact_wechat_api","type":"fact","key":"wechat_architecture","value":"official WeChat Bot API","active":true,"aliases":["微信 bot","WeChat"]}
+{"id":"pref_food_hotpot","type":"preference","category":"food","value":"火锅","polarity":1,"active":true,"aliases":["喜欢吃的","吃什么"]}
+{"id":"pref_response_language","type":"preference","category":"response_language","value":"中文","polarity":1,"active":true,"aliases":["回答语言","交流语言"]}
+{"id":"pref_response_natural","type":"preference","category":"response_style","value":"自然直接，不要机械提醒","polarity":1,"active":true,"aliases":["回复风格","机械化提醒"]}
+{"id":"pref_no_unnecessary_english","type":"preference","category":"response_style_english","value":"整段英文回答","polarity":-1,"active":true,"aliases":["英文回复","语言习惯"]}
+{"id":"episode_tts_8020","type":"episode","summary":"Yogurt TTS 日语:中文 80:20 训练版本测试最好，中文清晰且日语音色保持良好。","importance":0.95,"active":true,"aliases":["80:20","TTS 比例","GPT-SoVITS"]}
+{"id":"episode_singing_v21","type":"episode","summary":"Yogurt Singing Pipeline v2.1 已完成 harmony-aware lead/backing separation 并合并。","importance":0.85,"active":true,"aliases":["Singing v2.1","harmony","Seed-VC"]}
