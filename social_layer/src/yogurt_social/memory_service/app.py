@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 
@@ -13,7 +14,7 @@ def _default_db_path() -> Path:
     return Path(os.environ.get("YOGURT_SOCIAL_DB", "~/.openclaw/yogurt-social/memory.sqlite3")).expanduser()
 
 
-def create_app(service: MemoryService | None = None) -> FastAPI:
+def create_app(service: Optional[MemoryService] = None) -> FastAPI:
     memory_service = service or MemoryService(MemoryServiceConfig(db_path=_default_db_path()))
     app = FastAPI(title="Yogurt Memory Service", version="5.0.0")
     app.state.memory_service = memory_service
@@ -47,7 +48,7 @@ def create_app(service: MemoryService | None = None) -> FastAPI:
         return memory_service.snapshot(persona_id=persona_id, user_id=user_id)
 
     @app.get("/v1/memory/candidates")
-    def candidates(persona_id: str = "yogurt", user_id: str = "owner", status: str | None = None) -> list[dict[str, object]]:
+    def candidates(persona_id: str = "yogurt", user_id: str = "owner", status: Optional[str] = None) -> list[dict[str, object]]:
         return memory_service.candidates(persona_id=persona_id, user_id=user_id, status=status)
 
     @app.get("/v1/memory/revisions")
