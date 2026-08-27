@@ -346,8 +346,11 @@ def run_benchmark(seed_path: Path, cases_path: Path) -> Dict[str, Any]:
 def recommendation(report: Dict[str, Any]) -> str:
     summary = report["summary"]
     categories = report["categories"]
+    failures = report.get("failure_counts", {})
     if summary["false_recall_rate"] > 0.05:
         return "NEEDS TUNING: prioritize gate/ranking review; do not add vector retrieval yet."
+    if int(failures.get("gate_false_negative", 0)) >= int(failures.get("retrieval_miss", 0)):
+        return "NEEDS TUNING: the Recall Gate is the main bottleneck; review it before any vector experiment."
     paraphrase = categories.get("paraphrase", {}).get("recall_at_3", 0.0)
     cross_language = categories.get("cross_language", {}).get("recall_at_3", 0.0)
     exact = categories.get("exact", {}).get("recall_at_3", 0.0)
