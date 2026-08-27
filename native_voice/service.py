@@ -25,6 +25,7 @@ from .schemas import (
     TranscriptResult,
     TurnPhase,
     TurnStatus,
+    resolve_text_language,
 )
 from .stt import STTError, STTProvider
 
@@ -180,7 +181,7 @@ class NativeVoiceService:
             self._transition(active, TurnPhase.SPEAKING, TurnStatus.ACTIVE)
             # Casual is deterministic in A1; no additional planner/LLM invocation.
             handle = await self._voice_session.submit(
-                SpeakRequest(text=reply.text, scene="casual", language=self._speech_language(transcript.language)),
+                SpeakRequest(text=reply.text, scene="casual", language=resolve_text_language(reply.text)),
                 priority=SpeechPriority.NORMAL,
             )
             active.speech_handle = handle
@@ -262,10 +263,6 @@ class NativeVoiceService:
             transcript=active.transcript, reply=active.reply, error_code=error_code,
             latencies_ms=dict(active.latencies_ms or {}),
         )
-
-    @staticmethod
-    def _speech_language(language: str) -> str:
-        return language if language in {"zh", "ja", "en"} else "zh"
 
     @staticmethod
     def _elapsed(active: _ActiveTurn) -> int:

@@ -35,8 +35,12 @@ def normalize_language(value: str) -> str:
     return language
 
 
-def resolve_transcript_language(text: str, requested_language: str) -> str:
-    """Resolve whisper auto output deterministically before it reaches TTS."""
+def resolve_text_language(text: str, requested_language: str = "auto") -> str:
+    """Resolve auto language detection for bounded text routing.
+
+    This is deliberately text-only: STT and final Brain replies are resolved
+    independently, so a reply is never assumed to use the caller's language.
+    """
     requested = normalize_language(requested_language)
     if requested != "auto":
         return requested
@@ -56,6 +60,11 @@ def resolve_transcript_language(text: str, requested_language: str) -> str:
     if latin and latin * 2 >= non_space:
         return "en"
     return "zh"
+
+
+def resolve_transcript_language(text: str, requested_language: str) -> str:
+    """Backward-compatible STT-specific name for text language resolution."""
+    return resolve_text_language(text, requested_language)
 
 
 @dataclass(frozen=True)

@@ -199,7 +199,7 @@ export function isNativeVoiceContext(ctx: any, event?: any): boolean {
     optionalString(asRecord(event?.context).sessionKey),
     optionalString(asRecord(ctx?.deliveryContext).sessionKey),
   ];
-  return candidates.some((value) => Boolean(value && value.includes("native:voice:")));
+  return candidates.some((value) => Boolean(value && value.startsWith("native:voice:")));
 }
 
 export function channelFromContext(ctx: any): string {

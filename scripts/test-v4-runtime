@@ -60,7 +60,7 @@ export function optionalString(value: unknown): string | undefined {
 
 export function isNativeVoiceContext(ctx: any, event?: any): boolean {
   const sessionKey = optionalString(ctx?.sessionKey) || optionalString(event?.sessionKey);
-  return Boolean(sessionKey && sessionKey.includes("native:voice:"));
+  return Boolean(sessionKey && sessionKey.startsWith("native:voice:"));
 }
 
 export function senderIdFromContext(ctx: any): string | undefined {
@@ -186,13 +186,18 @@ PY
 
 V4_TEST_PYTHON="$PYTHON_BIN" \
 V4_OBSERVER_LOG="$TMP_DIR/observer.jsonl" \
-node --experimental-strip-types --input-type=module - "$TEST_ROOT" <<'JS'
+node --experimental-strip-types --input-type=module - "$TEST_ROOT" "$REPO_ROOT" <<'JS'
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const testRoot = process.argv[2];
+const repoRoot = process.argv[3];
 const plugin = (await import(pathToFileURL(`${testRoot}/index-v4.ts`))).default;
+const nativeGuard = await import(pathToFileURL(`${testRoot}/sticker-plugin-utils.ts`));
+const repositoryGuard = await import(
+  pathToFileURL(`${repoRoot}/integrations/openclaw/sticker-plugin-utils.ts`),
+);
 const hooks = new Map();
 const logs = [];
 const trace = [];
@@ -286,6 +291,11 @@ const nativeResult = await dispatch(
   { channelId: "native", sessionKey: "native:voice:smoke" },
 );
 assert.equal(nativeResult, undefined);
+for (const guard of [nativeGuard, repositoryGuard]) {
+  assert.equal(guard.isNativeVoiceContext({ sessionKey: "native:voice:abc" }), true);
+  assert.equal(guard.isNativeVoiceContext({ sessionKey: "foo-native:voice:abc" }), false);
+  assert.equal(guard.isNativeVoiceContext({ sessionKey: "native-other:abc" }), false);
+}
 
 assert.ok(
   existsSync(process.env.V4_OBSERVER_LOG),

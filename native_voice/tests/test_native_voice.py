@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import sys
 import wave
@@ -9,11 +10,18 @@ from pathlib import Path
 import pytest
 
 from capabilities.voice_session.schemas import UtteranceState
-from native_voice.audio import RecordedAudio
+from native_voice.audio import AudioCaptureError, RecordedAudio, SoundDeviceMicrophone
 from native_voice.brain import BrainError, BrainRequest, OpenClawAgentBrain, _final_text
 from native_voice.config import BrainConfig, NativeVoiceConfig, STTConfig, _toml_loader
 from native_voice.memory import DisabledNativeMemory
-from native_voice.schemas import BrainReply, TranscriptResult, TurnPhase, TurnStatus, resolve_transcript_language
+from native_voice.schemas import (
+    BrainReply,
+    TranscriptResult,
+    TurnPhase,
+    TurnStatus,
+    resolve_text_language,
+    resolve_transcript_language,
+)
 from native_voice.service import NativeVoiceBusyError, NativeVoiceService
 from native_voice.stt import STTError, WhisperCppSTT
 
@@ -384,18 +392,46 @@ def test_real_whisper_adapter_auto_output_resolves_language(tmp_path: Path, text
 
 
 @pytest.mark.parametrize(
-    "text,expected",
-    [("こんにちは", "ja"), ("你好", "zh"), ("hello", "en")],
+    "transcript_text,reply_text,expected",
+    [
+        ("hello", "中文回复", "zh"),
+        ("你好", "English reply", "en"),
+        ("你好", "日本語の返答", "ja"),
+        ("你好", "hello 世界", "zh"),
+    ],
 )
-def test_auto_language_reaches_speak_request(text: str, expected: str) -> None:
+def test_reply_language_independently_reaches_speak_request(
+    transcript_text: str, reply_text: str, expected: str,
+) -> None:
     async def run() -> None:
         voice = FakeVoiceSession()
-        service = _service(stt=FakeSTT(text, "auto"), voice=voice)
+        service = _service(
+            stt=FakeSTT(transcript_text, "auto"), brain=FakeBrain(reply_text), voice=voice,
+        )
         await service.start_listening()
         assert (await service.stop_listening_and_process()).status == TurnStatus.FINISHED
         assert voice.requests[0].language == expected
 
     asyncio.run(run())
+
+
+def test_text_language_resolver_keeps_explicit_request_and_mixed_policy() -> None:
+    assert resolve_text_language("hello", "ja") == "ja"
+    assert resolve_text_language("hello 世界") == "zh"
+    assert resolve_text_language("English と日本語") == "ja"
+
+
+def test_missing_microphone_backend_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original_import = builtins.__import__
+
+    def unavailable_sounddevice(name, *args, **kwargs):
+        if name == "sounddevice":
+            raise ImportError("not installed")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", unavailable_sounddevice)
+    with pytest.raises(AudioCaptureError, match="^microphone_backend_unavailable$"):
+        SoundDeviceMicrophone().start(tmp_path)
 
 
 def test_memory_is_off_and_native_scope_only() -> None:
@@ -419,7 +455,7 @@ def test_native_package_has_no_wechat_dependency() -> None:
 def test_openclaw_native_guard_is_present_for_memory_hooks() -> None:
     root = Path(__file__).resolve().parents[2] / "integrations" / "openclaw"
     helper = (root / "sticker-plugin-utils.ts").read_text(encoding="utf-8")
-    assert 'value.includes("native:voice:")' in helper
+    assert 'value.startsWith("native:voice:")' in helper
     for name in ("index-v4.ts", "v3-runtime.ts", "v3-memory-extended.ts"):
         assert "if (isNativeVoiceContext(ctx, event)) return;" in (root / name).read_text(encoding="utf-8")
 

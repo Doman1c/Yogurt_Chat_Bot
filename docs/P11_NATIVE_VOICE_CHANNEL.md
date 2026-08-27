@@ -31,6 +31,9 @@ Microphone
 - Final text is submitted to the existing `VoiceSession`, which serializes the
   queue and playback, and then to `MouthService` / Voice Orchestrator. Native
   Voice does not talk to a TTS model, checkpoint, or HTTP endpoint directly.
+- STT language is resolved from the transcript, while TTS language is resolved
+  independently from final assistant text (`zh`, `ja`, or `en`). A reply is not
+  assumed to match the user's input language.
 
 ## Setup and use
 
@@ -38,6 +41,14 @@ Copy `native_voice/config.example.toml` to `native_voice/config.toml` and set
 absolute, trusted local paths for a preinstalled whisper.cpp executable and
 model. The real config is Git-ignored. P11-A1 never downloads whisper.cpp or a
 model.
+
+For an actual Mac microphone runtime, install the explicit Native Voice runtime
+dependencies first. This only installs the Python backend; it does not download
+or access microphone hardware during installation or CI.
+
+```bash
+python3 -m pip install -r native_voice/requirements-runtime.txt
+```
 
 ```bash
 python -m native_voice.cli
