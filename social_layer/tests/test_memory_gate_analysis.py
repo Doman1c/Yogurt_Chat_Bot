@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 
 from yogurt_social.memory_gate_analysis import (
-    BASE_MIN_SCORE,
     BLOCKERS,
     _ablations,
     _coverage,
+    _distribution_groups,
     _safe_frontier,
     _simulated_gate_decision,
     blocker_reasons,
@@ -22,6 +22,7 @@ from yogurt_social.memory_gate_analysis import (
     validate_dataset_hashes,
 )
 from yogurt_social.memory_recall_gate import MemoryRecallGate
+from yogurt_social.memory_service.core import MemoryServiceConfig
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,9 +124,19 @@ def test_counterfactual_changes_only_relevance_threshold():
 
 def test_baseline_parity_is_complete(report):
     parity = report["baseline_parity"]
+    configured = MemoryServiceConfig(Path("unused.sqlite3")).recall_min_score
+    assert report["configuration"]["base_min_score"] == configured
+    assert parity["base_min_score"] == configured
     assert parity["parity"] == 1.0
     assert parity["matching_cases"] == parity["checked_cases"]
-    assert counterfactual_parity(report["case_diagnostics"])["parity"] == 1.0
+    assert counterfactual_parity(
+        report["case_diagnostics"], base_min_score=configured,
+    )["parity"] == 1.0
+    assert report["b5_baseline_parity"]["parity"] == 1.0
+    assert (
+        report["b5_baseline_parity"]["analysis_metrics"]
+        == report["b5_baseline_parity"]["benchmark_metrics"]
+    )
 
 
 def test_zero_false_recall_frontier_prefers_conservative_tie():
@@ -133,13 +144,16 @@ def test_zero_false_recall_frontier_prefers_conservative_tie():
         {"base_min_score": 0.48, "correct_positive_recall_count": 2, "correct_positive_recall_rate": 0.2, "false_recall_rate": 0.0, "stale_inactive_safety": 1.0, "low_info_safety": 1.0, "high_risk_suppression": 1.0},
         {"base_min_score": 0.40, "correct_positive_recall_count": 3, "correct_positive_recall_rate": 0.3, "false_recall_rate": 0.0, "stale_inactive_safety": 1.0, "low_info_safety": 1.0, "high_risk_suppression": 1.0},
         {"base_min_score": 0.41, "correct_positive_recall_count": 3, "correct_positive_recall_rate": 0.3, "false_recall_rate": 0.0, "stale_inactive_safety": 1.0, "low_info_safety": 1.0, "high_risk_suppression": 1.0},
-    ])
+    ], base_min_score=0.48)
     assert frontier["best_zero_false_recall_candidate"]["base_min_score"] == 0.41
     assert frontier["additional_allows"] == 1
 
 
 def test_ablation_and_coverage_keep_unexercised_rules_visible(report):
-    ablation = _ablations(report["case_diagnostics"])
+    ablation = _ablations(
+        report["case_diagnostics"],
+        base_min_score=report["configuration"]["base_min_score"],
+    )
     assert set(ablation) == set(BLOCKERS)
     assert "new_false_recall_count" in ablation["relevance_below_threshold"]
     coverage = _coverage(report["case_diagnostics"])
@@ -166,9 +180,31 @@ def test_dataset_hash_mismatch_fails_explicitly(tmp_path):
         validate_dataset_hashes(altered, FIXTURES / "memory_recall_cases.json")
 
 
+def test_candidate_kind_distribution_does_not_depend_on_fixture_tags():
+    groups = _distribution_groups([_case(
+        tags=[], candidate_kind="fact", explicit_request=False,
+        positive_partition="success_allow_expected",
+    )])
+    assert groups["fact"]
+    assert not groups["preference"]
+    assert not groups["episode"]
+
+
+def test_unverified_dataset_is_not_reported_as_memory_recall_v1():
+    report = run_analysis(
+        FIXTURES / "memory_recall_seed.jsonl",
+        FIXTURES / "memory_recall_cases.json",
+        validate_dataset=False,
+    )
+    assert report["dataset_version"] == "custom-unverified"
+    assert report["dataset"]["verified"] is False
+    assert report["b5_baseline_parity"] is None
+
+
 def test_analysis_does_not_change_production_gate_configuration(tmp_path, report):
     before = MemoryRecallGate(tmp_path / "before.sqlite3")
     after = MemoryRecallGate(tmp_path / "after.sqlite3")
-    assert before.min_score == BASE_MIN_SCORE
-    assert after.min_score == BASE_MIN_SCORE
+    assert before.min_score == 0.48
+    assert after.min_score == 0.48
+    assert MemoryServiceConfig(tmp_path / "service.sqlite3").recall_min_score == 0.52
     assert report["configuration"]["production_gate_changed"] is False

@@ -24,6 +24,7 @@ from .memory_benchmark import (
     _sha256,
     load_cases,
     load_seed,
+    run_benchmark,
     seed_service,
 )
 from .memory_recall_gate import RecallCandidate
@@ -31,7 +32,6 @@ from .memory_service.core import MemoryService, MemoryServiceConfig
 
 
 ANALYSIS_SCHEMA_VERSION = 1
-BASE_MIN_SCORE = 0.48
 SWEEP_START = 0.30
 SWEEP_END = 0.55
 SWEEP_STEP = 0.01
@@ -194,16 +194,17 @@ def _candidate_diagnostics(
     }
 
 
-def _run_cases(seed_path: Path, cases_path: Path) -> List[Dict[str, Any]]:
+def _run_cases(
+    seed_path: Path, cases_path: Path,
+) -> Tuple[List[Dict[str, Any]], float]:
     records = load_seed(seed_path)
     cases = load_cases(cases_path)
     results: List[Dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="yogurt-memory-gate-analysis-") as directory:
-        # This is an isolated analytical service configuration.  It does not
-        # write a production configuration or change MemoryRecallGate defaults.
-        service = MemoryService(MemoryServiceConfig(
-            Path(directory) / "memory.sqlite3", recall_min_score=BASE_MIN_SCORE,
-        ))
+        # Use the real default configuration, rather than an analysis-specific
+        # threshold. This is the exact configuration used by the B.5 benchmark.
+        service = MemoryService(MemoryServiceConfig(Path(directory) / "memory.sqlite3"))
+        baseline_min_score = service.gate.min_score
         source_map = seed_service(service, records)
         for case in cases:
             conversation_key = "gate-analysis-" + str(case["id"])
@@ -283,7 +284,7 @@ def _run_cases(seed_path: Path, cases_path: Path) -> List[Dict[str, Any]]:
                     "false_recall" if response.get("decision") == "allow" else "correct_no_recall"
                 )
             results.append(result)
-    return results
+    return results, baseline_min_score
 
 
 def _percent(numerator: int, denominator: int) -> float:
@@ -328,9 +329,11 @@ def _distribution_groups(results: Sequence[Dict[str, Any]]) -> Dict[str, List[Di
         "non_explicit_positives": [
             item for item in top_expected if not item["explicit_request"]
         ],
-        "fact": [item for item in top_expected if "fact" in item["tags"]],
-        "preference": [item for item in top_expected if "preference" in item["tags"]],
-        "episode": [item for item in top_expected if "episode" in item["tags"]],
+        # Candidate kind is supplied by the real index / Gate path. Fixture
+        # tags are descriptive metadata and must not drive this classification.
+        "fact": [item for item in top_expected if item["candidate_kind"] == "fact"],
+        "preference": [item for item in top_expected if item["candidate_kind"] == "preference"],
+        "episode": [item for item in top_expected if item["candidate_kind"] == "episode"],
     }
 
 
@@ -449,15 +452,68 @@ def _simulation_metrics(
     }
 
 
-def counterfactual_parity(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def _b5_metrics_from_analysis(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Calculate B.5 summary metrics from the same real service decisions."""
+    positives = [item for item in results if item["should_recall"]]
+    negatives = [item for item in results if not item["should_recall"]]
+    top1 = sum(item["expected_best_rank"] == 1 for item in positives)
+    at3 = sum(
+        item["expected_best_rank"] is not None and item["expected_best_rank"] <= 3
+        for item in positives
+    )
+    mrr = sum(
+        1.0 / float(item["expected_best_rank"])
+        for item in positives if item["expected_best_rank"] is not None
+    )
+    false_recalls = sum(item["real_service_decision"] == "allow" for item in negatives)
+    no_recalls = [
+        item for item in results if item["real_service_decision"] != "allow"
+    ]
+    true_no_recall = sum(not item["should_recall"] for item in no_recalls)
+    correct_decisions = sum(
+        (item["real_service_decision"] == "allow") if item["should_recall"]
+        else (item["real_service_decision"] != "allow")
+        for item in results
+    )
+    return {
+        "cases": len(results),
+        "top1_accuracy": _percent(top1, len(positives)),
+        "recall_at_3": _percent(at3, len(positives)),
+        "mrr": round(mrr / len(positives), 4) if positives else 0.0,
+        "false_recall_rate": _percent(false_recalls, len(negatives)),
+        "no_recall_precision": _percent(true_no_recall, len(no_recalls)),
+        "recall_decision_rate": _percent(
+            sum(item["real_service_decision"] == "allow" for item in results),
+            len(results),
+        ),
+        "decision_accuracy": _percent(correct_decisions, len(results)),
+    }
+
+
+def _b5_baseline_parity(
+    results: Sequence[Dict[str, Any]], seed_path: Path, cases_path: Path,
+) -> Dict[str, Any]:
+    analysis_metrics = _b5_metrics_from_analysis(results)
+    benchmark_metrics = run_benchmark(seed_path, cases_path)["summary"]
+    matching = analysis_metrics == benchmark_metrics
+    return {
+        "parity": 1.0 if matching else 0.0,
+        "analysis_metrics": analysis_metrics,
+        "benchmark_metrics": benchmark_metrics,
+    }
+
+
+def counterfactual_parity(
+    results: Sequence[Dict[str, Any]], *, base_min_score: float,
+) -> Dict[str, Any]:
     entering_gate = [item for item in results if not item["pre_gate"]]
     mismatches: List[str] = []
     for item in entering_gate:
-        simulated = _simulated_gate_decision(item, base_min_score=BASE_MIN_SCORE)
+        simulated = _simulated_gate_decision(item, base_min_score=base_min_score)
         if simulated != item["real_gate_decision"]:
             mismatches.append(str(item["case_id"]))
     return {
-        "base_min_score": BASE_MIN_SCORE,
+        "base_min_score": round(base_min_score, 2),
         "checked_cases": len(entering_gate),
         "matching_cases": len(entering_gate) - len(mismatches),
         "parity": _percent(len(entering_gate) - len(mismatches), len(entering_gate)),
@@ -473,7 +529,9 @@ def _threshold_sweep(results: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ]
 
 
-def _safe_frontier(sweep: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def _safe_frontier(
+    sweep: Sequence[Dict[str, Any]], *, base_min_score: float,
+) -> Dict[str, Any]:
     safe = [
         item for item in sweep
         if item["false_recall_rate"] == 0.0
@@ -481,7 +539,9 @@ def _safe_frontier(sweep: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         and item["low_info_safety"] == 1.0
         and item["high_risk_suppression"] == 1.0
     ]
-    current = next(item for item in sweep if item["base_min_score"] == BASE_MIN_SCORE)
+    current = next(
+        item for item in sweep if item["base_min_score"] == round(base_min_score, 2)
+    )
     best = None
     if safe:
         # Prefer higher threshold on a tie: it keeps a more conservative gate.
@@ -503,12 +563,14 @@ def _safe_frontier(sweep: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _ablations(results: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    baseline = _simulation_metrics(results, base_min_score=BASE_MIN_SCORE)
+def _ablations(
+    results: Sequence[Dict[str, Any]], *, base_min_score: float,
+) -> Dict[str, Dict[str, Any]]:
+    baseline = _simulation_metrics(results, base_min_score=base_min_score)
     output: Dict[str, Dict[str, Any]] = {}
     for blocker in BLOCKERS:
         metrics = _simulation_metrics(
-            results, base_min_score=BASE_MIN_SCORE, ignored_blocker=blocker,
+            results, base_min_score=base_min_score, ignored_blocker=blocker,
         )
         output[blocker] = {
             "recovered_correct_positive": (
@@ -602,11 +664,13 @@ def run_analysis(
     *,
     validate_dataset: bool = True,
 ) -> Dict[str, Any]:
-    """Run the full analysis and reject a drifted 0.48 simulator."""
+    """Run the full analysis against the real service default baseline."""
     if validate_dataset:
         validate_dataset_hashes(seed_path, cases_path)
-    results = _run_cases(seed_path, cases_path)
-    parity = counterfactual_parity(results)
+    results, base_min_score = _run_cases(seed_path, cases_path)
+    if not SWEEP_START <= base_min_score <= SWEEP_END:
+        raise RuntimeError("service baseline %.4f is outside the configured sweep" % base_min_score)
+    parity = counterfactual_parity(results, base_min_score=base_min_score)
     if parity["parity"] != 1.0:
         raise RuntimeError(
             "counterfactual baseline parity failed: %.2f%% (%s)" % (
@@ -618,6 +682,12 @@ def run_analysis(
     if sum(partition.values()) != positive_count:
         raise RuntimeError("positive partition is not exhaustive")
     sweep = _threshold_sweep(results)
+    benchmark_parity = (
+        _b5_baseline_parity(results, seed_path, cases_path)
+        if validate_dataset else None
+    )
+    if benchmark_parity is not None and benchmark_parity["parity"] != 1.0:
+        raise RuntimeError("B.6 baseline metrics do not match the B.5 benchmark")
     blockers = _blocker_analysis(results)
     clean = [
         item for item in results
@@ -625,14 +695,15 @@ def run_analysis(
     ]
     return {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
-        "dataset_version": DATASET_VERSION,
+        "dataset_version": DATASET_VERSION if validate_dataset else "custom-unverified",
         "dataset": {
             "seed_sha256": _sha256(seed_path),
             "cases_sha256": _sha256(cases_path),
             "case_count": len(results),
+            "verified": validate_dataset,
         },
         "configuration": {
-            "base_min_score": BASE_MIN_SCORE,
+            "base_min_score": round(base_min_score, 2),
             "explicit_threshold_adjustment": -0.12,
             "high_risk_threshold_adjustment": 0.10,
             "production_gate_changed": False,
@@ -662,9 +733,14 @@ def run_analysis(
         },
         "explicit_recall": _explicit_analysis(results),
         "baseline_parity": parity,
+        "b5_baseline_parity": benchmark_parity,
         "threshold_sweep": sweep,
-        "zero_false_recall_safe_frontier": _safe_frontier(sweep),
-        "one_at_a_time_ablation": _ablations(results),
+        "zero_false_recall_safe_frontier": _safe_frontier(
+            sweep, base_min_score=base_min_score,
+        ),
+        "one_at_a_time_ablation": _ablations(
+            results, base_min_score=base_min_score,
+        ),
         "coverage": _coverage(results),
         "privacy": {
             "query_text_exported": False,
@@ -688,6 +764,7 @@ def markdown_report(report: Dict[str, Any]) -> str:
     blockers = report["gate_blockers"]
     frontier = report["zero_false_recall_safe_frontier"]
     parity = report["baseline_parity"]
+    base_min_score = float(report["configuration"]["base_min_score"])
     lines = [
         "# Memory V5-B.6 Recall Gate Analysis", "",
         "## Executive Summary", "",
@@ -698,7 +775,7 @@ def markdown_report(report: Dict[str, Any]) -> str:
         "- Seed SHA256: `%s`" % dataset["seed_sha256"],
         "- Cases SHA256: `%s`" % dataset["cases_sha256"],
         "", "## Baseline parity", "",
-        "- Base threshold: %.2f" % BASE_MIN_SCORE,
+        "- Base threshold: %.2f" % base_min_score,
         "- Counterfactual parity: %.2f%% (%d/%d Gate cases)" % (
             parity["parity"] * 100, parity["matching_cases"], parity["checked_cases"],
         ),
@@ -707,6 +784,22 @@ def markdown_report(report: Dict[str, Any]) -> str:
     lines.extend(_markdown_table(
         [(name, count) for name, count in partition.items()], ["Bucket", "Cases"],
     ))
+    b5_parity = report.get("b5_baseline_parity")
+    lines.extend(["", "## B.5 baseline metric parity", ""])
+    if b5_parity is None:
+        lines.append("Not applicable: dataset is custom-unverified.")
+    else:
+        metrics = b5_parity["analysis_metrics"]
+        lines.append("- B.5/B.6 decision-metric parity: %.2f%%." % (
+            b5_parity["parity"] * 100,
+        ))
+        lines.extend(_markdown_table([(
+            metrics["cases"], "%.2f%%" % (metrics["top1_accuracy"] * 100),
+            "%.2f%%" % (metrics["recall_at_3"] * 100),
+            "%.2f%%" % (metrics["mrr"] * 100),
+            "%.2f%%" % (metrics["false_recall_rate"] * 100),
+            "%.2f%%" % (metrics["no_recall_precision"] * 100),
+        )], ["Cases", "Top1", "Recall@3", "MRR", "False recall", "No-recall precision"]))
     lines.extend(["", "## Gate blocker decomposition", ""])
     lines.extend(_markdown_table(
         [(name, count) for name, count in blockers["multi_label_counts"].items()],
@@ -743,8 +836,9 @@ def markdown_report(report: Dict[str, Any]) -> str:
     ))
     best = frontier["best_zero_false_recall_candidate"]
     if best:
-        lines.append("- Future experiment candidate: %.2f; recall delta vs 0.48: %+0.2f pp; additional correct allows: %d." % (
-            best["base_min_score"], frontier["recall_delta"] * 100, frontier["additional_allows"],
+        lines.append("- Future experiment candidate: %.2f; recall delta vs %.2f: %+0.2f pp; additional correct allows: %d." % (
+            best["base_min_score"], base_min_score, frontier["recall_delta"] * 100,
+            frontier["additional_allows"],
         ))
     else:
         lines.append("- No zero-false-recall safe frontier exists in the configured sweep.")

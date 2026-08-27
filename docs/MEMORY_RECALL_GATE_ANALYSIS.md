@@ -9,6 +9,9 @@ No production Recall Gate thresholds or blocker rules were changed in V5-B.6.
 Real Recall remains disabled and shadow-only. Vector retrieval, sqlite-vec,
 embeddings, RRF, and reranking remain deferred.
 
+The analysis baseline is the unmodified default from `MemoryServiceConfig`
+(`recall_min_score=0.52`), the same configuration used by the B.5 benchmark.
+
 ## Runbook and dataset integrity
 
 ```bash
@@ -35,7 +38,9 @@ metadata-only export policy.
 
 On the fixed 123-case corpus, B.5 remains the reference baseline: Top-1 71.08%,
 Recall@3 74.70%, MRR 72.69%, False Recall Rate 0%, and No-Recall Precision
-36.70%. B.6 deliberately does not redefine those metrics.
+36.70%. B.6 deliberately does not redefine those metrics: its baseline summary
+matches B.5 exactly (including 11.38% recall decision rate and 43.90% decision
+accuracy), and the tool fails if this parity does not hold.
 
 For every positive, B.6 applies this strict, exhaustive order:
 
@@ -46,9 +51,9 @@ For every positive, B.6 applies this strict, exhaustive order:
 5. `success_allow_expected` — expected is rank one, Gate allows, and it returns
 6. `inconsistent_return` — an explicit unexpected state
 
-The first B.6 run has 0, 21, 3, 44, 15, and 0 cases respectively (83 positive
+The corrected B.6 run has 0, 21, 3, 46, 13, and 0 cases respectively (83 positive
 cases total). This separates the 21 retrieval and 3 ranking failures from the
-44 clean Gate false negatives; old aggregate `gate_false_negative` counts
+46 clean Gate false negatives; old aggregate `gate_false_negative` counts
 should not be used as this partition.
 
 ## Gate blockers, margins, and explicit recall
@@ -56,13 +61,15 @@ should not be used as this partition.
 Each clean Gate FN stores production reasons in their original order. B.6 emits
 both multi-label and primary counts, plus exact combinations; metadata such as
 `candidate_kind:*`, `explicit_recall_request`, and `gate_block` are excluded.
-In this corpus, all 44 clean Gate FNs have only
+In this corpus, all 46 clean Gate FNs have only
 `relevance_below_threshold` as both their multi-label and primary blocker.
 
 For top-candidate-expected positives, the report summarizes score, threshold,
 score margin, lexical, continuity, and quality with min/P10/P25/P50/P75/P90/max.
-Clean Gate FN margins range from -0.38 to -0.025; one lies 0.01–0.05 below the
-threshold, 25 lie more than 0.20 below it, and none already pass threshold but
+Fact, preference, and episode distributions use the real candidate kind from
+the index/Gate path rather than fixture tags. Clean Gate FN margins range from
+-0.42 to -0.008571; one lies 0.01–0.05 below the threshold, 31 lie more than
+0.20 below it, and none already pass threshold but
 are held by another blocker.
 
 There are 9 explicit positive cases: 7 clean Gate FNs and 2 retrieval/ranking
@@ -74,25 +81,25 @@ rules.
 ## Counterfactual threshold sweep
 
 The simulator sweeps base `min_score` from 0.30 to 0.55 in 0.01 increments,
-including 0.48. It recomputes only the relevance comparison using the production
+including the real 0.52 baseline. It recomputes only the relevance comparison using the production
 formula (explicit -0.12, high-risk +0.10, clamped 0.20–0.95). All other real
 blocker state—low-information, emotion, moment, high-risk, conversation and
 same-memory cooldown, and quality—is held fixed.
 
-At 0.48, parity with the actual Gate decision is 100% (118/118 Gate-entering
+At 0.52, parity with the actual Gate decision is 100% (118/118 Gate-entering
 cases), which is a hard precondition to reporting a frontier. The zero-false-
 recall safe frontier is 0.36–0.55: every point has False Recall Rate 0% and
-100% inactive-stale, low-info, and high-risk safety. At 0.48, correct positive
-Gate recall is 15/83 (18.07%). The best zero-FR point is 0.36 with 21/83
-(25.30%), a +7.23 percentage-point lift and six additional correct allows.
+100% inactive-stale, low-info, and high-risk safety. At 0.52, correct positive
+Gate recall is 13/83 (15.66%). The best zero-FR point is 0.36 with 21/83
+(25.30%), a +9.64 percentage-point lift and eight additional correct allows.
 
 This is only a candidate for a future controlled V5-B.7 Gate experiment. It is
 not a production configuration recommendation or an automatic threshold change.
 
 ## One-at-a-time ablation and coverage
 
-At base 0.48, each blocker is separately ignored in an offline simulation.
-Ignoring relevance recovers 44 correct positives but introduces 13 false
+At base 0.52, each blocker is separately ignored in an offline simulation.
+Ignoring relevance recovers 46 correct positives but introduces 13 false
 recalls (32.50% false-recall rate); it is therefore not a safe change. Every
 other single ablation recovers zero positives and adds zero false recalls in
 this corpus, which is not evidence that those rules are removable.
