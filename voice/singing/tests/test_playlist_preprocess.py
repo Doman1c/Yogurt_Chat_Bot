@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 SCRIPT = Path(__file__).parents[1] / "scripts" / "prepare_playlist_input.py"
 SPEC = importlib.util.spec_from_file_location("playlist_preprocess", SCRIPT)
 PLAYLIST = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = PLAYLIST
 assert SPEC.loader
 SPEC.loader.exec_module(PLAYLIST)
 
