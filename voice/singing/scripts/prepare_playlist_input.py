@@ -1,10 +1,9 @@
 """Prepare extended audio containers and timestamped playlists for Singing Pipeline v2.1.
 
-The main Singing pipeline intentionally keeps its managed inbox contract simple:
-one supported audio file equals one job.  This preprocessor runs immediately before
-that pipeline and converts extra containers to 44.1 kHz PCM WAV.  When a chapter
-sidecar is present it splits the source into independent WAV jobs using the user
-provided timestamps.
+The managed Singing pipeline keeps a simple contract: one supported audio file
+is one job.  This preprocessor runs immediately before it.  It converts extra
+containers to 44.1 kHz PCM WAV and, when a user-provided chapter sidecar exists,
+splits the source into independent WAV jobs.
 
 No separator or Seed-VC model is loaded here.
 """
@@ -60,10 +59,7 @@ def safe_name(value: str) -> str:
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -95,14 +91,39 @@ def parse_timestamp(value: str | int | float) -> float:
 
 
 def _chapter(start: Any, title: Any, end: Any = None) -> Chapter:
-    name = str(title or "").strip()
-    if not name:
-        name = "Track"
+    name = str(title or "").strip() or "Track"
     return Chapter(
         start=parse_timestamp(start),
         title=name[:160],
         end=parse_timestamp(end) if end not in (None, "") else None,
     )
+
+
+def validate_chapters(chapters: Iterable[Chapter], *, min_track_seconds: float = 1.0) -> list[Chapter]:
+    items = list(chapters)
+    if not items:
+        raise ValueError("chapter list is empty")
+    if len(items) > MAX_CHAPTERS:
+        raise ValueError(f"chapter list exceeds {MAX_CHAPTERS} tracks")
+
+    # Validate order first so a backwards timestamp cannot be misreported as a
+    # short track when the previous chapter infers its end from the next start.
+    previous_start = -1.0
+    for item in items:
+        if item.start <= previous_start:
+            raise ValueError("chapter start timestamps must be strictly increasing")
+        previous_start = item.start
+
+    for index, item in enumerate(items):
+        next_start = items[index + 1].start if index + 1 < len(items) else None
+        effective_end = item.end if item.end is not None else next_start
+        if item.end is not None and item.end <= item.start:
+            raise ValueError(f"chapter {index + 1} end must be after start")
+        if next_start is not None and item.end is not None and item.end > next_start + 1e-6:
+            raise ValueError(f"chapter {index + 1} explicit end overlaps the next chapter")
+        if effective_end is not None and effective_end - item.start < min_track_seconds:
+            raise ValueError(f"chapter {index + 1} is shorter than {min_track_seconds:g} seconds")
+    return items
 
 
 def parse_text_chapters(text: str) -> list[Chapter]:
@@ -138,34 +159,12 @@ def parse_json_chapters(payload: Any) -> list[Chapter]:
     return validate_chapters(chapters)
 
 
-def validate_chapters(chapters: Iterable[Chapter], *, min_track_seconds: float = 1.0) -> list[Chapter]:
-    items = list(chapters)
-    if not items:
-        raise ValueError("chapter list is empty")
-    if len(items) > MAX_CHAPTERS:
-        raise ValueError(f"chapter list exceeds {MAX_CHAPTERS} tracks")
-    previous_start = -1.0
-    for index, item in enumerate(items):
-        if item.start <= previous_start:
-            raise ValueError("chapter start timestamps must be strictly increasing")
-        previous_start = item.start
-        next_start = items[index + 1].start if index + 1 < len(items) else None
-        effective_end = item.end if item.end is not None else next_start
-        if item.end is not None and item.end <= item.start:
-            raise ValueError(f"chapter {index + 1} end must be after start")
-        if next_start is not None and item.end is not None and item.end > next_start + 1e-6:
-            raise ValueError(f"chapter {index + 1} explicit end overlaps the next chapter")
-        if effective_end is not None and effective_end - item.start < min_track_seconds:
-            raise ValueError(f"chapter {index + 1} is shorter than {min_track_seconds:g} seconds")
-    return items
-
-
 def load_chapters(path: Path, *, min_track_seconds: float) -> list[Chapter]:
     if path.name.lower().endswith(".json"):
-        result = parse_json_chapters(json.loads(path.read_text(encoding="utf-8-sig")))
+        chapters = parse_json_chapters(json.loads(path.read_text(encoding="utf-8-sig")))
     else:
-        result = parse_text_chapters(path.read_text(encoding="utf-8-sig"))
-    return validate_chapters(result, min_track_seconds=min_track_seconds)
+        chapters = parse_text_chapters(path.read_text(encoding="utf-8-sig"))
+    return validate_chapters(chapters, min_track_seconds=min_track_seconds)
 
 
 def sidecar_candidates(audio: Path, suffixes: Iterable[str]) -> list[Path]:
@@ -215,10 +214,9 @@ def load_config(path: Path) -> dict[str, Any]:
             item = Path(data[key])
             data[key] = str(item if item.is_absolute() else (base / item).resolve())
     separation = data.get("separation") or {}
-    for key in ("python",):
-        if key in separation and separation[key]:
-            item = Path(separation[key])
-            separation[key] = str(item if item.is_absolute() else (base / item).resolve())
+    if separation.get("python"):
+        item = Path(separation["python"])
+        separation["python"] = str(item if item.is_absolute() else (base / item).resolve())
     return data
 
 
@@ -232,6 +230,7 @@ def find_ffmpeg(cfg: dict[str, Any]) -> Path:
         if located:
             return Path(located)
         raise RuntimeError(f"configured ffmpeg not found: {configured}")
+
     separation_python = Path((cfg.get("separation") or {}).get("python", ""))
     if separation_python.is_file():
         code = "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"
@@ -242,6 +241,7 @@ def find_ffmpeg(cfg: dict[str, Any]) -> Path:
                 return candidate
         except (OSError, subprocess.CalledProcessError):
             pass
+
     located = shutil.which("ffmpeg")
     if located:
         return Path(located)
@@ -256,7 +256,9 @@ def run_ffmpeg(ffmpeg: Path, source: Path, output: Path, *, start: float = 0.0,
         command.extend(["-ss", f"{start:.6f}"])
     if end is not None:
         command.extend(["-t", f"{end - start:.6f}"])
-    command.extend(["-vn", "-ar", str(SAMPLE_RATE), "-ac", "2", "-c:a", "pcm_s24le", str(output)])
+    command.extend([
+        "-vn", "-ar", str(SAMPLE_RATE), "-ac", "2", "-c:a", "pcm_s24le", str(output)
+    ])
     result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if result.returncode:
         detail = result.stderr.strip()[-1200:]
@@ -268,15 +270,16 @@ def run_ffmpeg(ffmpeg: Path, source: Path, output: Path, *, start: float = 0.0,
 def unique_destination(directory: Path, filename: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     candidate = directory / filename
-    index = 2
+    number = 2
     while candidate.exists():
-        candidate = directory / f"{Path(filename).stem}-{index}{Path(filename).suffix}"
-        index += 1
+        candidate = directory / f"{Path(filename).stem}-{number}{Path(filename).suffix}"
+        number += 1
     return candidate
 
 
 def track_filename(source: Path, source_id: str, index: int, title: str) -> str:
-    return f"{safe_name(source.stem)}__{index:02d}__{safe_name(title)}__{source_id[:8]}.wav"
+    hash_token = source_id.rsplit("-", 1)[-1][:8]
+    return f"{safe_name(source.stem)}__{index:02d}__{safe_name(title)}__{hash_token}.wav"
 
 
 def _playlist_policy(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -323,72 +326,69 @@ def prepare_source(cfg: dict[str, Any], source: Path, sidecar: Path | None, *, f
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True, exist_ok=False)
+
     archive_root = Path(policy["source_archive_dir"])
     archive_dir = unique_destination(archive_root, source_id)
-    # unique_destination returns a path shaped like a file; for this purpose it
-    # is simply a unique not-yet-existing directory path.
-    if archive_dir.exists():
-        raise RuntimeError(f"playlist source archive already exists: {archive_dir}")
-
-    chapter_list: list[Chapter] | None = None
-    if sidecar is not None:
-        chapter_list = load_chapters(sidecar, min_track_seconds=float(policy["min_track_seconds"]))
+    chapter_list = (
+        load_chapters(sidecar, min_track_seconds=float(policy["min_track_seconds"]))
+        if sidecar is not None else None
+    )
 
     prepared: list[PreparedTrack] = []
     staged_files: list[Path] = []
-    try:
-        if chapter_list:
-            for index, chapter in enumerate(chapter_list, start=1):
-                inferred_end = chapter_list[index].start if index < len(chapter_list) else None
-                end = chapter.end if chapter.end is not None else inferred_end
-                filename = track_filename(source, source_id, index, chapter.title)
-                output = staging / filename
-                run_ffmpeg(ffmpeg, source, output, start=chapter.start, end=end)
-                staged_files.append(output)
-                prepared.append(PreparedTrack(index, chapter.title, chapter.start, end, filename))
-        else:
-            filename = f"{safe_name(source.stem)}__converted__{source_hash[:8]}.wav"
+
+    if chapter_list:
+        for index, chapter in enumerate(chapter_list, start=1):
+            inferred_end = chapter_list[index].start if index < len(chapter_list) else None
+            end = chapter.end if chapter.end is not None else inferred_end
+            filename = track_filename(source, source_id, index, chapter.title)
             output = staging / filename
-            run_ffmpeg(ffmpeg, source, output)
+            run_ffmpeg(ffmpeg, source, output, start=chapter.start, end=end)
             staged_files.append(output)
-            prepared.append(PreparedTrack(1, source.stem, 0.0, None, filename))
+            prepared.append(PreparedTrack(index, chapter.title, chapter.start, end, filename))
+    else:
+        filename = f"{safe_name(source.stem)}__converted__{source_hash[:8]}.wav"
+        output = staging / filename
+        run_ffmpeg(ffmpeg, source, output)
+        staged_files.append(output)
+        prepared.append(PreparedTrack(1, source.stem, 0.0, None, filename))
 
-        archived_source, archived_sidecar = _archive_source(source, sidecar, archive_dir)
-        published: list[Path] = []
-        for item in staged_files:
-            destination = unique_destination(incoming, item.name)
-            os.replace(item, destination)
-            published.append(destination)
+    # Only archive the source after every derived WAV has been generated.  An
+    # FFmpeg failure therefore leaves the user's input untouched in incoming.
+    archived_source, archived_sidecar = _archive_source(source, sidecar, archive_dir)
 
-        manifest = {
-            "version": 1,
-            "created_at": now(),
-            "source_sha256": source_hash,
-            "source_filename": archived_source.name,
-            "sidecar_filename": archived_sidecar.name if archived_sidecar else None,
-            "mode": "chapters" if chapter_list else "transcode",
-            "sample_rate": SAMPLE_RATE,
-            "tracks": [asdict(item) for item in prepared],
-        }
-        (archive_dir / "playlist_manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        try:
-            staging.rmdir()
-            staging.parent.rmdir()
-        except OSError:
-            pass
-        return published
-    except Exception:
-        # Staging contains only derived WAVs.  Never delete or move the source
-        # on an FFmpeg/validation failure before _archive_source succeeds.
-        raise
+    published: list[Path] = []
+    for item in staged_files:
+        destination = unique_destination(incoming, item.name)
+        os.replace(item, destination)
+        published.append(destination)
+
+    manifest = {
+        "version": 1,
+        "created_at": now(),
+        "source_sha256": source_hash,
+        "source_filename": archived_source.name,
+        "sidecar_filename": archived_sidecar.name if archived_sidecar else None,
+        "mode": "chapters" if chapter_list else "transcode",
+        "sample_rate": SAMPLE_RATE,
+        "tracks": [asdict(item) for item in prepared],
+    }
+    (archive_dir / "playlist_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    try:
+        staging.rmdir()
+        staging.parent.rmdir()
+    except OSError:
+        pass
+    return published
 
 
 def preprocess(cfg: dict[str, Any]) -> tuple[int, int]:
     policy = _playlist_policy(cfg)
     if not policy["enabled"]:
         return 0, 0
+
     incoming = Path(cfg["incoming_dir"])
     incoming.mkdir(parents=True, exist_ok=True)
     Path(policy["source_archive_dir"]).mkdir(parents=True, exist_ok=True)
