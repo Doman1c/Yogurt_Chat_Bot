@@ -15,7 +15,10 @@ def _default_db_path() -> Path:
 
 
 def create_app(service: Optional[MemoryService] = None) -> FastAPI:
-    memory_service = service or MemoryService(MemoryServiceConfig(db_path=_default_db_path()))
+    memory_service = service or MemoryService(MemoryServiceConfig(
+        db_path=_default_db_path(),
+        recall_gate_experiment=os.environ.get("YOGURT_MEMORY_GATE_EXPERIMENT"),
+    ))
     app = FastAPI(title="Yogurt Memory Service", version="5.0.0")
     app.state.memory_service = memory_service
 
