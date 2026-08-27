@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
 
 from yogurt_social.memory_benchmark import DATASET_VERSION, run_benchmark
-from yogurt_social.memory_gate_analysis import run_analysis
 from yogurt_social.memory_gate_experiment import (
     EXPERIMENT_V5B7_GATE_036,
     GateExperimentStore,
     evaluate_counterfactual,
     resolve_gate_experiment,
+    run_fixed_corpus_guardrail,
     threshold_for,
 )
 from yogurt_social.memory_recall_gate import RecallCandidate
@@ -132,17 +133,39 @@ def test_runtime_response_and_cooldown_state_are_identical_off_and_on(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM memory_gate_experiment_events").fetchone()[0] == 2
 
 
-def test_experiment_writer_failure_is_fail_open(tmp_path, monkeypatch):
+def test_experiment_writer_lock_contention_is_fail_open(tmp_path, monkeypatch):
     service = _service(tmp_path, EXPERIMENT_V5B7_GATE_036)
     _seed(service)
     assert service.gate_experiment_store is not None
     monkeypatch.setattr(
         service.gate_experiment_store, "record",
-        lambda **_: (_ for _ in ()).throw(sqlite3.OperationalError("audit down")),
+        lambda **_: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
     )
     result = _recall(service, "gpu RTX 4080")
     assert result["decision"] == "allow"
     assert service.readiness()["gate_experiment"]["degraded"] is True
+
+
+def test_audit_store_uses_short_lock_budget(tmp_path):
+    profile = resolve_gate_experiment(EXPERIMENT_V5B7_GATE_036)
+    assert profile is not None
+    store = GateExperimentStore(tmp_path / "memory.sqlite3")
+    evaluation = evaluate_counterfactual(
+        candidate=_candidate(0.4), baseline_decision="blocked", explicit_request=False,
+        high_risk=False, production_reasons=["relevance_below_threshold"],
+        candidate_base_min_score=0.36,
+    )
+    with sqlite3.connect(tmp_path / "memory.sqlite3") as lock:
+        lock.execute("BEGIN EXCLUSIVE")
+        started = time.monotonic()
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            store.record(
+                profile=profile, baseline_base_threshold=0.52,
+                baseline_decision="blocked", baseline_threshold=0.52,
+                explicit_request=False, production_reasons=[],
+                candidate=_candidate(0.4), evaluation=evaluation,
+            )
+        assert time.monotonic() - started < 0.5
 
 
 def test_audit_retention_is_bounded_and_contains_no_identity_columns(tmp_path):
@@ -171,16 +194,14 @@ def test_fixed_corpus_baseline_and_candidate_guardrail():
     benchmark = run_benchmark(
         FIXTURES / "memory_recall_seed.jsonl", FIXTURES / "memory_recall_cases.json",
     )
-    analysis = run_analysis(
+    guardrail = run_fixed_corpus_guardrail(
         FIXTURES / "memory_recall_seed.jsonl", FIXTURES / "memory_recall_cases.json",
     )
-    assert analysis["dataset_version"] == DATASET_VERSION
-    assert analysis["b5_baseline_parity"]["benchmark_metrics"] == benchmark["summary"]
-    candidate = next(
-        item for item in analysis["threshold_sweep"] if item["base_min_score"] == 0.36
-    )
-    assert candidate["correct_positive_recall_count"] == 21
-    assert candidate["false_recall_rate"] == 0.0
-    assert candidate["stale_inactive_safety"] == 1.0
-    assert candidate["low_info_safety"] == 1.0
-    assert candidate["high_risk_suppression"] == 1.0
+    assert guardrail["dataset_version"] == DATASET_VERSION
+    assert benchmark["summary"]["false_recall_rate"] == 0.0
+    assert guardrail["decision_parity"]["parity"] == 1.0
+    assert guardrail["candidate_metrics"] == guardrail["b6_candidate_metrics"]
+    assert guardrail["candidate_metrics"]["false_recall_rate"] == 0.0
+    assert guardrail["candidate_metrics"]["stale_inactive_safety"] == 1.0
+    assert guardrail["candidate_metrics"]["low_info_safety"] == 1.0
+    assert guardrail["candidate_metrics"]["high_risk_suppression"] == 1.0

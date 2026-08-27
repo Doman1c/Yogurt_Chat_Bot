@@ -78,10 +78,14 @@ def summarize_experiment(db_path: Path, experiment: str) -> Dict[str, Any]:
             blockers.update(str(reason) for reason in reasons)
     total = len(rows)
     recovered = outcomes["recovered_by_candidate"]
+    pre_gate = baseline["skip"]
+    gate_evaluated = total - pre_gate
     return {
         "schema_version": 1,
         "experiment": experiment,
-        "total_evaluated_events": total,
+        "total_audit_events": total,
+        "pre_gate_skipped_events": pre_gate,
+        "gate_evaluated_events": gate_evaluated,
         "baseline": {
             "allow": baseline["allow"], "blocked": baseline["blocked"],
             "none": baseline["none"], "pre_gate_skipped": baseline["skip"],
@@ -105,9 +109,10 @@ def summarize_experiment(db_path: Path, experiment: str) -> Dict[str, Any]:
             "baseline": _distribution(baseline_margins),
             "candidate": _distribution(candidate_margins),
         },
-        "candidate_recovery": {
-            "recovered_count": recovered,
-            "recovered_rate": _percent(recovered, total),
+        "gate_candidate_recovery": {
+            "gate_recovered_by_candidate_count": recovered,
+            "gate_evaluated_events_denominator": gate_evaluated,
+            "gate_recovered_by_candidate_rate": _percent(recovered, gate_evaluated),
         },
         "privacy": {
             "identity_exported": False, "conversation_key_exported": False,
@@ -115,7 +120,7 @@ def summarize_experiment(db_path: Path, experiment: str) -> Dict[str, Any]:
             "prompt_text_exported": False, "chat_history_exported": False,
         },
         "interpretation": (
-            "Real shadow traffic is unlabeled. Candidate recovery is not equivalent to correctness."
+            "Real shadow traffic is unlabeled. Gate-level candidate recovery is not equivalent to correctness or token-budget passage."
         ),
     }
 
@@ -125,10 +130,13 @@ def markdown_report(summary: Dict[str, Any]) -> str:
         "# V5-B.7 Recall Gate Shadow Experiment", "",
         "## Aggregate summary", "",
         "- Experiment: `%s`" % summary["experiment"],
-        "- Total evaluated events: %d" % summary["total_evaluated_events"],
-        "- Candidate recovery: %d (%.2f%%)" % (
-            summary["candidate_recovery"]["recovered_count"],
-            summary["candidate_recovery"]["recovered_rate"] * 100,
+        "- Total audit events: %d" % summary["total_audit_events"],
+        "- Pre-gate skipped events: %d" % summary["pre_gate_skipped_events"],
+        "- Gate-evaluated events: %d" % summary["gate_evaluated_events"],
+        "- Gate recovered by candidate: %d / %d (%.2f%%)" % (
+            summary["gate_candidate_recovery"]["gate_recovered_by_candidate_count"],
+            summary["gate_candidate_recovery"]["gate_evaluated_events_denominator"],
+            summary["gate_candidate_recovery"]["gate_recovered_by_candidate_rate"] * 100,
         ),
         "", "## Decisions", "",
         "- Baseline: %s" % json.dumps(summary["baseline"], sort_keys=True),

@@ -45,8 +45,9 @@ and non-relevance baseline blockers. It has no identity, conversation key,
 query, memory text, prompt, or transcript fields. Retention is deterministic:
 the newest 10,000 events per named experiment are retained.
 
-Audit evaluation and writes are fail-open. A writer error marks the experiment
-degraded in readiness but cannot alter or fail `MemoryService.recall()`.
+Audit evaluation and writes are fail-open. The audit store uses a 75 ms SQLite
+write-lock budget; a lock/write failure may drop the experiment event, marks the
+experiment degraded in readiness, and cannot alter or fail `MemoryService.recall()`.
 
 Use the aggregate-only report:
 
@@ -58,9 +59,12 @@ PYTHONPATH=social_layer/src python -m yogurt_social.memory_gate_experiment_repor
   --report-output outputs/v5b7_gate_shadow.md
 ```
 
-The report calls a delta `candidate_recovery`, never a correct recall:
-**Real shadow traffic is unlabeled. Candidate recovery is not equivalent to
-correctness.**
+The report calls a delta `gate_recovered_by_candidate`, never a correct recall.
+Its rate is explicitly `gate_recovered_by_candidate / gate_evaluated_events`;
+pre-gate skipped events are reported separately and excluded from the
+denominator. This is Gate-level only and does not counterfactually model the
+later token-budget stage. **Real shadow traffic is unlabeled. Gate-level
+candidate recovery is not equivalent to correctness or token-budget passage.**
 
 ## Promotion criteria and rollback
 
@@ -68,7 +72,7 @@ B.8 or a production threshold proposal requires all of the following review
 gates, not an automatic code path:
 
 - Fixed benchmark: false recall 0%; stale, low-info, and high-risk safety 100%.
-- At least 500 Gate-evaluated shadow events, including explicit and all three
+- At least 500 `gate_evaluated_events`, including explicit and all three
   candidate kinds where traffic permits.
 - Sampled manual review or a labeled evaluation set; unlabeled shadow recovery
   alone cannot establish correctness.
