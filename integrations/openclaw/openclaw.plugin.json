@@ -217,6 +217,41 @@
         "minimum": 1,
         "maximum": 20,
         "default": 5
+      },
+      "memoryServiceEnabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "memoryServiceUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:17621"
+      },
+      "memoryServiceMode": {
+        "type": "string",
+        "enum": ["shadow", "real"],
+        "default": "shadow"
+      },
+      "memoryServiceTimeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 5000,
+        "default": 450
+      },
+      "memoryServicePersonaId": {
+        "type": "string",
+        "default": "yogurt"
+      },
+      "memoryServiceRecallMaxItems": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3,
+        "default": 3
+      },
+      "memoryServiceRecallTokenBudget": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 350,
+        "default": 220
       }
     }
   }

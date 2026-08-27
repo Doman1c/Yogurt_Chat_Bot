@@ -9,6 +9,7 @@ import {
   channelIsAllowed,
   contextAliases,
   optionalString,
+  preferredPolicyKey,
   readConfig,
   resolveUserId,
   senderIdFromContext,
@@ -29,12 +30,18 @@ type V3Config = {
   multiBubbleMaxChars: number;
   multiBubbleMaxBubbles: number;
   multiBubbleDelayMs: number;
+  memoryServiceEnabled: boolean;
+  memoryServiceUrl: string;
+  memoryServiceTimeoutMs: number;
+  memoryServicePersonaId: string;
 };
 
 type PendingTurn = {
   userId: string;
   message: string;
   aliases: string[];
+  conversationKey: string;
+  surface: string;
   createdAt: number;
 };
 
@@ -91,6 +98,14 @@ function readV3Config(api: any, event?: any): V3Config {
     multiBubbleMaxChars: integerValue(raw.multiBubbleMaxChars, 360, 80, 2000),
     multiBubbleMaxBubbles: integerValue(raw.multiBubbleMaxBubbles, 3, 2, 4),
     multiBubbleDelayMs: integerValue(raw.multiBubbleDelayMs, 420, 0, 3000),
+    memoryServiceEnabled: booleanValue(raw.memoryServiceEnabled, false),
+    memoryServiceUrl: typeof raw.memoryServiceUrl === "string" && /^http:\/\/127\.0\.0\.1(?::\d+)?$/i.test(raw.memoryServiceUrl.trim())
+      ? raw.memoryServiceUrl.trim()
+      : "http://127.0.0.1:17621",
+    memoryServiceTimeoutMs: integerValue(raw.memoryServiceTimeoutMs, 450, 100, 5000),
+    memoryServicePersonaId: typeof raw.memoryServicePersonaId === "string" && raw.memoryServicePersonaId.trim()
+      ? raw.memoryServicePersonaId.trim().slice(0, 180)
+      : "yogurt",
   };
 }
 
@@ -306,6 +321,45 @@ function runAutoMemory(
   });
 }
 
+async function runMemoryServiceObserve(
+  config: V3Config,
+  turn: PendingTurn,
+  assistantReply: string,
+): Promise<AutoMemoryResult | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.memoryServiceTimeoutMs);
+  try {
+    const response = await fetch(`${config.memoryServiceUrl}/v1/memory/observe`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        persona_id: config.memoryServicePersonaId,
+        user_id: turn.userId,
+        surface: turn.surface,
+        conversation_key: turn.conversationKey,
+        phase: "assistant",
+        user_message: turn.message,
+        assistant_reply: assistantReply,
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    const value: unknown = await response.json();
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const item = value as Record<string, unknown>;
+    return {
+      ok: item.ok === true,
+      candidate_count: typeof item.candidate_count === "number" ? item.candidate_count : 0,
+      promoted_count: typeof item.promoted_count === "number" ? item.promoted_count : 0,
+      conflict_count: typeof item.conflict_count === "number" ? item.conflict_count : 0,
+    };
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function registerV3Runtime(api: any): void {
   const commitMemory = async (
     trigger: "agent_end" | "message_sent" | "message_sending",
@@ -318,7 +372,13 @@ export function registerV3Runtime(api: any): void {
     const turn = memoryTurns.consume(aliases);
     if (!turn) return false;
     try {
-      const result = await runAutoMemory(api, turn, assistantReply, config);
+      const serviceResult = config.memoryServiceEnabled
+        ? await runMemoryServiceObserve(config, turn, assistantReply)
+        : undefined;
+      const result = serviceResult || await runAutoMemory(api, turn, assistantReply, config);
+      if (config.memoryServiceEnabled && !serviceResult) {
+        api.logger.warn(`${PLUGIN_ID}: v5 memory service write unavailable; used local V3 fallback`);
+      }
       api.logger.info(
         `${PLUGIN_ID}: auto memory trigger=${trigger} candidates=${result.candidate_count || 0} promoted=${result.promoted_count || 0} pending=${result.pending_count || 0} conflicts=${result.conflict_count || 0}`,
       );
@@ -345,7 +405,12 @@ export function registerV3Runtime(api: any): void {
       const userId = resolveUserId(baseConfig, senderIdFromContext(ctx), channel);
       if (!userId) return;
       const aliases = aliasesFor(ctx, event);
-      const turn = { userId, message: prompt };
+      const turn = {
+        userId,
+        message: prompt,
+        conversationKey: preferredPolicyKey(aliases),
+        surface: channel === WEIXIN_CHANNEL ? "wechat" : "native",
+      };
       if (config.autoMemoryEnabled) memoryTurns.register(aliases, turn);
       if (config.multiBubbleEnabled && channel === WEIXIN_CHANNEL) {
         bubbleTurns.register(aliases, turn);

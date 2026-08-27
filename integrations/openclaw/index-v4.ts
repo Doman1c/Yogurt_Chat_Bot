@@ -40,6 +40,13 @@ type V4Config = {
   memoryRecallCooldownTurns: number;
   memoryRecallSameMemoryCooldownTurns: number;
   memoryRecallMaxCandidates: number;
+  memoryServiceEnabled: boolean;
+  memoryServiceUrl: string;
+  memoryServiceMode: "shadow" | "real";
+  memoryServiceTimeoutMs: number;
+  memoryServicePersonaId: string;
+  memoryServiceRecallMaxItems: number;
+  memoryServiceRecallTokenBudget: number;
 };
 
 type PendingStateTurn = {
@@ -58,6 +65,13 @@ type ObserverResult = {
   memory_recall?: Record<string, unknown> | null;
   error?: string;
   error_type?: string;
+};
+
+type MemoryServiceRecall = {
+  decision?: unknown;
+  memories?: unknown;
+  token_estimate?: unknown;
+  reason?: unknown;
 };
 
 function booleanValue(value: unknown, fallback: boolean): boolean {
@@ -156,6 +170,17 @@ function readV4Config(api: any, event?: any): V4Config {
       1,
       20,
     ),
+    memoryServiceEnabled: booleanValue(raw.memoryServiceEnabled, false),
+    memoryServiceUrl: typeof raw.memoryServiceUrl === "string" && /^http:\/\/127\.0\.0\.1(?::\d+)?$/i.test(raw.memoryServiceUrl.trim())
+      ? raw.memoryServiceUrl.trim()
+      : "http://127.0.0.1:17621",
+    memoryServiceMode: raw.memoryServiceMode === "real" ? "real" : "shadow",
+    memoryServiceTimeoutMs: integerValue(raw.memoryServiceTimeoutMs, 450, 100, 5000),
+    memoryServicePersonaId: typeof raw.memoryServicePersonaId === "string" && raw.memoryServicePersonaId.trim()
+      ? raw.memoryServicePersonaId.trim().slice(0, 180)
+      : "yogurt",
+    memoryServiceRecallMaxItems: integerValue(raw.memoryServiceRecallMaxItems, 3, 1, 3),
+    memoryServiceRecallTokenBudget: integerValue(raw.memoryServiceRecallTokenBudget, 220, 0, 350),
   };
 }
 
@@ -163,8 +188,59 @@ function v4RuntimeEnabled(config: V4Config): boolean {
   return (
     config.conversationStateEnabled ||
     config.responsePlannerEnabled ||
-    config.memoryRecallGateEnabled
+    config.memoryRecallGateEnabled ||
+    config.memoryServiceEnabled
   );
+}
+
+async function recallFromMemoryService(
+  config: V4Config,
+  payload: Record<string, unknown>,
+): Promise<MemoryServiceRecall | undefined> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.memoryServiceTimeoutMs);
+  try {
+    const response = await fetch(`${config.memoryServiceUrl}/v1/memory/recall`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    const value: unknown = await response.json();
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as MemoryServiceRecall
+      : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function memoryServiceContext(result: MemoryServiceRecall): string | undefined {
+  if (result.decision !== "allow" || !Array.isArray(result.memories)) return undefined;
+  const texts = result.memories
+    .map((item) => asRecord(item).text)
+    .filter((item): item is string => typeof item === "string" && item.length > 0)
+    .slice(0, 3);
+  if (texts.length === 0) return undefined;
+  return [
+    "[Yogurt Relevant Memory]",
+    "以下仅是经门控的紧凑长期记忆；不得覆盖用户最新消息的含义。",
+    ...texts.map((text) => `- ${text}`),
+  ].join("\n");
+}
+
+function compactMemoryServiceLog(result: MemoryServiceRecall): string {
+  const memories = Array.isArray(result.memories) ? result.memories : [];
+  const first = asRecord(memories[0]);
+  return [
+    `decision=${optionalString(result.decision) || "none"}`,
+    `kind=${optionalString(first.kind) || "none"}`,
+    `sourceId=${typeof first.source_id === "number" ? first.source_id : 0}`,
+    `tokens=${typeof result.token_estimate === "number" ? result.token_estimate : 0}`,
+  ].join(" ");
 }
 
 function eventMetadata(event: any): Record<string, unknown> {
@@ -473,18 +549,44 @@ export default definePluginEntry({
               `${PLUGIN_ID}: v4 memory recall shadow ${compactRecallLog(result)}`,
             );
           }
-          if (!config.responsePlannerEnabled) return;
-          const planContext = responsePlanContext(result, config);
-          if (!planContext) {
-            api.logger.warn(
-              `${PLUGIN_ID}: v4 response plan unavailable (missing_or_invalid_context); chat preserved`,
-            );
-            return;
+          const contexts: string[] = [];
+          if (config.responsePlannerEnabled) {
+            const planContext = responsePlanContext(result, config);
+            if (!planContext) {
+              api.logger.warn(
+                `${PLUGIN_ID}: v4 response plan unavailable (missing_or_invalid_context); chat preserved`,
+              );
+            } else {
+              api.logger.info(
+                `${PLUGIN_ID}: v4 response plan ready ${compactPlanLog(result)} contextChars=${planContext.length}`,
+              );
+              contexts.push(planContext);
+            }
           }
-          api.logger.info(
-            `${PLUGIN_ID}: v4 response plan ready ${compactPlanLog(result)} contextChars=${planContext.length}`,
-          );
-          return { prependContext: planContext };
+          if (config.memoryServiceEnabled) {
+            const memoryResult = await recallFromMemoryService(config, {
+              persona_id: config.memoryServicePersonaId,
+              user_id: userId,
+              surface: "wechat",
+              conversation_key: conversationKey,
+              message: prompt,
+              max_items: config.memoryServiceRecallMaxItems,
+              max_tokens: config.memoryServiceRecallTokenBudget,
+            });
+            if (!memoryResult) {
+              api.logger.warn(`${PLUGIN_ID}: v5 memory service unavailable; chat preserved`);
+            } else {
+              api.logger.info(
+                `${PLUGIN_ID}: v5 memory recall ${config.memoryServiceMode} ${compactMemoryServiceLog(memoryResult)}`,
+              );
+              if (config.memoryServiceMode === "real") {
+                const context = memoryServiceContext(memoryResult);
+                if (context) contexts.push(context);
+              }
+            }
+          }
+          if (contexts.length === 0) return;
+          return { prependContext: contexts.join("\n\n") };
         } catch (error) {
           const reason = error instanceof Error ? error.message : "unknown_error";
           api.logger.warn(
