@@ -47,7 +47,13 @@
           "memoryRecallMinScore": 0.48,
           "memoryRecallCooldownTurns": 8,
           "memoryRecallSameMemoryCooldownTurns": 20,
-          "memoryRecallMaxCandidates": 5
+          "memoryRecallMaxCandidates": 5,
+          "memoryServiceEnabled": false,
+          "memoryServiceUrl": "http://127.0.0.1:17621",
+          "memoryServiceTimeoutMs": 450,
+          "memoryServicePersonaId": "yogurt",
+          "memoryServiceRecallMaxItems": 3,
+          "memoryServiceRecallTokenBudget": 220
         }
       }
     }

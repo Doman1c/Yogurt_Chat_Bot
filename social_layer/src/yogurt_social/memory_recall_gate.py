@@ -183,6 +183,8 @@ class MemoryRecallGate:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA busy_timeout = 3000")
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
@@ -488,6 +490,7 @@ class MemoryRecallGate:
         conversation_key: str,
         message: str,
         state: ConversationState,
+        candidates_override: Sequence[RecallCandidate] | None = None,
     ) -> RecallDecision:
         user_id = self._normalize_identifier(user_id, "user_id")
         conversation_key = self._normalize_identifier(
@@ -518,7 +521,11 @@ class MemoryRecallGate:
                 self.cooldown_turns - (turn_index - last_allowed_turn) + 1,
             )
 
-        candidates = self._candidates(user_id, message, state, explicit_request)
+        candidates = (
+            list(candidates_override)[: self.max_candidates]
+            if candidates_override is not None
+            else self._candidates(user_id, message, state, explicit_request)
+        )
         candidate = candidates[0] if candidates else None
         same_memory_remaining = 0
         if candidate is not None and previous is not None:
