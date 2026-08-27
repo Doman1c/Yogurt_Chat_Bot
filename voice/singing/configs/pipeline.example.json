@@ -9,6 +9,14 @@
   "runtime_info_dir": "E:/path/to/Yogurt_Singing_Runtime/runtime_info",
   "stable_seconds": 2,
   "ffmpeg": "auto",
+  "playlist": {
+    "enabled": true,
+    "source_archive_dir": "E:/path/to/Yogurt_Singing_Runtime/playlist_sources",
+    "extra_input_extensions": [".weba", ".webm", ".ogg", ".opus"],
+    "sidecar_suffixes": [".chapters.txt", ".chapters.json"],
+    "min_track_seconds": 5.0,
+    "stable_seconds": 2
+  },
   "separation": {
     "python": "E:/path/to/Yogurt_Singing_Runtime/separation/.venv/Scripts/python.exe",
     "cli": "E:/path/to/Yogurt_Singing_Runtime/separation/.venv/Scripts/pymss.exe",
