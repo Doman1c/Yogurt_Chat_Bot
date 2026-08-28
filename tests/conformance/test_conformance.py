@@ -5,7 +5,6 @@ from hypothesis import given, strategies as st
 
 from yogurt_conformance.assertions.operations import assert_dispatch_allowed
 from yogurt_conformance.assertions.turns import assert_turn_retry
-from yogurt_conformance.profiles.runtime_lifecycle import run_runtime_lifecycle_conformance
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
 from yogurt_contracts.conversation.idempotency import TurnIdempotencyKey, TurnRetryDecision
 from yogurt_contracts.conversation.refs import ConversationRef
@@ -13,7 +12,7 @@ from yogurt_contracts.foundation.identifiers import ConversationId, PersonaId, T
 from yogurt_contracts.foundation.durability import DurabilityLevel
 from yogurt_contracts.foundation.idempotency import IdempotencyDecision, RequestFingerprint
 from yogurt_contracts.operations.traits import CancellationSupport, EffectKind, IdempotencyKind, OperationTraits, ReversibilityKind
-from yogurt_contracts.runtime.fencing import FencingDecision
+from yogurt_contracts.runtime.fencing import FencingDecision, compare_generation_numbers
 
 
 def _fingerprint(value: str) -> TurnFingerprint:
@@ -45,5 +44,5 @@ def test_turn_retry_is_idempotent_for_same_fingerprint(value):
 
 @given(st.integers(min_value=0, max_value=100), st.integers(min_value=0, max_value=100))
 def test_same_slot_fencing_is_monotonic(candidate, active):
-    decision = run_runtime_lifecycle_conformance("voice.mac", candidate, "voice.mac", active)
+    decision = compare_generation_numbers("voice.mac", candidate, "voice.mac", active)
     assert decision == (FencingDecision.ACCEPT if candidate >= active else FencingDecision.STALE_GENERATION)

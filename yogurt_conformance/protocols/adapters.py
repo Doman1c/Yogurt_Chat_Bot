@@ -1,17 +1,93 @@
-"""Test-only behavior protocols consumed by reusable R1 conformance profiles."""
+"""Test-only behavioral ports consumed by the R1 conformance profiles.
 
-from typing import Protocol
+They expose observable state transitions; implementations never self-certify a
+named test case.
+"""
+
+from dataclasses import dataclass
+from typing import Optional, Protocol, Tuple
+
+from yogurt_contracts.capability.framework import BaseCapabilityDescriptor
+from yogurt_contracts.capability.offer import CapabilityOffer
+from yogurt_contracts.conversation.fingerprint import TurnFingerprint
+from yogurt_contracts.foundation.identifiers import OperationAttemptId, OperationId, ResponseId, SegmentId, TurnId
+from yogurt_contracts.memory.deduplication import MemoryObservationDedupDecision
+from yogurt_contracts.memory.observations import CommittedContentObservation, PresentationObservation
+from yogurt_contracts.memory.projection import MemoryExposureProjection
+from yogurt_contracts.presentation.extent import VoicePresentationExtent
+from yogurt_contracts.presentation.projection import PresentationProjection
+from yogurt_contracts.runtime.generation import GenerationAssignment
+from yogurt_contracts.runtime.identity import RuntimeIdentity
 
 
-class ScenarioAdapterProtocol(Protocol):
-    def run_scenario(self, name: str) -> bool:
-        ...
+@dataclass(frozen=True)
+class CoreTurnAdmission:
+    logical_turn: str
+    conflict: bool = False
 
 
-class CorePublicAdapterProtocol(ScenarioAdapterProtocol, Protocol): pass
-class MemoryAdapterProtocol(ScenarioAdapterProtocol, Protocol): pass
-class SurfaceAdapterProtocol(ScenarioAdapterProtocol, Protocol): pass
-class VoiceAdapterProtocol(ScenarioAdapterProtocol, Protocol): pass
-class OperationProviderAdapterProtocol(ScenarioAdapterProtocol, Protocol): pass
-class CapabilityProviderAdapterProtocol(ScenarioAdapterProtocol, Protocol): pass
-class RuntimeLifecycleAdapterProtocol(ScenarioAdapterProtocol, Protocol): pass
+@dataclass(frozen=True)
+class PlaybackState:
+    intent_count: int
+    completed: bool = False
+    cancelled: bool = False
+    interrupted: bool = False
+    extent: Optional[VoicePresentationExtent] = None
+
+
+@dataclass(frozen=True)
+class OperationDispatchState:
+    operation_id: OperationId
+    attempts: Tuple[OperationAttemptId, ...] = ()
+    side_effect_count: int = 0
+    outcome_unknown: bool = False
+
+
+class CorePublicAdapterProtocol(Protocol):
+    def submit_turn(self, turn_id: TurnId, fingerprint: TurnFingerprint) -> CoreTurnAdmission: ...
+    def start_response(self, logical_turn: str) -> Optional[ResponseId]: ...
+    def append_segment(self, logical_turn: str, response_id: ResponseId, segment_id: SegmentId, text: str) -> bool: ...
+    def finalize_response(self, logical_turn: str, response_id: ResponseId) -> bool: ...
+    def complete_turn(self, logical_turn: str) -> bool: ...
+    def record_late_downstream(self, logical_turn: str) -> bool: ...
+    def fallback_attempt(self, logical_turn: str, response_id: ResponseId) -> Optional[str]: ...
+
+
+class MemoryAdapterProtocol(Protocol):
+    def store_observation(self, observation: object) -> MemoryObservationDedupDecision: ...
+    def project_segment(self, committed: CommittedContentObservation, observations: Tuple[PresentationObservation, ...]) -> MemoryExposureProjection: ...
+
+
+class SurfaceAdapterProtocol(Protocol):
+    def accept(self, receipt: str) -> None: ...
+    def deliver(self, receipt: str) -> None: ...
+    def report_text(self, receipt: str, offset: int) -> None: ...
+    def report_read(self, receipt: str) -> None: ...
+    def terminal(self, receipt: str, outcome: str) -> None: ...
+    def is_read(self, receipt: str) -> bool: ...
+    def projection(self) -> PresentationProjection: ...
+
+
+class VoiceAdapterProtocol(Protocol):
+    def submit_segment(self, segment_id: SegmentId, committed: bool) -> PlaybackState: ...
+    def retry_playback(self, segment_id: SegmentId) -> PlaybackState: ...
+    def report_progress(self, segment_id: SegmentId, duration_ms: int, end_text_offset: Optional[int]) -> PlaybackState: ...
+    def interrupt(self, segment_id: SegmentId) -> PlaybackState: ...
+    def cancel(self, segment_id: SegmentId) -> PlaybackState: ...
+
+
+class OperationProviderAdapterProtocol(Protocol):
+    def commit_intent(self, operation_id: OperationId, fingerprint: str, dispatchable: bool = True) -> OperationDispatchState: ...
+    def dispatch(self, operation_id: OperationId, authorization_valid: bool = True, generation_current: bool = True) -> OperationDispatchState: ...
+    def unknown_outcome(self, operation_id: OperationId) -> OperationDispatchState: ...
+
+
+class CapabilityProviderAdapterProtocol(Protocol):
+    def publish_offer(self, offer: CapabilityOffer[BaseCapabilityDescriptor]) -> None: ...
+    def bind(self, required_major: int, required_minor: int, generation_current: bool = True, binding_expired: bool = False) -> bool: ...
+
+
+class RuntimeLifecycleAdapterProtocol(Protocol):
+    def start(self, slot: str, instance: str) -> RuntimeIdentity: ...
+    def current_assignment(self, slot: str) -> Optional[GenerationAssignment]: ...
+    def lease_expired(self, slot: str) -> bool: ...

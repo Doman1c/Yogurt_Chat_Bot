@@ -1,19 +1,18 @@
 from yogurt_contracts.foundation.identifiers import GenerationAuthorityId, NodeId, RuntimeInstanceId, RuntimeSlotId
-from yogurt_contracts.runtime.fencing import FencingDecision, compare_generation_numbers, validate_runtime_against_current_assignment
+from yogurt_contracts.runtime.fencing import FencingDecision, validate_runtime_against_current_assignment
 from yogurt_contracts.runtime.identity import RuntimeIdentity
 from yogurt_conformance.fakes.generation_authority import GenerationAuthorityHarness
 from yogurt_conformance.protocols.adapters import RuntimeLifecycleAdapterProtocol
-from ._scenarios import assert_scenarios
 
-
-def run_runtime_lifecycle_conformance(slot: str, generation: int, active_slot: str, active_generation: int) -> FencingDecision:
-    """Legacy numeric ordering profile, intentionally not a security fencing profile."""
-
-    return compare_generation_numbers(slot, generation, active_slot, active_generation)
-
-
-def run_runtime_lifecycle_adapter_conformance(adapter: RuntimeLifecycleAdapterProtocol) -> None:
-    assert_scenarios(adapter, ("identity_stable", "slot_generation_monotonic", "slots_independent", "zombie_rejected", "wrong_instance_rejected", "expired_lease_recognized", "binding_generation_rejected"))
+def run_runtime_lifecycle_conformance(adapter: RuntimeLifecycleAdapterProtocol) -> None:
+    first = adapter.start("slot-a", "instance-a")
+    second = adapter.start("slot-a", "instance-b")
+    other = adapter.start("slot-b", "instance-c")
+    assert first.runtime_slot_id == second.runtime_slot_id and second.runtime_generation == first.runtime_generation + 1
+    assert other.runtime_generation == 1 and other.runtime_slot_id != second.runtime_slot_id
+    current = adapter.current_assignment("slot-a")
+    assert current is not None and current.runtime_instance_id == second.runtime_instance_id and current.generation == second.runtime_generation
+    assert not adapter.lease_expired("slot-a") and adapter.lease_expired("missing")
 
 
 def run_generation_authority_conformance(authority: GenerationAuthorityHarness, expected_authority: GenerationAuthorityId) -> None:
