@@ -1,6 +1,6 @@
 import pytest
 
-from yogurt_conformance.fakes.conformance_adapters import CommitMeansSeenMemoryFake, CrossSegmentExposureFake, DispatchWithoutIntentFake, DraftSpeakingVoiceFake, DuplicateSideEffectFake, DuplicateTurnExecutionFake, ForgedReadReceiptSurface, GoodCapabilityProviderFake, GoodCorePublicFake, GoodMemoryFake, GoodOperationProviderFake, GoodRuntimeLifecycleFake, GoodSurfaceFake, GoodVoiceFake, RegressingExposureFake, RewriteCommittedSegmentFake, ScopeIgnoringProviderFake, StaleGenerationProviderFake
+from yogurt_conformance.fakes.conformance_adapters import AudienceIgnoringProviderFake, CommitMeansSeenMemoryFake, CrossSegmentExposureFake, DispatchWithoutIntentFake, DraftSpeakingVoiceFake, DuplicateSideEffectFake, DuplicateTurnExecutionFake, ExpiryIgnoringProviderFake, ForgedReadReceiptSurface, GoodCapabilityProviderFake, GoodCorePublicFake, GoodMemoryFake, GoodOperationProviderFake, GoodRuntimeLifecycleFake, GoodSurfaceFake, GoodVoiceFake, RegressingExposureFake, RewriteCommittedSegmentFake, ScopeIgnoringProviderFake, StaleGenerationProviderFake, WrongAuthorityIgnoringProviderFake
 from yogurt_conformance.profiles.capability_provider import run_capability_provider_conformance
 from yogurt_conformance.profiles.core_public import run_core_public_conformance
 from yogurt_conformance.profiles.memory import run_memory_conformance
@@ -20,7 +20,7 @@ def test_good_behavioral_adapters_pass_all_reusable_profiles() -> None:
     run_runtime_lifecycle_conformance(GoodRuntimeLifecycleFake())
 
 
-@pytest.mark.parametrize(("profile", "adapter"), ((run_core_public_conformance, DuplicateTurnExecutionFake()), (run_core_public_conformance, RewriteCommittedSegmentFake()), (run_memory_conformance, CommitMeansSeenMemoryFake()), (run_memory_conformance, RegressingExposureFake()), (run_memory_conformance, CrossSegmentExposureFake()), (run_surface_conformance, ForgedReadReceiptSurface()), (run_voice_conformance, DraftSpeakingVoiceFake()), (run_operation_provider_conformance, DispatchWithoutIntentFake()), (run_operation_provider_conformance, DuplicateSideEffectFake()), (run_operation_provider_conformance, ScopeIgnoringProviderFake()), (run_operation_provider_conformance, StaleGenerationProviderFake())))
+@pytest.mark.parametrize(("profile", "adapter"), ((run_core_public_conformance, DuplicateTurnExecutionFake()), (run_core_public_conformance, RewriteCommittedSegmentFake()), (run_memory_conformance, CommitMeansSeenMemoryFake()), (run_memory_conformance, RegressingExposureFake()), (run_memory_conformance, CrossSegmentExposureFake()), (run_surface_conformance, ForgedReadReceiptSurface()), (run_voice_conformance, DraftSpeakingVoiceFake()), (run_operation_provider_conformance, DispatchWithoutIntentFake()), (run_operation_provider_conformance, DuplicateSideEffectFake()), (run_operation_provider_conformance, ScopeIgnoringProviderFake()), (run_operation_provider_conformance, StaleGenerationProviderFake()), (run_operation_provider_conformance, AudienceIgnoringProviderFake()), (run_operation_provider_conformance, ExpiryIgnoringProviderFake()), (run_operation_provider_conformance, WrongAuthorityIgnoringProviderFake())))
 def test_bad_adapters_fail_the_profile_that_exercises_them(profile, adapter) -> None:
     with pytest.raises(AssertionError):
         profile(adapter)

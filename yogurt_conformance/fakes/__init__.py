@@ -2,9 +2,11 @@ from .adapters import FakeOperationProvider, FakeSurfaceAdapter
 from .generation_authority import FakeGenerationAuthority, GenerationAuthorityHarness, ResettingGenerationAuthorityFake
 from .conformance_adapters import (
     CommitMeansSeenMemoryFake,
+    AudienceIgnoringProviderFake,
     CrossSegmentExposureFake,
     DispatchWithoutIntentFake,
     DuplicateSideEffectFake,
+    ExpiryIgnoringProviderFake,
     DraftSpeakingVoiceFake,
     DuplicateTurnExecutionFake,
     ForgedReadReceiptSurface,
@@ -19,4 +21,5 @@ from .conformance_adapters import (
     RewriteCommittedSegmentFake,
     ScopeIgnoringProviderFake,
     StaleGenerationProviderFake,
+    WrongAuthorityIgnoringProviderFake,
 )

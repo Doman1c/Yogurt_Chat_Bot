@@ -227,6 +227,22 @@ class StaleGenerationProviderFake(GoodOperationProviderFake):
         return super().dispatch(intent, authorization, runtime, current, authority, durability, mode)
 
 
+class AudienceIgnoringProviderFake(GoodOperationProviderFake):
+    def dispatch(self, intent: OperationIntentCommitted, authorization: OperationAuthorizationSnapshot, runtime: RuntimeIdentity, assignment: GenerationAssignment, authority: GenerationAuthorityId, durability: DurabilityLevel, mode: CorePersistenceMode) -> OperationDispatchState:
+        return super().dispatch(intent, intent.authorization_snapshot, runtime, assignment, authority, durability, mode)
+
+
+class ExpiryIgnoringProviderFake(GoodOperationProviderFake):
+    def dispatch(self, intent: OperationIntentCommitted, authorization: OperationAuthorizationSnapshot, runtime: RuntimeIdentity, assignment: GenerationAssignment, authority: GenerationAuthorityId, durability: DurabilityLevel, mode: CorePersistenceMode) -> OperationDispatchState:
+        stored_intent = self._states[intent.operation.operation_id][0]
+        return super().dispatch(stored_intent, stored_intent.authorization_snapshot, runtime, assignment, authority, durability, mode)
+
+
+class WrongAuthorityIgnoringProviderFake(GoodOperationProviderFake):
+    def dispatch(self, intent: OperationIntentCommitted, authorization: OperationAuthorizationSnapshot, runtime: RuntimeIdentity, assignment: GenerationAssignment, authority: GenerationAuthorityId, durability: DurabilityLevel, mode: CorePersistenceMode) -> OperationDispatchState:
+        return super().dispatch(intent, authorization, runtime, assignment, assignment.issued_by, durability, mode)
+
+
 class GoodCapabilityProviderFake:
     def __init__(self) -> None: self._offer: Optional[CapabilityOffer[BaseCapabilityDescriptor]] = None
     def publish_offer(self, offer: CapabilityOffer[BaseCapabilityDescriptor]) -> None: self._offer = offer

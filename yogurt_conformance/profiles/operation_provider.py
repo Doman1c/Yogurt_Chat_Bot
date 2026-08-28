@@ -43,12 +43,22 @@ def run_operation_provider_conformance(adapter: OperationProviderAdapterProtocol
     committed = adapter.commit_intent(intent)
     assert committed.operation_id == intent.operation.operation_id and committed.side_effect_count == 0
     assert adapter.commit_intent(intent).operation_id == intent.operation.operation_id
-    assert not adapter.dispatch(intent, authorization, runtime, assignment, AUTHORITY, DurabilityLevel.JOURNALED, CorePersistenceMode.DURABLE).attempts
-    assert not adapter.dispatch(intent, authorization, runtime, assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.EPHEMERAL).attempts
+    def assert_blocked(state: object) -> None:
+        assert getattr(state, "attempts") == ()
+        assert getattr(state, "side_effect_count") == 0
+    assert_blocked(adapter.dispatch(intent, authorization, runtime, assignment, AUTHORITY, DurabilityLevel.JOURNALED, CorePersistenceMode.DURABLE))
+    assert_blocked(adapter.dispatch(intent, authorization, runtime, assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.EPHEMERAL))
     wrong_scope = authorization.model_copy(update={"claims": authorization.claims.model_copy(update={"scope": CapabilityId(value="wrong")})})
-    assert not adapter.dispatch(intent, wrong_scope, runtime, assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE).attempts
+    assert_blocked(adapter.dispatch(intent, wrong_scope, runtime, assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE))
+    wrong_audience = authorization.model_copy(update={"claims": authorization.claims.model_copy(update={"audience": RuntimeInstanceId(value="wrong-audience")})})
+    assert_blocked(adapter.dispatch(intent, wrong_audience, runtime, assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE))
+    expired_authorization = authorization.model_copy(update={"valid_until": UtcInstant(value=datetime(2025, 12, 31, tzinfo=timezone.utc))})
+    assert_blocked(adapter.dispatch(intent, expired_authorization, runtime, assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE))
+    expired_binding = intent.model_copy(update={"provider_binding": intent.provider_binding.model_copy(update={"authority_valid_until": UtcInstant(value=datetime(2025, 12, 31, tzinfo=timezone.utc))})})
+    assert_blocked(adapter.dispatch(expired_binding, authorization, runtime, assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE))
+    assert_blocked(adapter.dispatch(intent, authorization, runtime, assignment, GenerationAuthorityId(value="wrong-authority"), DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE))
     stale = assignment.model_copy(update={"generation": 2})
-    assert not adapter.dispatch(intent, authorization, runtime, stale, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE).attempts
+    assert_blocked(adapter.dispatch(intent, authorization, runtime, stale, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE))
     first = adapter.dispatch(intent, authorization, runtime, assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE)
     second = adapter.dispatch(intent, authorization, runtime, assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE)
     assert len(first.attempts) == 1 and len(second.attempts) == 2 and first.attempts[0] != second.attempts[1] and second.side_effect_count == 1
