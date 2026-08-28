@@ -8,7 +8,7 @@ from yogurt_conformance.assertions.turns import assert_turn_retry
 from yogurt_conformance.profiles.runtime_lifecycle import run_runtime_lifecycle_conformance
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
 from yogurt_contracts.conversation.idempotency import TurnIdempotencyKey, TurnRetryDecision
-from yogurt_contracts.conversation.refs import ConversationRef, TurnRef
+from yogurt_contracts.conversation.refs import ConversationRef
 from yogurt_contracts.foundation.identifiers import ConversationId, PersonaId, TurnId, UserId
 from yogurt_contracts.foundation.durability import DurabilityLevel
 from yogurt_contracts.foundation.idempotency import IdempotencyDecision, RequestFingerprint
@@ -23,7 +23,7 @@ def _fingerprint(value: str) -> TurnFingerprint:
 
 def _key(turn_id: str) -> TurnIdempotencyKey:
     conversation = ConversationRef(persona_id=PersonaId(value="persona"), user_id=UserId(value="user"), conversation_id=ConversationId(value="conversation"))
-    return TurnIdempotencyKey(conversation_ref=conversation, turn_ref=TurnRef(conversation_id=conversation.conversation_id, turn_id=TurnId(value=turn_id)))
+    return TurnIdempotencyKey(conversation_ref=conversation, turn_id=TurnId(value=turn_id))
 
 
 def test_ephemeral_core_rejects_all_external_effects():
@@ -38,7 +38,7 @@ def test_real_write_requires_crash_safe_durability():
         assert_dispatch_allowed(traits, DurabilityLevel.JOURNALED, DurabilityLevel.DURABLY_PERSISTED, False)
 
 
-@given(st.text(min_size=1, max_size=32).filter(lambda value: all(ord(char) >= 32 and ord(char) != 127 for char in value)))
+@given(st.text(alphabet=st.characters(blacklist_categories=("Cc",), blacklist_characters=("\x7f",)), min_size=1, max_size=32))
 def test_turn_retry_is_idempotent_for_same_fingerprint(value):
     assert assert_turn_retry(_key("turn"), _fingerprint(value), _key("turn"), _fingerprint(value)) == TurnRetryDecision.SAME_LOGICAL_TURN
 

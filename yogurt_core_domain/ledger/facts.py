@@ -2,6 +2,8 @@
 
 from typing import Optional, Union
 
+from pydantic import model_validator
+
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
 from yogurt_contracts.conversation.idempotency import TurnIdempotencyRecord
 from yogurt_contracts.conversation.input import TurnInput
@@ -28,8 +30,28 @@ class InputCommittedRecorded(_LedgerFact):
     idempotency_record: TurnIdempotencyRecord
     durability_level: DurabilityLevel
 
+    @model_validator(mode="after")
+    def correlates_to_idempotency_record(self) -> "InputCommittedRecorded":
+        key = self.idempotency_record.key
+        if key.conversation_ref.conversation_id != self.turn_ref.conversation_id:
+            raise ValueError("input commit conversation must match idempotency key")
+        if key.turn_id != self.turn_ref.turn_id:
+            raise ValueError("input commit turn must match idempotency key")
+        if self.turn_fingerprint != self.idempotency_record.fingerprint:
+            raise ValueError("input commit fingerprint must match idempotency record")
+        return self
 
-class ResponseStartedRecorded(_LedgerFact): response_started: AgentResponseStarted
+
+class ResponseStartedRecorded(_LedgerFact):
+    response_started: AgentResponseStarted
+
+    @model_validator(mode="after")
+    def correlates_to_response(self) -> "ResponseStartedRecorded":
+        if self.turn_ref != self.response_started.turn_ref:
+            raise ValueError("response start outer turn must match response turn")
+        return self
+
+
 class SegmentCommittedRecorded(_LedgerFact): segment: AgentOutputSegmentCommitted; durability_level: DurabilityLevel
 class ResponseFinalizedRecorded(_LedgerFact): response_finalized: AgentResponseFinalized
 class ResponseAbortedRecorded(_LedgerFact): response_aborted: AgentResponseAborted

@@ -1,23 +1,19 @@
 """Turn identity is key-plus-fingerprint, never a trace correlation ID."""
 
 from enum import Enum
-from typing import Any
-
 from ..foundation.durability import DurabilityLevel
+from ..foundation.identifiers import TurnId
 from ..foundation.model import FrozenContract
 from ..foundation.time import UtcInstant
 from .fingerprint import TurnFingerprint
-from .refs import ConversationRef, TurnRef
+from .refs import ConversationRef
 
 
 class TurnIdempotencyKey(FrozenContract):
-    conversation_ref: ConversationRef
-    turn_ref: TurnRef
+    """Canonical logical turn identity; TurnRef metadata is intentionally excluded."""
 
-    def __init__(self, **data: Any) -> None:
-        super().__init__(**data)
-        if self.conversation_ref.conversation_id != self.turn_ref.conversation_id:
-            raise ValueError("TurnIdempotencyKey conversation and TurnRef must match")
+    conversation_ref: ConversationRef
+    turn_id: TurnId
 
 
 class TurnRetryDecision(str, Enum):
