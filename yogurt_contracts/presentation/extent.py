@@ -63,3 +63,62 @@ class MessagingPresentationExtent(FrozenContract):
         if len(value) != len(set(value)):
             raise ValueError("messaging presentation extent values must be unique")
         return value
+
+
+def normalize_text_extent_progress(content: str, extent: TextPresentationExtent) -> int:
+    """Return covered Unicode codepoints without guessing across offset units.
+
+    UTF-8 offsets that end within a multibyte codepoint cover only the complete
+    codepoints preceding that partial byte sequence.
+    """
+
+    if extent.offset_unit == TextOffsetUnit.UNICODE_CODEPOINT:
+        return min(extent.end_text_offset, len(content))
+    consumed = 0
+    covered = 0
+    for character in content:
+        width = len(character.encode("utf-8"))
+        if consumed + width > extent.end_text_offset:
+            break
+        consumed += width
+        covered += 1
+    return covered
+
+
+def merge_text_extent(
+    content: str,
+    current: Optional[TextPresentationExtent],
+    candidate: TextPresentationExtent,
+) -> TextPresentationExtent:
+    """Keep the extent with the greatest semantic, rather than raw, progress."""
+
+    if current is None:
+        return candidate
+    if normalize_text_extent_progress(content, candidate) > normalize_text_extent_progress(content, current):
+        return candidate
+    return current
+
+
+def merge_voice_extent(
+    current: Optional[VoicePresentationExtent],
+    candidate: VoicePresentationExtent,
+) -> VoicePresentationExtent:
+    """Merge voice progress component-wise; confidence follows text progress."""
+
+    if current is None:
+        return candidate
+    current_offset = current.end_text_offset
+    merged_offset: Optional[int]
+    candidate_offset = candidate.end_text_offset
+    if candidate_offset is not None and (current_offset is None or candidate_offset > current_offset):
+        merged_offset = candidate_offset
+        confidence = candidate.confidence
+    else:
+        merged_offset = current_offset
+        confidence = current.confidence
+    return VoicePresentationExtent(
+        segment_id=current.segment_id,
+        played_duration_ms=max(current.played_duration_ms, candidate.played_duration_ms),
+        end_text_offset=merged_offset,
+        confidence=confidence,
+    )

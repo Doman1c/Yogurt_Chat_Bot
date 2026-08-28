@@ -12,6 +12,8 @@ from yogurt_contracts.memory.observations import CommittedContentObservation, Pr
 from yogurt_contracts.memory.projection import project_memory_exposure
 from yogurt_contracts.presentation.extent import MessagingPresentationExtent, TextOffsetUnit, TextPresentationExtent, VoicePresentationExtent
 from yogurt_contracts.presentation.facts import PresentationEvidenceLevel
+from yogurt_contracts.presentation.facts import PresentationProgressObserved
+from yogurt_contracts.presentation.projection import project_presentation
 
 
 NOW = UtcInstant(value=datetime(2026, 1, 1, tzinfo=timezone.utc))
@@ -93,8 +95,13 @@ def test_offset_units_and_segment_projection_are_exposure_safe() -> None:
     byte_partial = _presentation(PresentationEvidenceLevel.PRESENTED_TO_USER, TextPresentationExtent(segment_id=SegmentId(value="segment"), end_text_offset=1, offset_unit=TextOffsetUnit.UTF8_BYTE))
     byte_full = _presentation(PresentationEvidenceLevel.PRESENTED_TO_USER, TextPresentationExtent(segment_id=SegmentId(value="segment"), end_text_offset=2, offset_unit=TextOffsetUnit.UTF8_BYTE))
     assert project_memory_exposure(unicode, (codepoint,)).is_fully_exposed
-    assert project_memory_exposure(unicode, (byte_partial,)).is_partially_exposed
+    assert not project_memory_exposure(unicode, (byte_partial,)).is_partially_exposed
     assert project_memory_exposure(unicode, (byte_full,)).is_fully_exposed
+    mixed = _committed(content="酸奶")
+    full_codepoints = _presentation(PresentationEvidenceLevel.PRESENTED_TO_USER, TextPresentationExtent(segment_id=SegmentId(value="segment"), end_text_offset=2))
+    one_utf8_character = _presentation(PresentationEvidenceLevel.PRESENTED_TO_USER, TextPresentationExtent(segment_id=SegmentId(value="segment"), end_text_offset=3, offset_unit=TextOffsetUnit.UTF8_BYTE))
+    assert project_memory_exposure(mixed, (full_codepoints, one_utf8_character)).is_fully_exposed
+    assert project_memory_exposure(mixed, (one_utf8_character, full_codepoints)).is_fully_exposed
     response_level = PresentationObservation(operation_id=OperationId(value="response-level"), conversation_ref=CONVERSATION, turn_ref=TURN, response_id=ResponseId(value="response"), presentation_operation_id=OperationId(value="presentation"), receipt_id=ReceiptId(value="response-receipt"), evidence_level=PresentationEvidenceLevel.PRESENTED_TO_USER, observed_at=NOW)
     assert project_memory_exposure(unicode, (response_level,)).highest_evidence is None
 
@@ -119,3 +126,15 @@ def test_observation_round_trips_and_retry_deduplication_is_payload_safe() -> No
     assert classify_memory_observation_retry(committed, committed) == MemoryObservationDedupDecision.DUPLICATE_RETRY
     conflicting = committed.model_copy(update={"content": "changed"})
     assert classify_memory_observation_retry(committed, conflicting) == MemoryObservationDedupDecision.PAYLOAD_CONFLICT
+
+
+def test_public_projection_uses_semantic_text_and_component_voice_merge() -> None:
+    operation = OperationId(value="public-presentation")
+    codepoints = PresentationProgressObserved(receipt_id=ReceiptId(value="public-codepoints"), operation_id=operation, observed_at=NOW, extent=TextPresentationExtent(segment_id=SegmentId(value="segment"), end_text_offset=2))
+    bytes_partial = PresentationProgressObserved(receipt_id=ReceiptId(value="public-bytes"), operation_id=operation, observed_at=NOW, extent=TextPresentationExtent(segment_id=SegmentId(value="segment"), end_text_offset=3, offset_unit=TextOffsetUnit.UTF8_BYTE))
+    projection = project_presentation(operation, (bytes_partial, codepoints), {SegmentId(value="segment"): "酸奶"})
+    assert projection.max_text_extent == codepoints.extent
+    first_voice = PresentationProgressObserved(receipt_id=ReceiptId(value="voice-a"), operation_id=operation, observed_at=NOW, extent=VoicePresentationExtent(segment_id=SegmentId(value="segment"), played_duration_ms=1000, end_text_offset=10))
+    second_voice = PresentationProgressObserved(receipt_id=ReceiptId(value="voice-b"), operation_id=operation, observed_at=NOW, extent=VoicePresentationExtent(segment_id=SegmentId(value="segment"), played_duration_ms=2000, end_text_offset=3))
+    voice = project_presentation(operation, (first_voice, second_voice)).max_voice_extent
+    assert voice is not None and (voice.played_duration_ms, voice.end_text_offset) == (2000, 10)

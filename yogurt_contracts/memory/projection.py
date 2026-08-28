@@ -4,7 +4,14 @@ from typing import Iterable, Optional, Tuple
 
 from ..foundation.identifiers import SegmentId
 from ..foundation.model import FrozenContract
-from ..presentation.extent import MessagingPresentationExtent, TextOffsetUnit, TextPresentationExtent, VoicePresentationExtent
+from ..presentation.extent import (
+    MessagingPresentationExtent,
+    TextPresentationExtent,
+    VoicePresentationExtent,
+    merge_text_extent,
+    merge_voice_extent,
+    normalize_text_extent_progress,
+)
 from ..presentation.facts import PresentationEvidenceLevel, presentation_evidence_rank
 from .observations import CommittedContentObservation, PresentationObservation
 
@@ -49,20 +56,21 @@ def project_memory_exposure(
         if highest is None or presentation_evidence_rank(observation.evidence_level) > presentation_evidence_rank(highest):
             highest = observation.evidence_level
         extent = observation.extent
-        if isinstance(extent, TextPresentationExtent) and (text_extent is None or extent.end_text_offset > text_extent.end_text_offset):
-            text_extent = extent
-        elif isinstance(extent, VoicePresentationExtent) and (voice_extent is None or extent.played_duration_ms > voice_extent.played_duration_ms):
-            voice_extent = extent
+        if isinstance(extent, TextPresentationExtent):
+            text_extent = merge_text_extent(committed_content.content, text_extent, extent)
+        elif isinstance(extent, VoicePresentationExtent):
+            voice_extent = merge_voice_extent(voice_extent, extent)
         elif isinstance(extent, MessagingPresentationExtent):
             messaging_extent = _max_messaging_extent(messaging_extent, extent)
     presented_or_read = highest is not None and presentation_evidence_rank(highest) >= presentation_evidence_rank(PresentationEvidenceLevel.PRESENTED_TO_USER)
-    text_length = 0
-    if text_extent is not None:
-        text_length = len(committed_content.content) if text_extent.offset_unit == TextOffsetUnit.UNICODE_CODEPOINT else len(committed_content.content.encode("utf-8"))
-    full_text = presented_or_read and text_extent is not None and text_extent.end_text_offset >= text_length
+    full_text = (
+        presented_or_read
+        and text_extent is not None
+        and normalize_text_extent_progress(committed_content.content, text_extent) == len(committed_content.content)
+    )
     full_voice = presented_or_read and voice_extent is not None and voice_extent.end_text_offset is not None and voice_extent.end_text_offset >= len(committed_content.content)
     fully_exposed = full_text or full_voice
-    positive_text = text_extent is not None and text_extent.end_text_offset > 0
+    positive_text = text_extent is not None and normalize_text_extent_progress(committed_content.content, text_extent) > 0
     positive_voice = voice_extent is not None and (voice_extent.played_duration_ms > 0 or (voice_extent.end_text_offset is not None and voice_extent.end_text_offset > 0))
     partially_exposed = presented_or_read and (positive_text or positive_voice) and not fully_exposed
     return MemoryExposureProjection(
