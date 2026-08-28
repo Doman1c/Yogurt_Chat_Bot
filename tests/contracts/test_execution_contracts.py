@@ -6,12 +6,18 @@ from yogurt_contracts.conversation.fingerprint import turn_fingerprint
 from yogurt_contracts.conversation.input import TextInputPart, TurnInput
 from yogurt_contracts.conversation.lifecycle import TurnState, validate_turn_transition
 from yogurt_contracts.conversation.refs import ConversationRef, TurnOrigin, TurnRef
-from yogurt_contracts.foundation.identifiers import BindingId, ConversationId, ExternalPrincipalRef, IdentityResolutionRef, InputId, OperationId, PersonaId, ReceiptId, ResponseId, SegmentId, TurnId, UserId
-from yogurt_contracts.foundation.time import UtcInstant
+from yogurt_contracts.foundation.identifiers import BindingId, CapabilityId, ConversationId, ExternalPrincipalRef, IdentityResolutionRef, InputId, OperationId, PersonaId, ReceiptId, ResponseId, RuntimeInstanceId, RuntimeSlotId, SegmentId, TurnId, UserId
+from yogurt_contracts.foundation.time import Deadline, UtcInstant
 from yogurt_contracts.presentation.extent import VoicePresentationExtent
 from yogurt_contracts.presentation.facts import PresentationProgressObserved, PresentationTerminal
 from yogurt_contracts.presentation.projection import project_presentation
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted, LogicalResponse
+from yogurt_contracts.operations.intent import LogicalOperation, OperationIntentCommitted
+from yogurt_contracts.operations.traits import CancellationSupport, EffectKind, IdempotencyKind, OperationTraits, ReversibilityKind
+from yogurt_contracts.capability.binding import CapabilityBinding
+from yogurt_contracts.foundation.idempotency import RequestFingerprint
+from yogurt_contracts.foundation.versioning import ContractVersion
+from yogurt_contracts.identity.authority import AuthorityClaims, DelegatedAuthority
 
 
 NOW = UtcInstant(value=datetime(2026, 1, 1, tzinfo=timezone.utc))
@@ -49,3 +55,10 @@ def test_presentation_projection_dedupes_and_keeps_max_extent_with_failed_termin
     projection = project_presentation(operation, (high, stale, high, PresentationTerminal(receipt_id=ReceiptId(value="failure"), operation_id=operation, observed_at=NOW, outcome="failed")))
     assert projection.max_voice_extent.played_duration_ms == 700
     assert projection.terminal_outcome == "failed"
+
+
+def test_operation_intent_is_explicit_write_ahead_contract():
+    binding = CapabilityBinding(binding_id=BindingId(value="binding"), binding_revision="1", capability_id=CapabilityId(value="capability"), provider_slot_id=RuntimeSlotId(value="slot"), provider_instance_id=RuntimeInstanceId(value="instance"), provider_generation=1, contract_version=ContractVersion(major=1, minor=0), authority_valid_until=NOW)
+    claims = AuthorityClaims(actor=RuntimeInstanceId(value="actor"), subject=UserId(value="user"), origin="surface", audience=RuntimeInstanceId(value="audience"), scope=CapabilityId(value="capability"), grant_revision="1", valid_until=NOW, authority_reference="authority")
+    operation = LogicalOperation(operation_id=OperationId(value="operation"), request_fingerprint=RequestFingerprint(value="digest"), target_capability=CapabilityId(value="capability"), authority=DelegatedAuthority(claims=claims), deadline=Deadline(expires_at=NOW), traits=OperationTraits(effect_kind=EffectKind.WRITE, idempotency=IdempotencyKind.KEYED, reversibility=ReversibilityKind.COMPENSATABLE, cancellation_support=CancellationSupport.BEST_EFFORT), created_at=NOW)
+    assert OperationIntentCommitted(operation=operation, provider_binding=binding, required_durability="durably_persisted", committed_at=NOW).operation.operation_id == OperationId(value="operation")
