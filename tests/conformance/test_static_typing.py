@@ -13,3 +13,5 @@ def test_negative_identifier_fixture_fails_mypy():
         result = subprocess.run([sys.executable, "-m", "mypy", str(fixture)], capture_output=True, text=True, check=False, env=environment)
     assert result.returncode != 0
     assert "incompatible type" in result.stdout
+    for type_name in ("TraceId", "ResponseId", "OperationAttemptId", "RuntimeInstanceId", "BindingId", "HypothesisId"):
+        assert type_name in result.stdout

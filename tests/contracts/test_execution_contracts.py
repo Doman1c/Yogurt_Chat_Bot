@@ -65,3 +65,8 @@ def test_operation_intent_is_explicit_write_ahead_contract():
     from yogurt_contracts.foundation.durability import DurabilityLevel
     snapshot = OperationAuthorizationSnapshot(operation_id=operation.operation_id, claims=claims, checked_at=NOW, valid_until=NOW)
     assert OperationIntentCommitted(operation=operation, provider_binding=binding, authorization_snapshot=snapshot, required_durability=DurabilityLevel.DURABLY_PERSISTED, committed_at=NOW).operation.operation_id == OperationId(value="operation")
+
+
+def test_cross_field_contract_invariants_reject_invalid_terminal_and_segments():
+    with pytest.raises(ValueError):
+        AgentOutputSegmentCommitted(response_id=ResponseId(value="response"), segment_id=SegmentId(value="segment"), sequence=0, text="", language="")

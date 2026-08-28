@@ -1,5 +1,7 @@
 from typing import Optional, Tuple
 
+from pydantic import model_validator
+
 from ..conversation.refs import TurnRef
 from ..foundation.identifiers import ResponseId, SegmentId
 from ..foundation.model import FrozenContract
@@ -16,6 +18,16 @@ class AgentOutputSegmentCommitted(FrozenContract):
     interruptibility: Optional[str] = None
     content_hash: Optional[str] = None
     is_segment_final: bool = True
+
+    @model_validator(mode="after")
+    def has_valid_committed_content(self) -> "AgentOutputSegmentCommitted":
+        if self.sequence < 1:
+            raise ValueError("committed segment sequence must be at least 1")
+        if not self.text:
+            raise ValueError("committed segment text must be non-empty")
+        if not self.language:
+            raise ValueError("committed segment language must be non-empty")
+        return self
 
 
 class AgentResponseStarted(FrozenContract):

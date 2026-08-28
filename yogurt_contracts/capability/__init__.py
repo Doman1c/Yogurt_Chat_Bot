@@ -1,4 +1,4 @@
 from .authorization import CapabilityAuthorizationDecision
 from .binding import CapabilityBinding
-from .framework import BaseCapabilityDescriptor, CapabilityRequirement, CapabilityState
+from .framework import BaseCapabilityDescriptor, CapabilityRequirement, CapabilityState, ContractCompatibilityDecision, contract_compatibility_decision, is_contract_compatible
 from .offer import CapabilityOffer

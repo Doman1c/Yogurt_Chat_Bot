@@ -40,6 +40,7 @@ from yogurt_contracts.presentation.facts import PresentationTerminal, Presentati
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted, AgentResponseAborted, AgentResponseFinalized, AgentResponseStarted
 from yogurt_conformance.assertions.turns import assert_turn_retry
 from yogurt_contracts.conversation.idempotency import TurnRetryDecision
+from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
 from yogurt_core_domain.ledger.facts import (
     InputCommittedRecorded,
     OperationIntentRecorded,
@@ -53,6 +54,7 @@ from yogurt_core_domain.ledger.facts import (
     TurnCompletedRecorded,
 )
 from yogurt_core_domain.ledger.ordering import LedgerInvariantError, append_fact
+from yogurt_core_domain.turn.state import TurnStateRecord
 
 
 NOW = UtcInstant(value=datetime(2026, 1, 1, tzinfo=timezone.utc))
@@ -64,6 +66,14 @@ ORIGIN = TurnOrigin(
     external_principal_ref=ExternalPrincipalRef(value="principal"),
     identity_resolution_ref=IdentityResolutionRef(value="resolution"),
 )
+
+
+def test_turn_state_record_requires_a_consistent_abort_reason() -> None:
+    turn_ref = TurnRef(conversation_id=CONVERSATION.conversation_id, turn_id=TurnId(value="state-turn"))
+    with pytest.raises(ValueError):
+        TurnStateRecord(turn_ref=turn_ref, state=TurnState.ABORTED)
+    with pytest.raises(ValueError):
+        TurnStateRecord(turn_ref=turn_ref, state=TurnState.COMPLETED, abort_reason=AbortReason.POLICY)
 
 
 def _turn(name: str = "turn", sequence: Optional[int] = 1, parent: Optional[TurnId] = None) -> TurnRef:
