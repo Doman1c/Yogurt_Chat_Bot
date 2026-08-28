@@ -1,3 +1,3 @@
 from .operation_provider import run_operation_provider_conformance
-from .runtime_lifecycle import run_runtime_lifecycle_conformance
+from .runtime_lifecycle import run_generation_authority_conformance, run_runtime_lifecycle_conformance
 from .surface import run_surface_conformance

@@ -34,3 +34,7 @@ Semantic commit and `DurabilityLevel` are independent. Real presentation, `wecha
 The public Python binding contains typed IDs, time/version/error/idempotency/durability primitives; identity, conversation input/fingerprinting/lifecycle, logical responses and attempts, logical operations and attempts, cancellation/outcome traits, presentation facts/projections, generic capability offers/bindings, runtime identity/fencing/lease, execution snapshots, Memory observations, and stream semantics. `yogurt_core_domain` separately holds internal ledger facts. `yogurt_conformance` contains test-only profiles, fakes, assertions, property tests, Python-binding serialization fixtures, and static identifier negative checks.
 
 The CI job installs `requirements-contracts-dev.txt` and runs isolated contract, conformance, architecture-allowlist, and strict mypy checks. These checks prove Python-binding behavior only; they do not test or promise a future gRPC/JSON/protobuf ABI.
+
+## P0 hardening status
+
+P0-01 durable ledger recovery and P0-02 turn idempotency are closed in the R1 contract foundation. P0-03 operation authorization/binding safety and P0-04 authority-issued runtime fencing are implemented as review candidates: operation intents retain dispatch-time authorization evidence, dispatch uses one typed allow/deny gate, and runtime fencing requires an exact authority-issued assignment rather than a self-claimed generation comparison. P0-05 Memory scope/exposure and P0-06 the full Conformance Kit remain open and are not claimed by this R1 phase.

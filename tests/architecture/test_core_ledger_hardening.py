@@ -33,6 +33,7 @@ from yogurt_contracts.foundation.time import Deadline, UtcInstant
 from yogurt_contracts.foundation.versioning import ContractVersion
 from yogurt_contracts.identity.authority import AuthorityClaims, DelegatedAuthority
 from yogurt_contracts.operations.intent import LogicalOperation, OperationIntentCommitted
+from yogurt_contracts.execution.authorization_snapshot import OperationAuthorizationSnapshot
 from yogurt_contracts.operations.outcome import OperationOutcome
 from yogurt_contracts.operations.traits import CancellationSupport, EffectKind, IdempotencyKind, OperationTraits, ReversibilityKind
 from yogurt_contracts.presentation.facts import PresentationTerminal, PresentationTerminalOutcome
@@ -167,7 +168,7 @@ def test_operation_intent_round_trip_preserves_write_ahead_contract() -> None:
     )
     fact = OperationIntentRecorded(
         turn_ref=_turn(), recorded_at=NOW,
-        intent=OperationIntentCommitted(operation=operation, provider_binding=binding, required_durability=DurabilityLevel.DURABLY_PERSISTED, committed_at=NOW),
+        intent=OperationIntentCommitted(operation=operation, provider_binding=binding, authorization_snapshot=OperationAuthorizationSnapshot(operation_id=operation.operation_id, claims=claims, checked_at=NOW, valid_until=NOW), required_durability=DurabilityLevel.DURABLY_PERSISTED, committed_at=NOW),
     )
     restored = OperationIntentRecorded.model_validate(fact.model_dump())
     assert restored.intent.operation.operation_id == OperationId(value="operation")

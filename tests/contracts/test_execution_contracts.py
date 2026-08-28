@@ -13,6 +13,7 @@ from yogurt_contracts.presentation.facts import PresentationProgressObserved, Pr
 from yogurt_contracts.presentation.projection import project_presentation
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted, LogicalResponse
 from yogurt_contracts.operations.intent import LogicalOperation, OperationIntentCommitted
+from yogurt_contracts.execution.authorization_snapshot import OperationAuthorizationSnapshot
 from yogurt_contracts.operations.traits import CancellationSupport, EffectKind, IdempotencyKind, OperationTraits, ReversibilityKind
 from yogurt_contracts.capability.binding import CapabilityBinding
 from yogurt_contracts.foundation.idempotency import RequestFingerprint
@@ -62,4 +63,5 @@ def test_operation_intent_is_explicit_write_ahead_contract():
     claims = AuthorityClaims(actor=RuntimeInstanceId(value="actor"), subject=UserId(value="user"), origin="surface", audience=RuntimeInstanceId(value="audience"), scope=CapabilityId(value="capability"), grant_revision="1", valid_until=NOW, authority_reference="authority")
     operation = LogicalOperation(operation_id=OperationId(value="operation"), request_fingerprint=RequestFingerprint(value="digest"), target_capability=CapabilityId(value="capability"), authority=DelegatedAuthority(claims=claims), deadline=Deadline(expires_at=NOW), traits=OperationTraits(effect_kind=EffectKind.WRITE, idempotency=IdempotencyKind.KEYED, reversibility=ReversibilityKind.COMPENSATABLE, cancellation_support=CancellationSupport.BEST_EFFORT), created_at=NOW)
     from yogurt_contracts.foundation.durability import DurabilityLevel
-    assert OperationIntentCommitted(operation=operation, provider_binding=binding, required_durability=DurabilityLevel.DURABLY_PERSISTED, committed_at=NOW).operation.operation_id == OperationId(value="operation")
+    snapshot = OperationAuthorizationSnapshot(operation_id=operation.operation_id, claims=claims, checked_at=NOW, valid_until=NOW)
+    assert OperationIntentCommitted(operation=operation, provider_binding=binding, authorization_snapshot=snapshot, required_durability=DurabilityLevel.DURABLY_PERSISTED, committed_at=NOW).operation.operation_id == OperationId(value="operation")

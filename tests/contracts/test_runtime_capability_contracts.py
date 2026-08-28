@@ -5,7 +5,7 @@ from yogurt_contracts.capability.offer import CapabilityOffer
 from yogurt_contracts.foundation.identifiers import CapabilityId, HypothesisId, NodeId, RuntimeInstanceId, RuntimeSlotId
 from yogurt_contracts.foundation.time import UtcInstant
 from yogurt_contracts.foundation.versioning import ContractVersion
-from yogurt_contracts.runtime.fencing import FencingDecision, validate_generation
+from yogurt_contracts.runtime.fencing import FencingDecision, compare_generation_numbers
 from yogurt_contracts.runtime.identity import RuntimeIdentity
 from yogurt_contracts.streams.transcript import TranscriptHypothesis, supersedes
 
@@ -23,8 +23,8 @@ def test_external_typed_capability_descriptor_needs_no_central_union():
 
 
 def test_generation_is_scoped_by_slot():
-    assert validate_generation("voice.mac", 5, "voice.mac", 6) == FencingDecision.STALE_GENERATION
-    assert validate_generation("voice.stackchan", 2, "voice.mac", 6) == FencingDecision.SLOT_MISMATCH
+    assert compare_generation_numbers("voice.mac", 5, "voice.mac", 6) == FencingDecision.STALE_GENERATION
+    assert compare_generation_numbers("voice.stackchan", 2, "voice.mac", 6) == FencingDecision.SLOT_MISMATCH
 
 
 def test_transcript_is_revision_replacement_not_append():
