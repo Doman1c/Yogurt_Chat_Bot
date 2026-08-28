@@ -27,6 +27,7 @@ Existing principles remain in force: hybrid modular runtime; Core/Runtime/Surfac
 | AP-21 | User-visible state MUST be acknowledged by the presentation layer that can actually observe it. Send success MUST NOT mean user read. |
 | AP-22 | Optional capability removal MUST hold at package/import level, not merely behind flags. |
 | AP-23 | Trace identity MUST NOT substitute for domain identity. |
+| AP-24 | No semantic draft may reach a user; presentation consumes immutable committed segments only. |
 
 ## 3. Target topology and traffic lanes
 
@@ -47,7 +48,7 @@ Voice timing ──────────┼──► Embodiment Runtime ─�
                        └── body binding, expression mapping, timing, multi-body fanout
 ```
 
-The Supervisor owns management-plane facts only: registration, discovery, leases, health, configuration, grants, compatibility, offers, bindings, and lifecycle. It MUST NOT carry normal turns, response data, TTS/STT/media data, memory data, or presentation traffic. Runtimes continue existing session traffic through a Supervisor outage; management changes wait for recovery.
+The Supervisor owns management-plane facts only: registration, discovery, leases, health, configuration, grants, compatibility, offers, bindings, and lifecycle. It MUST NOT carry normal turns, response data, TTS/STT/media data, memory data, or presentation traffic. A Supervisor outage makes new discovery, binding, lease renewal, and management mutation unavailable, but does not immediately kill an active valid binding. Existing traffic MAY continue only inside the binding's own authority lifetime; expired authority blocks new privileged operations.
 
 The high-priority, low-bandwidth session-control lane is direct Surface↔Core, Voice↔Core, or Core↔Runtime and carries turn lifecycle, response commit, cancellation/interrupt, presentation receipts, scoped errors, and conversation end. Data streams carry `AgentOutputSegment`, `TranscriptHypothesis`, `TTSAudioChunk`, `SpeechProgress`, and `VisionObservation`; each is bounded, backpressured, cancellable, and stream-scoped. A universal `type/payload` frame and raw global event bus are prohibited. Raw audio remains Voice-internal; raw camera frames remain Vision-internal by default.
 
@@ -69,13 +70,13 @@ ExternalPrincipal → Surface Authentication → Identity Resolver → LogicalUs
 
 `CallerIdentity` identifies a calling runtime or delegated actor; `LogicalUser` is the domain user; `PersonaRef` identifies the identity/persona in effect; `IdentityResolution` records resolver revision, source hash, and provenance. Native Voice v1 MAY authenticate a trusted local-device principal such as `local-device:<opaque-device-id>` and resolve it to the owner-equivalent user. It MUST NOT claim speaker verification.
 
-`ConversationRef = {persona_id, user_id, conversation_id}`. `conversation_id` MUST be opaque, bounded, and privacy-safe; it MUST NOT encode surface, permissions, routing, or agent prefixes. `TurnRef = {conversation_id, turn_id, parent_turn_id?, sequence?}` identifies one logical interaction. `media_session_id`, `external_thread_id`, `external_message_id`, `connection_id`, `response_id`, `segment_id`, `operation_id`, `runtime_instance_id`, and `trace_id` have distinct lifetimes and MUST NOT be repurposed.
+`ConversationRef = {persona_id, user_id, conversation_id}`. `conversation_id` MUST be opaque, bounded, and privacy-safe; it MUST NOT encode surface, permissions, routing, or agent prefixes. `TurnRef = {conversation_id, turn_id, parent_turn_id?, sequence?}` identifies one logical interaction. Each admitted turn separately stores `TurnOrigin = {origin_surface, external_principal_ref, identity_resolution_ref}` for policy, authorization, audit, and surface behavior. `TurnOrigin` MUST NOT pollute persona or conversation identity. `media_session_id`, `external_thread_id`, `external_message_id`, `connection_id`, `response_id`, `segment_id`, `operation_id`, `runtime_instance_id`, and `trace_id` have distinct lifetimes and MUST NOT be repurposed.
 
-At turn admission, Core binds an immutable `TurnSnapshot`: `identity_revision`, `identity_source_hash`, `loaded_at`, `config_revision`, `model_binding_revision`, `grant_revision`, and `binding_revision`. A reload changes later turns only. Trace IDs are observability-only and MUST NOT be used for idempotency, permission, conversation identity, or fencing.
+At turn admission, Core binds an immutable `ExecutionSnapshot`: Core config revision; `identity_revision`, source hash, and load time; grant revision; model binding/provider instance/generation/provider-applied config revision; presentation binding/provider instance/generation/authority validity/provider-applied config revision; and `TurnOrigin`. It MUST NOT pretend a single `config_revision` proves all distributed providers applied the same configuration. A reload changes later turns only. Trace IDs are observability-only and MUST NOT be used for idempotency, permission, conversation identity, or fencing.
 
 ## 6. Runtime and capability model
 
-Runtime identity is `{runtime_type, runtime_instance_id, runtime_generation, node_id}`. A registration lease contains `lease_id`, expiry, instance ID, and generation. A higher generation fences older instances: if Voice generation 6 is active, generation 5 is `STALE_GENERATION/FENCED` and MUST NOT regain active binding after reconnect.
+Runtime identity is `{runtime_type, runtime_slot_id, runtime_instance_id, runtime_generation, node_id}`. `runtime_slot_id` is a stable logical lineage, e.g. `voice.mac-main` or `voice.stackchan`; a generation is monotonic and fencing-valid only within that slot. The management plane's durable generation authority allocates generations and MUST survive Supervisor restart. A registration lease contains `lease_id`, expiry, slot, instance ID, and generation. If `voice.mac-main` generation 6 is active, its generation 5 is `STALE_GENERATION/FENCED` and MUST NOT regain binding; it does not fence `voice.stackchan` generation 2.
 
 Process state (`STARTING`, `RUNNING`, `STOPPING`, `EXITED`), service state (`NOT_READY`, `SERVING`, `DEGRADED`), and capability state (`AVAILABLE`, `DEGRADED`, `UNAVAILABLE`, `INCOMPATIBLE`) are independent. A RUNNING Voice process may have `listen` AVAILABLE, `speak` UNAVAILABLE, and `interrupt` AVAILABLE.
 
@@ -84,10 +85,10 @@ Every capability has distinct concepts:
 - **Descriptor**: typed static features, e.g. TTS streaming/emotion/intensity/viseme/languages/sample rates; not an unbounded metadata bag.
 - **Offer**: capability ID, contract version, provider instance/generation, node, scope, descriptor, dynamic state, lease, and endpoint.
 - **Selection**: a policy decision that an eligible offer fits a request.
-- **CapabilityBinding**: a durable/scoped choice `{binding_id, binding_revision, scope/conversation?, capability_id, provider_instance_id, provider_generation, endpoint}`.
+- **CapabilityBinding**: a durable/scoped choice `{binding_id, binding_revision, scope/conversation?, capability_id, provider_instance_id, provider_generation, endpoint, authority_validity, lease_ref}`.
 - **Authorization**: a grant permits a caller/delegation to use a capability/resource scope.
 
-Availability does not grant access; authorization does not choose a provider; selection does not create a binding; a binding does not prove current availability. Sensitive providers MUST revalidate `CallerIdentity` and `DelegatedAuthority` at their boundary. Caller-supplied grants are invalid. This RFC does not select mTLS, JWT, macaroon, local token, or UDS credentials, but a verifiable caller and non-self-asserted authority are mandatory.
+Availability does not grant access; authorization does not choose a provider; selection does not create a binding; a binding does not prove current availability. Authorization explicitly distinguishes Actor (calling runtime), Subject (represented logical user), Origin (authenticated interaction context), Audience (delegated provider/runtime), Scope (capability/resource), Expiry, and GrantRevision. Sensitive providers MUST revalidate these claims and `DelegatedAuthority` at their boundary. Caller-supplied grants are invalid. This RFC does not select mTLS, JWT, macaroon, local token, or UDS credentials, but a verifiable caller and non-self-asserted authority are mandatory.
 
 Bindings used by a presenting response are frozen to the turn snapshot. Replacement is permitted on a subsequent turn. Mid-response switching is prohibited unless the capability contract explicitly declares seamless handoff; otherwise the current presentation ends failed/interrupted with its real extent.
 
@@ -97,7 +98,7 @@ Bindings used by a presenting response are frozen to the turn snapshot. Replacem
 
 Core talks to a `ModelPort` and an `OllamaModelAdapter` initially. A forwarding-only Model Gateway MUST NOT be introduced. A future gateway requires a real need such as multi-model routing, fallback, remote GPU, load balancing, or rate limiting. Replacing a model MUST NOT alter domain logic; provider/prompt adapters and capability negotiation absorb model differences. Persona regression tests are required later because identity independence does not ensure behavior equivalence.
 
-Provider `ModelToken`, `ModelDelta`, tool grammar, reasoning, provider JSON, and structured fragments are internal. Core alone turns these into semantic `AgentResponseStarted`, `AgentOutputSegment`, `AgentResponseCommitted`, `AgentResponseCompleted`, `AgentResponseAborted`, `ToolCallRequested`, and `ToolCallCompleted`. Semantic output does not contain chain-of-thought or raw provider protocol.
+Provider `ModelToken`, `ModelDelta`, tool grammar, reasoning, provider JSON, and structured fragments are internal. Core writes an append-only ConversationLedger and exposes `AgentResponseStarted`, immutable `AgentOutputSegmentCommitted`, `AgentResponseFinalized`, and `AgentResponseAborted` on the presentation-facing semantic stream. A semantic segment MUST commit before presentation; response finalization closes the assembly but does not delay realtime presentation of earlier committed segments. Tool calls use a separate privileged Core↔Tool Runtime control lane and are not public Surface/Voice semantic output. Semantic output does not contain chain-of-thought, raw provider protocol, or tool payload.
 
 STT hypotheses are revisioned replacements, not append-only text: `{hypothesis_id, revision, text, stability?, is_final}`. Higher revision supersedes the prior hypothesis. Core begins a normal conversational turn only on final input commit, unless a later explicit speculative mode changes this contract.
 
@@ -105,7 +106,7 @@ Each stream declares its own policy: camera is latest-wins; STT partials superse
 
 ## 8. Configuration, versions, privacy, and recovery
 
-Configuration remains split into `core.toml`, `model.toml`, `memory.toml`, `voice.toml`, `vision.toml`, `surfaces.toml`, and `supervisor.toml`. A `ConfigSnapshot` has revision, hash, and creation time. Apply is: load all → validate all → prepare plan → compatibility/readiness checks → commit active revision → runtimes apply → report applied revision. `prepared`, `active`, `applied`, and `failed apply` are distinct. This is not a distributed transaction: partial application MUST be visible, and a runtime MUST report its applied revision rather than imply that Core=N, Voice=N-1, Model=N+1 is coherent. Fields are dynamic, restart-required, immutable, or secret. Rollback/abort refers to the control-plane revision and does not undo side effects already performed under a valid prior revision.
+Configuration remains split into `core.toml`, `model.toml`, `memory.toml`, `voice.toml`, `vision.toml`, `surfaces.toml`, and `supervisor.toml`. A `ConfigSnapshot` has revision, hash, and creation time. Apply is: load all → validate all → prepare plan → compatibility/readiness checks → commit active revision → runtimes apply → report applied revision. `prepared`, `active`, `applied`, and `failed apply` are distinct. This is not a distributed transaction: partial application MUST be visible, and a runtime MUST report its applied revision rather than imply Core=N, Voice=N-1, Model=N+1 is coherent. Mixed revisions MAY exist, but admission MUST verify every selected required binding is contract/config compatible with the Core snapshot; incompatible turns are rejected or capability-degraded. Fields are dynamic, restart-required, immutable, or secret. Rollback/abort refers to the control-plane revision and does not undo side effects already performed under a valid prior revision.
 
 `runtime_version`, `protocol_version`, `schema_version`, and `capability_version` are separate. Example: Memory runtime 2.8.1, wire protocol 5.2, capability `memory.read@5`. Future protobuf follows: never reuse numbers; reserve removed fields; enum zero is `UNSPECIFIED`; additive compatible changes stay major; semantic breaking changes bump major; unknown security-critical enums fail closed.
 
@@ -113,22 +114,22 @@ Logs/metrics/traces MUST NOT contain raw user content, raw memory, raw audio, pr
 
 ## 9. R1 conformance and roadmap
 
-R1 supplies contracts plus a Contract Conformance Test Kit, not merely Python interfaces. Profiles are Core, Memory, Voice, Surface, Capability Provider, and Runtime Lifecycle. Memory tests include compatibility, deadlines, cancellation, duplicate operation IDs, idempotent/uncertain writes, invalid principal, stale generation, restart, malformed input, unknown additions, privacy. Voice adds interruption, STT replacement, races, late completion, TTS crash, bounded backpressure, ordering, partial presentation, withdrawal, session isolation. Surface adds duplicate/partial/uncertain delivery, receipts, invalid principal, denial, external-thread isolation, and no brain-policy ownership.
+R1 supplies contracts plus a Contract Conformance Test Kit, not merely Python interfaces. Profiles are Core, Memory, Voice, Surface, Capability Provider, and Runtime Lifecycle. Tests cover segment commit before presentation; draft-presentation rejection; partial-response projection; duplicate/out-of-order receipts; distinct content/presentation observations; slot-scoped durable generation; Supervisor outage/lease expiry; Actor/Subject/Origin/Audience/Scope authorization; presentation-operation idempotency; tool payload isolation; and compatible/incompatible mixed-revision admission, in addition to compatibility, cancellation, idempotency, privacy, restart, malformed input, and import-boundary tests.
 
 Roadmap: R0 architecture freeze; R0.5 contracts gate; R1 contract foundation/test kit; R2 Core foundation with fakes and state-store port; R3 Memory V5 adapter; R4 Native Voice PTT direct to Core; R5 streaming voice; R6 WeChat Core shadow; R7 WeChat bridge with OpenClaw narrowed to a Surface adapter; R8 Vision; R9 Embodiment; R10 distributed nodes.
 
 ## 10. ACCEPTED DECISIONS
 
 - Supervisor is management-only and not a normal-turn hop.
-- Generated, committed, presented, and persisted facts are separate; the companion RFC is authoritative for their transitions.
+- Generated, segment-committed, response-finalized, presented, and persisted facts are separate; no draft can be presented.
 - Core is agent authority; Memory/Voice/Embodiment/Surfaces own their stated domains.
-- Capability descriptor/offer/state/selection/binding/authorization and runtime instance/generation/lease are separately modeled.
+- Capability descriptor/offer/state/selection/binding/authorization and runtime slot/instance/generation/lease are separately modeled.
 - Embodiment is a dedicated runtime; body animation is a presentation side effect and cannot roll back a committed response.
 - Existing runtimes are not being migrated in this phase.
 
 ## 11. REQUESTED CHANGES RESOLVED
 
-This revision changes “one owner” to one **authoritative writer**, introduces principal resolution, separated IDs and snapshots, explicit runtime fencing, provider-side authorization, bounded semantic streams, STT replacement, configuration-apply visibility, a dedicated Embodiment Runtime, and package-level optionality. It corrects “model changes are config-only” to domain-logic independence with adapter/capability and regression-test work.
+This revision changes “one owner” to one **authoritative writer**, introduces principal resolution, separated IDs and snapshots, explicit runtime fencing, provider-side authorization, bounded semantic streams, STT replacement, configuration-apply visibility, a dedicated Embodiment Runtime, and package-level optionality. The second gate adds a ConversationLedger, segment-before-presentation commit, ContextProjection, append-only Memory/presentation observations, scoped durable generations, outage/lease separation, explicit authorization claims, PresentationOperation IDs, tool-lane isolation, and ExecutionSnapshot compatibility. It corrects “model changes are config-only” to domain-logic independence with adapter/capability and regression-test work.
 
 ## 12. OPEN QUESTIONS
 
@@ -140,4 +141,4 @@ No contracts package, protobuf, gRPC, Core, Supervisor, adapter, registry, tool 
 
 ## 14. BLOCKERS BEFORE R1
 
-None in this document once the companion execution-semantics RFC is accepted. R1 MUST NOT start until review accepts principal/conversation/turn IDs; generated/committed/presentation semantics; cancellation/idempotency/uncertainty; memory boundary; runtime fencing; capability distinctions and provider enforcement; restart/snapshots; and version taxonomy.
+**NONE — pending external architecture review acceptance.** R1 MUST NOT start until external review accepts both RFCs; this status does not authorize implementation.
