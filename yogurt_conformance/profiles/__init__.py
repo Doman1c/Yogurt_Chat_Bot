@@ -1,3 +1,7 @@
+from .capability_provider import run_capability_provider_conformance
+from .core_public import run_core_public_conformance
+from .memory import run_memory_conformance
 from .operation_provider import run_operation_provider_conformance
 from .runtime_lifecycle import run_generation_authority_conformance, run_runtime_lifecycle_conformance
 from .surface import run_surface_conformance
+from .voice import run_voice_conformance

@@ -1,8 +1,6 @@
-from typing import Iterable
-
-from yogurt_contracts.foundation.identifiers import OperationId
-from yogurt_contracts.presentation.projection import PresentationProjection, project_presentation
+from yogurt_conformance.protocols.adapters import SurfaceAdapterProtocol
+from ._scenarios import assert_scenarios
 
 
-def run_surface_conformance(operation_id: OperationId, facts: Iterable[object]) -> PresentationProjection:
-    return project_presentation(operation_id, facts)
+def run_surface_conformance(adapter: SurfaceAdapterProtocol) -> None:
+    assert_scenarios(adapter, ("accepted_not_delivered", "delivered_not_presented", "presented_not_read", "duplicate_receipt_idempotent", "conflicting_receipt_rejected", "progress_monotonic", "terminal_preserves_extent"))

@@ -1,2 +1,3 @@
 from .adapters import FakeOperationProvider, FakeSurfaceAdapter
 from .generation_authority import FakeGenerationAuthority, GenerationAuthorityHarness, ResettingGenerationAuthorityFake
+from .conformance_adapters import BadScenarioAdapter, GoodScenarioAdapter
