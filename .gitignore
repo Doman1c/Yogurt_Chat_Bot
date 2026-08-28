@@ -26,6 +26,9 @@ sessions/
 *.sqlite3
 logs/
 runtime/
+!yogurt_contracts/
+!yogurt_contracts/runtime/
+!yogurt_contracts/runtime/*.py
 *.log
 
 # Local sticker assets and generated metadata

@@ -28,3 +28,9 @@ R1 implements normative domain types, a strict Pydantic Python reference binding
 ## Durability gate
 
 Semantic commit and `DurabilityLevel` are independent. Real presentation, `wechat.send`, destructive/filesystem writes, robot motion, and durable Memory writes require the configured crash-recovery-safe durability before dispatch. R1 defines requirement/achieved-level contracts and validators only; it implements no database, fsync, or outbox backend.
+
+## Implemented R1 surface
+
+The public Python binding contains typed IDs, time/version/error/idempotency/durability primitives; identity, conversation input/fingerprinting/lifecycle, logical responses and attempts, logical operations and attempts, cancellation/outcome traits, presentation facts/projections, generic capability offers/bindings, runtime identity/fencing/lease, execution snapshots, Memory observations, and stream semantics. `yogurt_core_domain` separately holds internal ledger facts. `yogurt_conformance` contains test-only profiles, fakes, assertions, property tests, Python-binding serialization fixtures, and static identifier negative checks.
+
+The CI job installs `requirements-contracts-dev.txt` and runs isolated contract, conformance, architecture-allowlist, and strict mypy checks. These checks prove Python-binding behavior only; they do not test or promise a future gRPC/JSON/protobuf ABI.

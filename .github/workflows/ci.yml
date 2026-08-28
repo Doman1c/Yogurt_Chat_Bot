@@ -33,6 +33,12 @@ jobs:
         run: |
           python -m pip install pytest numpy soundfile
           python -m pip install -r voice_runtime/requirements.txt
+          python -m pip install -r requirements-contracts-dev.txt
+
+      - name: Run R1 contract foundation and conformance tests
+        run: |
+          python -m pytest -q tests/contracts tests/conformance tests/architecture
+          python -m mypy --strict yogurt_contracts yogurt_core_domain yogurt_conformance
 
       - name: Run P10 Mouth and VoiceSession tests
         run: |

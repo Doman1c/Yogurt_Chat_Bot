@@ -33,3 +33,12 @@ def test_core_domain_imports_use_allowlist():
 def test_public_contract_does_not_depend_on_internal_core_domain():
     imports = [name for _, name in _imports("yogurt_contracts")]
     assert "yogurt_core_domain" not in imports
+
+
+def test_public_contract_and_conformance_tests_do_not_import_internal_ledger():
+    forbidden = []
+    for test_root in (ROOT / "tests" / "contracts", ROOT / "tests" / "conformance"):
+        for path in test_root.rglob("*.py"):
+            if "yogurt_core_domain" in path.read_text(encoding="utf-8"):
+                forbidden.append(path)
+    assert not forbidden, forbidden
