@@ -6,6 +6,7 @@ from typing import Dict, Optional, Tuple
 from yogurt_contracts.capability.framework import BaseCapabilityDescriptor, is_contract_compatible
 from yogurt_contracts.capability.offer import CapabilityOffer
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
+from yogurt_contracts.conversation.refs import ConversationRef
 from yogurt_contracts.foundation.identifiers import (
     BindingId, CapabilityId, GenerationAuthorityId, NodeId, OperationAttemptId,
     OperationId, ReceiptId, ResponseId, RuntimeInstanceId, RuntimeSlotId, SegmentId, TurnId,
@@ -21,6 +22,10 @@ from yogurt_contracts.presentation.facts import PresentationTerminalOutcome
 from yogurt_contracts.presentation.projection import PresentationProjection
 from yogurt_contracts.runtime.generation import GenerationAssignment
 from yogurt_contracts.runtime.identity import RuntimeIdentity
+from yogurt_contracts.execution.authorization_snapshot import OperationAuthorizationSnapshot
+from yogurt_contracts.foundation.durability import CorePersistenceMode, DurabilityLevel
+from yogurt_contracts.operations.intent import OperationIntentCommitted
+from yogurt_contracts.operations.validation import OperationDispatchValidationDecision, validate_operation_dispatch
 from yogurt_conformance.protocols.adapters import CoreTurnAdmission, OperationDispatchState, PlaybackState
 
 
@@ -29,16 +34,18 @@ NOW = UtcInstant(value=datetime(2026, 1, 1, tzinfo=timezone.utc))
 
 class GoodCorePublicFake:
     def __init__(self) -> None:
-        self._turns: Dict[TurnId, Tuple[TurnFingerprint, str, Optional[ResponseId], bool, bool]] = {}
+        self._turns: Dict[Tuple[ConversationRef, TurnId], Tuple[TurnFingerprint, str, Optional[ResponseId], bool, bool]] = {}
+        self._segments: Dict[Tuple[str, SegmentId], str] = {}
         self._next = 0
 
-    def submit_turn(self, turn_id: TurnId, fingerprint: TurnFingerprint) -> CoreTurnAdmission:
-        record = self._turns.get(turn_id)
+    def submit_turn(self, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint) -> CoreTurnAdmission:
+        key = (conversation_ref, turn_id)
+        record = self._turns.get(key)
         if record is not None:
             return CoreTurnAdmission(record[1], conflict=record[0] != fingerprint)
         self._next += 1
         logical = "turn-" + str(self._next)
-        self._turns[turn_id] = (fingerprint, logical, None, False, False)
+        self._turns[key] = (fingerprint, logical, None, False, False)
         return CoreTurnAdmission(logical)
 
     def start_response(self, logical_turn: str) -> Optional[ResponseId]:
@@ -51,8 +58,13 @@ class GoodCorePublicFake:
         return None
 
     def append_segment(self, logical_turn: str, response_id: ResponseId, segment_id: SegmentId, text: str) -> bool:
-        del segment_id, text
-        return any(record[1] == logical_turn and record[2] == response_id and not record[3] and not record[4] for record in self._turns.values())
+        if not any(record[1] == logical_turn and record[2] == response_id and not record[3] and not record[4] for record in self._turns.values()):
+            return False
+        prior = self._segments.get((logical_turn, segment_id))
+        if prior is not None:
+            return prior == text
+        self._segments[(logical_turn, segment_id)] = text
+        return True
 
     def finalize_response(self, logical_turn: str, response_id: ResponseId) -> bool:
         for turn_id, record in self._turns.items():
@@ -74,12 +86,20 @@ class GoodCorePublicFake:
 
 
 class DuplicateTurnExecutionFake(GoodCorePublicFake):
-    def submit_turn(self, turn_id: TurnId, fingerprint: TurnFingerprint) -> CoreTurnAdmission:
-        admission = super().submit_turn(turn_id, fingerprint)
+    def submit_turn(self, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint) -> CoreTurnAdmission:
+        admission = super().submit_turn(conversation_ref, turn_id, fingerprint)
         if not admission.conflict:
             self._next += 1
             return CoreTurnAdmission("duplicate-" + str(self._next))
         return admission
+
+
+class RewriteCommittedSegmentFake(GoodCorePublicFake):
+    def append_segment(self, logical_turn: str, response_id: ResponseId, segment_id: SegmentId, text: str) -> bool:
+        if not any(record[1] == logical_turn and record[2] == response_id and not record[3] and not record[4] for record in self._turns.values()):
+            return False
+        self._segments[(logical_turn, segment_id)] = text
+        return True
 
 
 class GoodMemoryFake:
@@ -104,6 +124,14 @@ class RegressingExposureFake(GoodMemoryFake):
         projection = super().project_segment(committed, observations)
         if projection.text_extent is not None:
             return projection.model_copy(update={"text_extent": TextPresentationExtent(segment_id=committed.segment_id, end_text_offset=0)})
+        return projection
+
+
+class CrossSegmentExposureFake(GoodMemoryFake):
+    def project_segment(self, committed: CommittedContentObservation, observations: Tuple[PresentationObservation, ...]) -> MemoryExposureProjection:
+        projection = super().project_segment(committed, observations)
+        if observations:
+            return projection.model_copy(update={"highest_evidence": observations[0].evidence_level, "is_partially_exposed": True})
         return projection
 
 
@@ -153,26 +181,50 @@ class DraftSpeakingVoiceFake(GoodVoiceFake):
 
 
 class GoodOperationProviderFake:
-    def __init__(self) -> None: self._states: Dict[OperationId, Tuple[str, OperationDispatchState, bool]] = {}
-    def commit_intent(self, operation_id: OperationId, fingerprint: str, dispatchable: bool = True) -> OperationDispatchState:
+    def __init__(self) -> None: self._states: Dict[OperationId, Tuple[OperationIntentCommitted, OperationDispatchState]] = {}
+    def commit_intent(self, intent: OperationIntentCommitted) -> OperationDispatchState:
+        operation_id = intent.operation.operation_id
         old = self._states.get(operation_id)
         if old is not None:
-            if old[0] != fingerprint: raise ValueError("operation fingerprint conflict")
+            if old[0] != intent: raise ValueError("operation fingerprint conflict")
             return old[1]
-        state = OperationDispatchState(operation_id); self._states[operation_id] = (fingerprint, state, dispatchable); return state
-    def dispatch(self, operation_id: OperationId, authorization_valid: bool = True, generation_current: bool = True) -> OperationDispatchState:
-        fingerprint, old, dispatchable = self._states[operation_id]
-        if not dispatchable or not authorization_valid or not generation_current: return old
+        state = OperationDispatchState(operation_id); self._states[operation_id] = (intent, state); return state
+    def dispatch(self, intent: OperationIntentCommitted, authorization: OperationAuthorizationSnapshot, runtime: RuntimeIdentity, assignment: GenerationAssignment, authority: GenerationAuthorityId, durability: DurabilityLevel, mode: CorePersistenceMode) -> OperationDispatchState:
+        operation_id = intent.operation.operation_id
+        _, old = self._states[operation_id]
+        result = validate_operation_dispatch(intent, authorization, runtime, assignment, authority, NOW, durability, mode)
+        if result.decision != OperationDispatchValidationDecision.ALLOW: return old
         attempt = OperationAttemptId(value="attempt-" + str(len(old.attempts) + 1))
-        state = OperationDispatchState(operation_id, old.attempts + (attempt,), max(old.side_effect_count, 1), old.outcome_unknown); self._states[operation_id] = (fingerprint, state, dispatchable); return state
+        state = OperationDispatchState(operation_id, old.attempts + (attempt,), max(old.side_effect_count, 1), old.outcome_unknown); self._states[operation_id] = (intent, state); return state
     def unknown_outcome(self, operation_id: OperationId) -> OperationDispatchState:
-        fingerprint, old, dispatchable = self._states[operation_id]; state = OperationDispatchState(operation_id, old.attempts, old.side_effect_count, True); self._states[operation_id] = (fingerprint, state, dispatchable); return state
+        intent, old = self._states[operation_id]; state = OperationDispatchState(operation_id, old.attempts, old.side_effect_count, True); self._states[operation_id] = (intent, state); return state
 
 
 class DispatchWithoutIntentFake(GoodOperationProviderFake):
-    def dispatch(self, operation_id: OperationId, authorization_valid: bool = True, generation_current: bool = True) -> OperationDispatchState:
-        if operation_id not in self._states: self._states[operation_id] = ("forged", OperationDispatchState(operation_id), True)
-        return super().dispatch(operation_id, authorization_valid, generation_current)
+    def dispatch(self, intent: OperationIntentCommitted, authorization: OperationAuthorizationSnapshot, runtime: RuntimeIdentity, assignment: GenerationAssignment, authority: GenerationAuthorityId, durability: DurabilityLevel, mode: CorePersistenceMode) -> OperationDispatchState:
+        operation_id = intent.operation.operation_id
+        if operation_id not in self._states: self._states[operation_id] = (intent, OperationDispatchState(operation_id))
+        return super().dispatch(intent, authorization, runtime, assignment, authority, durability, mode)
+
+
+class DuplicateSideEffectFake(GoodOperationProviderFake):
+    def dispatch(self, intent: OperationIntentCommitted, authorization: OperationAuthorizationSnapshot, runtime: RuntimeIdentity, assignment: GenerationAssignment, authority: GenerationAuthorityId, durability: DurabilityLevel, mode: CorePersistenceMode) -> OperationDispatchState:
+        state = super().dispatch(intent, authorization, runtime, assignment, authority, durability, mode)
+        if state.attempts:
+            state = OperationDispatchState(state.operation_id, state.attempts, len(state.attempts), state.outcome_unknown)
+            self._states[state.operation_id] = (intent, state)
+        return state
+
+
+class ScopeIgnoringProviderFake(GoodOperationProviderFake):
+    def dispatch(self, intent: OperationIntentCommitted, authorization: OperationAuthorizationSnapshot, runtime: RuntimeIdentity, assignment: GenerationAssignment, authority: GenerationAuthorityId, durability: DurabilityLevel, mode: CorePersistenceMode) -> OperationDispatchState:
+        return super().dispatch(intent, intent.authorization_snapshot, runtime, assignment, authority, durability, mode)
+
+
+class StaleGenerationProviderFake(GoodOperationProviderFake):
+    def dispatch(self, intent: OperationIntentCommitted, authorization: OperationAuthorizationSnapshot, runtime: RuntimeIdentity, assignment: GenerationAssignment, authority: GenerationAuthorityId, durability: DurabilityLevel, mode: CorePersistenceMode) -> OperationDispatchState:
+        current = assignment.model_copy(update={"generation": runtime.runtime_generation})
+        return super().dispatch(intent, authorization, runtime, current, authority, durability, mode)
 
 
 class GoodCapabilityProviderFake:

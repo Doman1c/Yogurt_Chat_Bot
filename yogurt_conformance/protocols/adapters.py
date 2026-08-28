@@ -10,6 +10,7 @@ from typing import Optional, Protocol, Tuple
 from yogurt_contracts.capability.framework import BaseCapabilityDescriptor
 from yogurt_contracts.capability.offer import CapabilityOffer
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
+from yogurt_contracts.conversation.refs import ConversationRef
 from yogurt_contracts.foundation.identifiers import OperationAttemptId, OperationId, ResponseId, SegmentId, TurnId
 from yogurt_contracts.memory.deduplication import MemoryObservationDedupDecision
 from yogurt_contracts.memory.observations import CommittedContentObservation, PresentationObservation
@@ -18,6 +19,10 @@ from yogurt_contracts.presentation.extent import VoicePresentationExtent
 from yogurt_contracts.presentation.projection import PresentationProjection
 from yogurt_contracts.runtime.generation import GenerationAssignment
 from yogurt_contracts.runtime.identity import RuntimeIdentity
+from yogurt_contracts.execution.authorization_snapshot import OperationAuthorizationSnapshot
+from yogurt_contracts.foundation.durability import CorePersistenceMode, DurabilityLevel
+from yogurt_contracts.foundation.identifiers import GenerationAuthorityId
+from yogurt_contracts.operations.intent import OperationIntentCommitted
 
 
 @dataclass(frozen=True)
@@ -44,7 +49,7 @@ class OperationDispatchState:
 
 
 class CorePublicAdapterProtocol(Protocol):
-    def submit_turn(self, turn_id: TurnId, fingerprint: TurnFingerprint) -> CoreTurnAdmission: ...
+    def submit_turn(self, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint) -> CoreTurnAdmission: ...
     def start_response(self, logical_turn: str) -> Optional[ResponseId]: ...
     def append_segment(self, logical_turn: str, response_id: ResponseId, segment_id: SegmentId, text: str) -> bool: ...
     def finalize_response(self, logical_turn: str, response_id: ResponseId) -> bool: ...
@@ -77,8 +82,8 @@ class VoiceAdapterProtocol(Protocol):
 
 
 class OperationProviderAdapterProtocol(Protocol):
-    def commit_intent(self, operation_id: OperationId, fingerprint: str, dispatchable: bool = True) -> OperationDispatchState: ...
-    def dispatch(self, operation_id: OperationId, authorization_valid: bool = True, generation_current: bool = True) -> OperationDispatchState: ...
+    def commit_intent(self, intent: OperationIntentCommitted) -> OperationDispatchState: ...
+    def dispatch(self, intent: OperationIntentCommitted, authorization: OperationAuthorizationSnapshot, runtime: RuntimeIdentity, assignment: GenerationAssignment, authority: GenerationAuthorityId, durability: DurabilityLevel, mode: CorePersistenceMode) -> OperationDispatchState: ...
     def unknown_outcome(self, operation_id: OperationId) -> OperationDispatchState: ...
 
 

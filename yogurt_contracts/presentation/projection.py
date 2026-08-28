@@ -12,6 +12,8 @@ class PresentationProjection(FrozenContract):
     delivered_receipts: Tuple[ReceiptId, ...] = ()
     max_text_extent: Optional[TextPresentationExtent] = None
     max_voice_extent: Optional[VoicePresentationExtent] = None
+    text_extents: Tuple[TextPresentationExtent, ...] = ()
+    voice_extents: Tuple[VoicePresentationExtent, ...] = ()
     messaging_extent: Optional[MessagingPresentationExtent] = None
     terminal_outcome: Optional[PresentationTerminalOutcome] = None
 
@@ -23,7 +25,9 @@ def project_presentation(
 ) -> PresentationProjection:
     accepted: List[ReceiptId] = []
     delivered: List[ReceiptId] = []
-    text_extent = voice_extent = messaging_extent = None
+    text_extents: dict[object, TextPresentationExtent] = {}
+    voice_extents: dict[object, VoicePresentationExtent] = {}
+    messaging_extent = None
     terminal = None
     seen: dict[ReceiptId, object] = {}
     for fact in facts:
@@ -42,18 +46,19 @@ def project_presentation(
             extent = fact.extent
             if isinstance(extent, TextPresentationExtent):
                 content = (segment_contents or {}).get(extent.segment_id)
+                current = text_extents.get(extent.segment_id)
                 if content is not None:
-                    text_extent = merge_text_extent(content, text_extent, extent)
-                elif text_extent is None or extent.offset_unit == text_extent.offset_unit and extent.end_text_offset > text_extent.end_text_offset:
-                    text_extent = extent
-                elif text_extent.offset_unit == TextOffsetUnit.UTF8_BYTE and extent.offset_unit == TextOffsetUnit.UNICODE_CODEPOINT:
+                    text_extents[extent.segment_id] = merge_text_extent(content, current, extent)
+                elif current is None or extent.offset_unit == current.offset_unit and extent.end_text_offset > current.end_text_offset:
+                    text_extents[extent.segment_id] = extent
+                elif current.offset_unit == TextOffsetUnit.UTF8_BYTE and extent.offset_unit == TextOffsetUnit.UNICODE_CODEPOINT:
                     # Without associated immutable segment content the units are
                     # incomparable.  This deterministic canonicalization avoids
                     # order-sensitive raw integer comparisons; callers that need
                     # semantic progress must supply segment_contents.
-                    text_extent = extent
+                    text_extents[extent.segment_id] = extent
             elif isinstance(extent, VoicePresentationExtent):
-                voice_extent = merge_voice_extent(voice_extent, extent)
+                voice_extents[extent.segment_id] = merge_voice_extent(voice_extents.get(extent.segment_id), extent)
             elif isinstance(extent, MessagingPresentationExtent):
                 if messaging_extent is None:
                     messaging_extent = extent
@@ -63,4 +68,18 @@ def project_presentation(
             if terminal is not None and terminal != fact.outcome:
                 raise ValueError("conflicting presentation terminal facts")
             terminal = fact.outcome
-    return PresentationProjection(operation_id=operation_id, accepted_receipts=tuple(accepted), delivered_receipts=tuple(delivered), max_text_extent=text_extent, max_voice_extent=voice_extent, messaging_extent=messaging_extent, terminal_outcome=terminal)
+    ordered_text = tuple(sorted(text_extents.values(), key=lambda extent: extent.segment_id.value))
+    ordered_voice = tuple(sorted(voice_extents.values(), key=lambda extent: extent.segment_id.value))
+    return PresentationProjection(
+        operation_id=operation_id,
+        accepted_receipts=tuple(accepted),
+        delivered_receipts=tuple(delivered),
+        # Legacy single-segment convenience fields deliberately do not choose an
+        # arbitrary cross-segment maximum.
+        max_text_extent=ordered_text[0] if len(ordered_text) == 1 else None,
+        max_voice_extent=ordered_voice[0] if len(ordered_voice) == 1 else None,
+        text_extents=ordered_text,
+        voice_extents=ordered_voice,
+        messaging_extent=messaging_extent,
+        terminal_outcome=terminal,
+    )

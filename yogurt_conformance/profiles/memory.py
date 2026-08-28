@@ -24,12 +24,21 @@ def run_memory_conformance(adapter: MemoryAdapterProtocol) -> None:
     def observed(name: str, extent: PresentationExtent, segment_id: SegmentId | None = None) -> PresentationObservation:
         return PresentationObservation(operation_id=OperationId(value="observation-" + name), conversation_ref=conversation, turn_ref=turn, response_id=committed.response_id, presentation_operation_id=OperationId(value="present"), receipt_id=ReceiptId(value="receipt-" + name), evidence_level=PresentationEvidenceLevel.PRESENTED_TO_USER, segment_id=segment_id or committed.segment_id, extent=extent, observed_at=now)
     byte_partial = observed("byte", TextPresentationExtent(segment_id=committed.segment_id, end_text_offset=3, offset_unit=TextOffsetUnit.UTF8_BYTE))
+    delivered = PresentationObservation(operation_id=OperationId(value="delivery"), conversation_ref=conversation, turn_ref=turn, response_id=committed.response_id, presentation_operation_id=OperationId(value="present"), receipt_id=ReceiptId(value="delivery-receipt"), evidence_level=PresentationEvidenceLevel.DELIVERED, segment_id=committed.segment_id, observed_at=now)
+    delivery_projection = adapter.project_segment(committed, (delivered,))
+    assert delivery_projection.highest_evidence == PresentationEvidenceLevel.DELIVERED
+    assert not delivery_projection.is_partially_exposed and not delivery_projection.is_fully_exposed
     codepoint_full = observed("codepoint", TextPresentationExtent(segment_id=committed.segment_id, end_text_offset=2))
-    assert adapter.project_segment(committed, (byte_partial, codepoint_full)).is_fully_exposed
-    assert adapter.project_segment(committed, (codepoint_full, byte_partial)).is_fully_exposed
+    forward = adapter.project_segment(committed, (byte_partial, codepoint_full))
+    reverse = adapter.project_segment(committed, (codepoint_full, byte_partial))
+    assert forward.is_fully_exposed and reverse.is_fully_exposed
+    assert forward.text_extent is not None and reverse.text_extent is not None
+    assert forward.text_extent.end_text_offset == reverse.text_extent.end_text_offset == 2
     voice_a = observed("voice-a", VoicePresentationExtent(segment_id=committed.segment_id, played_duration_ms=1000, end_text_offset=2))
     voice_b = observed("voice-b", VoicePresentationExtent(segment_id=committed.segment_id, played_duration_ms=2000, end_text_offset=1))
     voice = adapter.project_segment(committed, (voice_a, voice_b)).voice_extent
     assert voice is not None and voice.played_duration_ms == 2000 and voice.end_text_offset == 2
     other = observed("other", TextPresentationExtent(segment_id=SegmentId(value="other"), end_text_offset=2), SegmentId(value="other"))
-    assert adapter.project_segment(committed, (other,)).highest_evidence is None
+    cross_segment_projection = adapter.project_segment(committed, (other,))
+    assert cross_segment_projection.highest_evidence is None
+    assert not cross_segment_projection.is_partially_exposed and not cross_segment_projection.is_fully_exposed

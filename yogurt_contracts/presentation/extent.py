@@ -90,13 +90,25 @@ def merge_text_extent(
     current: Optional[TextPresentationExtent],
     candidate: TextPresentationExtent,
 ) -> TextPresentationExtent:
-    """Keep the extent with the greatest semantic, rather than raw, progress."""
+    """Keep semantic progress with a deterministic canonical tie-breaker."""
 
     if current is None:
         return candidate
-    if normalize_text_extent_progress(content, candidate) > normalize_text_extent_progress(content, current):
+    candidate_progress = normalize_text_extent_progress(content, candidate)
+    current_progress = normalize_text_extent_progress(content, current)
+    if candidate_progress > current_progress:
         return candidate
-    return current
+    if candidate_progress < current_progress:
+        return current
+    # Equal semantic progress must not make a projection order-dependent.  The
+    # Unicode representation is canonical, then the smaller raw offset.
+    def canonical_key(extent: TextPresentationExtent) -> tuple[int, int, str]:
+        return (
+            0 if extent.offset_unit == TextOffsetUnit.UNICODE_CODEPOINT else 1,
+            extent.end_text_offset,
+            extent.segment_id.value,
+        )
+    return min(current, candidate, key=canonical_key)
 
 
 def merge_voice_extent(
