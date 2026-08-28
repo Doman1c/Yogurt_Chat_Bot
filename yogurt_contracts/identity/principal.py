@@ -1,6 +1,6 @@
 from typing import Optional
 
-from ..foundation.identifiers import ExternalPrincipalRef, RuntimeInstanceId, UserId
+from ..foundation.identifiers import ExternalPrincipalRef, PersonaId, RuntimeInstanceId, UserId
 from ..foundation.model import FrozenContract
 
 
@@ -19,5 +19,5 @@ class LogicalUser(FrozenContract):
 
 
 class PersonaRef(FrozenContract):
-    persona_id: str
+    persona_id: PersonaId
     revision: Optional[str] = None

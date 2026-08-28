@@ -9,7 +9,7 @@ from yogurt_contracts.conversation.refs import ConversationRef, TurnOrigin, Turn
 from yogurt_contracts.foundation.identifiers import BindingId, CapabilityId, ConversationId, ExternalPrincipalRef, IdentityResolutionRef, InputId, OperationId, PersonaId, ReceiptId, ResponseId, RuntimeInstanceId, RuntimeSlotId, SegmentId, TurnId, UserId
 from yogurt_contracts.foundation.time import Deadline, UtcInstant
 from yogurt_contracts.presentation.extent import VoicePresentationExtent
-from yogurt_contracts.presentation.facts import PresentationProgressObserved, PresentationTerminal
+from yogurt_contracts.presentation.facts import PresentationProgressObserved, PresentationTerminal, PresentationTerminalOutcome
 from yogurt_contracts.presentation.projection import project_presentation
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted, LogicalResponse
 from yogurt_contracts.operations.intent import LogicalOperation, OperationIntentCommitted
@@ -52,7 +52,7 @@ def test_presentation_projection_dedupes_and_keeps_max_extent_with_failed_termin
     operation = OperationId(value="presentation-operation")
     high = PresentationProgressObserved(receipt_id=ReceiptId(value="high"), operation_id=operation, observed_at=NOW, extent=VoicePresentationExtent(segment_id=SegmentId(value="segment"), played_duration_ms=700))
     stale = PresentationProgressObserved(receipt_id=ReceiptId(value="stale"), operation_id=operation, observed_at=NOW, extent=VoicePresentationExtent(segment_id=SegmentId(value="segment"), played_duration_ms=400))
-    projection = project_presentation(operation, (high, stale, high, PresentationTerminal(receipt_id=ReceiptId(value="failure"), operation_id=operation, observed_at=NOW, outcome="failed")))
+    projection = project_presentation(operation, (high, stale, high, PresentationTerminal(receipt_id=ReceiptId(value="failure"), operation_id=operation, observed_at=NOW, outcome=PresentationTerminalOutcome.FAILED)))
     assert projection.max_voice_extent.played_duration_ms == 700
     assert projection.terminal_outcome == "failed"
 
@@ -61,4 +61,5 @@ def test_operation_intent_is_explicit_write_ahead_contract():
     binding = CapabilityBinding(binding_id=BindingId(value="binding"), binding_revision="1", capability_id=CapabilityId(value="capability"), provider_slot_id=RuntimeSlotId(value="slot"), provider_instance_id=RuntimeInstanceId(value="instance"), provider_generation=1, contract_version=ContractVersion(major=1, minor=0), authority_valid_until=NOW)
     claims = AuthorityClaims(actor=RuntimeInstanceId(value="actor"), subject=UserId(value="user"), origin="surface", audience=RuntimeInstanceId(value="audience"), scope=CapabilityId(value="capability"), grant_revision="1", valid_until=NOW, authority_reference="authority")
     operation = LogicalOperation(operation_id=OperationId(value="operation"), request_fingerprint=RequestFingerprint(value="digest"), target_capability=CapabilityId(value="capability"), authority=DelegatedAuthority(claims=claims), deadline=Deadline(expires_at=NOW), traits=OperationTraits(effect_kind=EffectKind.WRITE, idempotency=IdempotencyKind.KEYED, reversibility=ReversibilityKind.COMPENSATABLE, cancellation_support=CancellationSupport.BEST_EFFORT), created_at=NOW)
-    assert OperationIntentCommitted(operation=operation, provider_binding=binding, required_durability="durably_persisted", committed_at=NOW).operation.operation_id == OperationId(value="operation")
+    from yogurt_contracts.foundation.durability import DurabilityLevel
+    assert OperationIntentCommitted(operation=operation, provider_binding=binding, required_durability=DurabilityLevel.DURABLY_PERSISTED, committed_at=NOW).operation.operation_id == OperationId(value="operation")

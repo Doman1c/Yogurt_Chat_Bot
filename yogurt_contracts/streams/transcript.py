@@ -1,11 +1,11 @@
 from typing import Optional
 
-from ..foundation.identifiers import Identifier
+from ..foundation.identifiers import HypothesisId
 from ..foundation.model import FrozenContract
 
 
 class TranscriptHypothesis(FrozenContract):
-    hypothesis_id: Identifier
+    hypothesis_id: HypothesisId
     revision: int
     text: str
     stability: Optional[float] = None

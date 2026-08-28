@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from yogurt_contracts.capability.framework import BaseCapabilityDescriptor, CapabilityState
 from yogurt_contracts.capability.offer import CapabilityOffer
-from yogurt_contracts.foundation.identifiers import CapabilityId, NodeId, RuntimeInstanceId, RuntimeSlotId
+from yogurt_contracts.foundation.identifiers import CapabilityId, HypothesisId, NodeId, RuntimeInstanceId, RuntimeSlotId
 from yogurt_contracts.foundation.time import UtcInstant
 from yogurt_contracts.foundation.versioning import ContractVersion
 from yogurt_contracts.runtime.fencing import FencingDecision, validate_generation
@@ -28,6 +28,6 @@ def test_generation_is_scoped_by_slot():
 
 
 def test_transcript_is_revision_replacement_not_append():
-    old = TranscriptHypothesis(hypothesis_id=CapabilityId(value="hypothesis"), revision=1, text="I want to eat")
-    new = TranscriptHypothesis(hypothesis_id=CapabilityId(value="hypothesis"), revision=2, text="I want to go", is_final=True)
+    old = TranscriptHypothesis(hypothesis_id=HypothesisId(value="hypothesis"), revision=1, text="I want to eat")
+    new = TranscriptHypothesis(hypothesis_id=HypothesisId(value="hypothesis"), revision=2, text="I want to go", is_final=True)
     assert supersedes(new, old)
