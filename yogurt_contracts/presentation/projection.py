@@ -33,6 +33,13 @@ def project_presentation(operation_id: OperationId, facts: Iterable[object]) -> 
             extent = fact.extent
             if isinstance(extent, TextPresentationExtent) and (text_extent is None or extent.end_text_offset > text_extent.end_text_offset): text_extent = extent
             elif isinstance(extent, VoicePresentationExtent) and (voice_extent is None or extent.played_duration_ms > voice_extent.played_duration_ms): voice_extent = extent
-            elif isinstance(extent, MessagingPresentationExtent): messaging_extent = extent
-        elif isinstance(fact, PresentationTerminal): terminal = fact.outcome
+            elif isinstance(extent, MessagingPresentationExtent):
+                if messaging_extent is None:
+                    messaging_extent = extent
+                else:
+                    messaging_extent = MessagingPresentationExtent(fully_delivered_segment_ids=tuple(dict.fromkeys(messaging_extent.fully_delivered_segment_ids + extent.fully_delivered_segment_ids)), external_message_refs=tuple(dict.fromkeys(messaging_extent.external_message_refs + extent.external_message_refs)))
+        elif isinstance(fact, PresentationTerminal):
+            if terminal is not None and terminal != fact.outcome:
+                raise ValueError("conflicting presentation terminal facts")
+            terminal = fact.outcome
     return PresentationProjection(operation_id=operation_id, accepted_receipts=tuple(accepted), delivered_receipts=tuple(delivered), max_text_extent=text_extent, max_voice_extent=voice_extent, messaging_extent=messaging_extent, terminal_outcome=terminal)

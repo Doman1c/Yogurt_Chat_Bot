@@ -115,10 +115,9 @@ def _validate_turn_terminal(turn_facts: Tuple[_LedgerFact, ...], new_fact: TurnT
         raise LedgerInvariantError("InputCommittedRecorded must precede a turn terminal fact")
     if _has_turn_terminal(turn_facts):
         raise LedgerInvariantError("a turn may have only one authoritative terminal fact")
-    if isinstance(new_fact, TurnCompletedRecorded):
-        started = next((fact for fact in turn_facts if isinstance(fact, ResponseStartedRecorded)), None)
-        if started is not None and _response_terminal(turn_facts, started.response_started.response_id) is None:
-            raise LedgerInvariantError("TurnCompletedRecorded requires the started response to be terminal")
+    started = next((fact for fact in turn_facts if isinstance(fact, ResponseStartedRecorded)), None)
+    if started is not None and _response_terminal(turn_facts, started.response_started.response_id) is None:
+        raise LedgerInvariantError("turn terminal facts require the started response to be terminal")
 
 
 def validate_ledger_append(existing_facts: Tuple[_LedgerFact, ...], new_fact: _LedgerFact) -> None:
