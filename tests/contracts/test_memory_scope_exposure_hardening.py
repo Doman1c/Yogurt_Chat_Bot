@@ -10,7 +10,7 @@ from yogurt_contracts.foundation.time import UtcInstant
 from yogurt_contracts.memory.deduplication import MemoryObservationDedupDecision, classify_memory_observation_retry
 from yogurt_contracts.memory.observations import CommittedContentObservation, PresentationObservation, UserContentObservation
 from yogurt_contracts.memory.projection import project_memory_exposure
-from yogurt_contracts.presentation.extent import MessagingPresentationExtent, TextPresentationExtent, VoicePresentationExtent
+from yogurt_contracts.presentation.extent import MessagingPresentationExtent, TextOffsetUnit, TextPresentationExtent, VoicePresentationExtent
 from yogurt_contracts.presentation.facts import PresentationEvidenceLevel
 
 
@@ -83,7 +83,30 @@ def test_messaging_delivery_tracks_only_known_segments_and_is_not_read_evidence(
     assert projection.messaging_extent is not None
     assert projection.messaging_extent.fully_delivered_segment_ids == (SegmentId(value="a"), SegmentId(value="b"))
     assert projection.highest_evidence == PresentationEvidenceLevel.DELIVERED
+    assert not projection.is_partially_exposed
     assert not projection.is_fully_exposed
+
+
+def test_offset_units_and_segment_projection_are_exposure_safe() -> None:
+    unicode = _committed(content="é")
+    codepoint = _presentation(PresentationEvidenceLevel.PRESENTED_TO_USER, TextPresentationExtent(segment_id=SegmentId(value="segment"), end_text_offset=1))
+    byte_partial = _presentation(PresentationEvidenceLevel.PRESENTED_TO_USER, TextPresentationExtent(segment_id=SegmentId(value="segment"), end_text_offset=1, offset_unit=TextOffsetUnit.UTF8_BYTE))
+    byte_full = _presentation(PresentationEvidenceLevel.PRESENTED_TO_USER, TextPresentationExtent(segment_id=SegmentId(value="segment"), end_text_offset=2, offset_unit=TextOffsetUnit.UTF8_BYTE))
+    assert project_memory_exposure(unicode, (codepoint,)).is_fully_exposed
+    assert project_memory_exposure(unicode, (byte_partial,)).is_partially_exposed
+    assert project_memory_exposure(unicode, (byte_full,)).is_fully_exposed
+    response_level = PresentationObservation(operation_id=OperationId(value="response-level"), conversation_ref=CONVERSATION, turn_ref=TURN, response_id=ResponseId(value="response"), presentation_operation_id=OperationId(value="presentation"), receipt_id=ReceiptId(value="response-receipt"), evidence_level=PresentationEvidenceLevel.PRESENTED_TO_USER, observed_at=NOW)
+    assert project_memory_exposure(unicode, (response_level,)).highest_evidence is None
+
+
+def test_messaging_extent_uniqueness_and_retry_timestamp_are_authoritative() -> None:
+    with pytest.raises(ValueError):
+        MessagingPresentationExtent(fully_delivered_segment_ids=(SegmentId(value="a"), SegmentId(value="a")))
+    with pytest.raises(ValueError):
+        MessagingPresentationExtent(fully_delivered_segment_ids=(SegmentId(value="a"),), external_message_refs=("ref", "ref"))
+    committed = _committed()
+    changed_time = committed.model_copy(update={"observed_at": UtcInstant(value=datetime(2026, 1, 2, tzinfo=timezone.utc))})
+    assert classify_memory_observation_retry(committed, changed_time) == MemoryObservationDedupDecision.PAYLOAD_CONFLICT
 
 
 def test_observation_round_trips_and_retry_deduplication_is_payload_safe() -> None:

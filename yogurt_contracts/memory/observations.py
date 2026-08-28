@@ -37,7 +37,7 @@ class CommittedContentObservation(_ScopedMemoryObservation):
     """Semantic assistant output commit only; it carries no presentation or read assertion."""
 
     response_id: ResponseId
-    segment_id: Optional[SegmentId] = None
+    segment_id: SegmentId
     content: str
 
 

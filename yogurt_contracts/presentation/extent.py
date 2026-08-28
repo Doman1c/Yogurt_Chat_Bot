@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Optional, Tuple
 
 from pydantic import field_validator
@@ -5,10 +6,15 @@ from ..foundation.identifiers import SegmentId
 from ..foundation.model import FrozenContract
 
 
+class TextOffsetUnit(str, Enum):
+    UNICODE_CODEPOINT = "unicode_codepoint"
+    UTF8_BYTE = "utf8_byte"
+
+
 class TextPresentationExtent(FrozenContract):
     segment_id: SegmentId
     end_text_offset: int
-    offset_unit: str = "unicode_codepoint"
+    offset_unit: TextOffsetUnit = TextOffsetUnit.UNICODE_CODEPOINT
 
     @field_validator("end_text_offset")
     @classmethod
@@ -19,6 +25,7 @@ class TextPresentationExtent(FrozenContract):
 
 
 class VoicePresentationExtent(FrozenContract):
+    """Voice text offsets, when available, are Unicode codepoint offsets."""
     segment_id: SegmentId
     played_duration_ms: int
     end_text_offset: Optional[int] = None
@@ -49,3 +56,10 @@ class VoicePresentationExtent(FrozenContract):
 class MessagingPresentationExtent(FrozenContract):
     fully_delivered_segment_ids: Tuple[SegmentId, ...]
     external_message_refs: Tuple[str, ...] = ()
+
+    @field_validator("fully_delivered_segment_ids", "external_message_refs")
+    @classmethod
+    def has_unique_values(cls, value: Tuple[object, ...]) -> Tuple[object, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("messaging presentation extent values must be unique")
+        return value
