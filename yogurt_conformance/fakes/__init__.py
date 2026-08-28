@@ -1,2 +1,2 @@
 from .adapters import FakeOperationProvider, FakeSurfaceAdapter
-from .generation_authority import FakeGenerationAuthority, ResettingGenerationAuthorityFake
+from .generation_authority import FakeGenerationAuthority, GenerationAuthorityHarness, ResettingGenerationAuthorityFake

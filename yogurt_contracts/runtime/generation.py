@@ -36,3 +36,10 @@ class GenerationAuthority(Protocol):
 
     def issue(self, runtime_slot_id: RuntimeSlotId, runtime_instance_id: RuntimeInstanceId) -> GenerationAssignment:
         ...
+
+
+class GenerationAuthorityView(Protocol):
+    """Management-plane view that supplies the authoritative current assignment for a slot."""
+
+    def current_assignment(self, runtime_slot_id: RuntimeSlotId) -> Optional[GenerationAssignment]:
+        ...

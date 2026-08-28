@@ -24,12 +24,12 @@ def compare_generation_numbers(slot_id: str, generation: int, active_slot_id: st
     return FencingDecision.ACCEPT if generation >= active_generation else FencingDecision.STALE_GENERATION
 
 
-def validate_runtime_assignment(
+def validate_runtime_matches_assignment(
     runtime: RuntimeIdentity,
     assignment: GenerationAssignment,
     expected_authority: GenerationAuthorityId,
 ) -> FencingDecision:
-    """Accept only the exact assignment issued by the expected generation authority."""
+    """Low-level exact-match helper; it does not establish that an assignment is current."""
 
     if assignment.issued_by != expected_authority:
         return FencingDecision.ASSIGNMENT_MISMATCH
@@ -42,15 +42,25 @@ def validate_runtime_assignment(
     return FencingDecision.ACCEPT
 
 
+def validate_runtime_against_current_assignment(
+    runtime: RuntimeIdentity,
+    current_assignment: GenerationAssignment,
+    expected_authority: GenerationAuthorityId,
+) -> FencingDecision:
+    """Security boundary: compare a runtime only with management-plane current assignment."""
+
+    return validate_runtime_matches_assignment(runtime, current_assignment, expected_authority)
+
+
 def validate_bound_provider(
     binding: CapabilityBinding,
     runtime: RuntimeIdentity,
-    assignment: GenerationAssignment,
+    current_assignment: GenerationAssignment,
     expected_authority: GenerationAuthorityId,
 ) -> FencingDecision:
     """Bind dispatch eligibility to the provider identity and its authority-issued generation."""
 
-    assignment_decision = validate_runtime_assignment(runtime, assignment, expected_authority)
+    assignment_decision = validate_runtime_against_current_assignment(runtime, current_assignment, expected_authority)
     if assignment_decision != FencingDecision.ACCEPT:
         return assignment_decision
     if binding.provider_slot_id != runtime.runtime_slot_id:

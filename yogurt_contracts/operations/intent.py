@@ -52,4 +52,21 @@ class OperationIntentCommitted(FrozenContract):
     def has_correlated_authorization(self) -> "OperationIntentCommitted":
         if self.authorization_snapshot.operation_id != self.operation.operation_id:
             raise ValueError("operation intent authorization snapshot must match operation")
+        if self.provider_binding.capability_id != self.operation.target_capability:
+            raise ValueError("operation intent binding capability must match operation")
+        snapshot_claims = self.authorization_snapshot.claims
+        operation_claims = self.operation.authority.claims
+        if snapshot_claims.scope != self.operation.target_capability:
+            raise ValueError("operation intent authorization scope must match operation")
+        if snapshot_claims.audience != self.provider_binding.provider_instance_id:
+            raise ValueError("operation intent authorization audience must match binding")
+        if (
+            snapshot_claims.actor != operation_claims.actor
+            or snapshot_claims.subject != operation_claims.subject
+            or snapshot_claims.origin != operation_claims.origin
+            or snapshot_claims.audience != operation_claims.audience
+            or snapshot_claims.scope != operation_claims.scope
+            or snapshot_claims.grant_revision != operation_claims.grant_revision
+        ):
+            raise ValueError("operation intent authorization snapshot must not widen delegated authority")
         return self

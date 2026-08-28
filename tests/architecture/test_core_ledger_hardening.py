@@ -157,7 +157,7 @@ def test_operation_intent_round_trip_preserves_write_ahead_contract() -> None:
         provider_generation=1, contract_version=ContractVersion(major=1, minor=0), authority_valid_until=NOW,
     )
     claims = AuthorityClaims(
-        actor=RuntimeInstanceId(value="actor"), subject=UserId(value="user"), origin="surface", audience=RuntimeInstanceId(value="audience"),
+        actor=RuntimeInstanceId(value="actor"), subject=UserId(value="user"), origin="surface", audience=RuntimeInstanceId(value="instance"),
         scope=CapabilityId(value="capability"), grant_revision="1", valid_until=NOW, authority_reference="authority",
     )
     operation = LogicalOperation(

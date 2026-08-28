@@ -60,7 +60,7 @@ def test_presentation_projection_dedupes_and_keeps_max_extent_with_failed_termin
 
 def test_operation_intent_is_explicit_write_ahead_contract():
     binding = CapabilityBinding(binding_id=BindingId(value="binding"), binding_revision="1", capability_id=CapabilityId(value="capability"), provider_slot_id=RuntimeSlotId(value="slot"), provider_instance_id=RuntimeInstanceId(value="instance"), provider_generation=1, contract_version=ContractVersion(major=1, minor=0), authority_valid_until=NOW)
-    claims = AuthorityClaims(actor=RuntimeInstanceId(value="actor"), subject=UserId(value="user"), origin="surface", audience=RuntimeInstanceId(value="audience"), scope=CapabilityId(value="capability"), grant_revision="1", valid_until=NOW, authority_reference="authority")
+    claims = AuthorityClaims(actor=RuntimeInstanceId(value="actor"), subject=UserId(value="user"), origin="surface", audience=RuntimeInstanceId(value="instance"), scope=CapabilityId(value="capability"), grant_revision="1", valid_until=NOW, authority_reference="authority")
     operation = LogicalOperation(operation_id=OperationId(value="operation"), request_fingerprint=RequestFingerprint(value="digest"), target_capability=CapabilityId(value="capability"), authority=DelegatedAuthority(claims=claims), deadline=Deadline(expires_at=NOW), traits=OperationTraits(effect_kind=EffectKind.WRITE, idempotency=IdempotencyKind.KEYED, reversibility=ReversibilityKind.COMPENSATABLE, cancellation_support=CancellationSupport.BEST_EFFORT), created_at=NOW)
     from yogurt_contracts.foundation.durability import DurabilityLevel
     snapshot = OperationAuthorizationSnapshot(operation_id=operation.operation_id, claims=claims, checked_at=NOW, valid_until=NOW)

@@ -8,7 +8,7 @@ from yogurt_contracts.capability.binding import CapabilityBinding
 from yogurt_contracts.foundation.identifiers import BindingId, CapabilityId, GenerationAuthorityId, NodeId, RuntimeInstanceId, RuntimeSlotId
 from yogurt_contracts.foundation.time import UtcInstant
 from yogurt_contracts.foundation.versioning import ContractVersion
-from yogurt_contracts.runtime.fencing import FencingDecision, compare_generation_numbers, validate_bound_provider, validate_runtime_assignment
+from yogurt_contracts.runtime.fencing import FencingDecision, compare_generation_numbers, validate_bound_provider, validate_runtime_against_current_assignment, validate_runtime_matches_assignment
 from yogurt_contracts.runtime.generation import GenerationAssignment
 from yogurt_contracts.runtime.identity import RuntimeIdentity
 
@@ -30,12 +30,12 @@ def _binding(slot: str = "voice.mac", instance: str = "instance-new", generation
 
 
 def test_exact_authority_assignment_is_the_only_runtime_fencing_acceptance() -> None:
-    assert validate_runtime_assignment(_runtime(), _assignment(), AUTHORITY) == FencingDecision.ACCEPT
+    assert validate_runtime_against_current_assignment(_runtime(), _assignment(), AUTHORITY) == FencingDecision.ACCEPT
     zombie = _runtime(instance="instance-old", generation=999)
-    assert validate_runtime_assignment(zombie, _assignment(), AUTHORITY) != FencingDecision.ACCEPT
-    assert validate_runtime_assignment(_runtime(instance="instance-other"), _assignment(), AUTHORITY) != FencingDecision.ACCEPT
-    assert validate_runtime_assignment(_runtime(slot="voice.stackchan"), _assignment(), AUTHORITY) != FencingDecision.ACCEPT
-    assert validate_runtime_assignment(_runtime(), _assignment(authority=GenerationAuthorityId(value="wrong-authority")), AUTHORITY) != FencingDecision.ACCEPT
+    assert validate_runtime_against_current_assignment(zombie, _assignment(), AUTHORITY) != FencingDecision.ACCEPT
+    assert validate_runtime_against_current_assignment(_runtime(instance="instance-other"), _assignment(), AUTHORITY) != FencingDecision.ACCEPT
+    assert validate_runtime_against_current_assignment(_runtime(slot="voice.stackchan"), _assignment(), AUTHORITY) != FencingDecision.ACCEPT
+    assert validate_runtime_against_current_assignment(_runtime(), _assignment(authority=GenerationAuthorityId(value="wrong-authority")), AUTHORITY) != FencingDecision.ACCEPT
 
 
 def test_bound_provider_requires_exact_runtime_and_assignment_identity() -> None:
@@ -47,7 +47,16 @@ def test_bound_provider_requires_exact_runtime_and_assignment_identity() -> None
 def test_numeric_ordering_remains_separate_from_security_fencing() -> None:
     assert compare_generation_numbers("voice.mac", 8, "voice.mac", 7) == FencingDecision.ACCEPT
     assert compare_generation_numbers("voice.stackchan", 3, "voice.mac", 12) == FencingDecision.SLOT_MISMATCH
-    assert validate_runtime_assignment(_runtime(instance="zombie", generation=999), _assignment(), AUTHORITY) != FencingDecision.ACCEPT
+    assert validate_runtime_against_current_assignment(_runtime(instance="zombie", generation=999), _assignment(), AUTHORITY) != FencingDecision.ACCEPT
+
+
+def test_historical_assignment_is_not_current_fencing_evidence() -> None:
+    old_assignment = _assignment(instance="old-runtime", generation=6)
+    old_runtime = _runtime(instance="old-runtime", generation=6)
+    old_binding = _binding(instance="old-runtime", generation=6)
+    current_assignment = _assignment(instance="new-runtime", generation=7)
+    assert validate_runtime_matches_assignment(old_runtime, old_assignment, AUTHORITY) == FencingDecision.ACCEPT
+    assert validate_bound_provider(old_binding, old_runtime, current_assignment, AUTHORITY) != FencingDecision.ACCEPT
 
 
 @pytest.mark.parametrize("constructor", [_assignment, _runtime, _binding])
