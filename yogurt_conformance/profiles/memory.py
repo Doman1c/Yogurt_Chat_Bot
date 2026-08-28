@@ -1,6 +1,7 @@
 """Behavioral Memory scope, retry, and exposure conformance."""
 
 from datetime import datetime, timezone
+from typing import Optional
 
 from yogurt_contracts.conversation.refs import ConversationRef, TurnRef
 from yogurt_contracts.foundation.identifiers import ConversationId, OperationId, PersonaId, ReceiptId, ResponseId, SegmentId, TurnId, UserId
@@ -21,7 +22,7 @@ def run_memory_conformance(adapter: MemoryAdapterProtocol) -> None:
     assert adapter.store_observation(committed) == MemoryObservationDedupDecision.DUPLICATE_RETRY
     assert adapter.store_observation(committed.model_copy(update={"content": "changed"})) == MemoryObservationDedupDecision.PAYLOAD_CONFLICT
     assert not adapter.project_segment(committed, ()).is_fully_exposed
-    def observed(name: str, extent: PresentationExtent, segment_id: SegmentId | None = None) -> PresentationObservation:
+    def observed(name: str, extent: PresentationExtent, segment_id: Optional[SegmentId] = None) -> PresentationObservation:
         return PresentationObservation(operation_id=OperationId(value="observation-" + name), conversation_ref=conversation, turn_ref=turn, response_id=committed.response_id, presentation_operation_id=OperationId(value="present"), receipt_id=ReceiptId(value="receipt-" + name), evidence_level=PresentationEvidenceLevel.PRESENTED_TO_USER, segment_id=segment_id or committed.segment_id, extent=extent, observed_at=now)
     byte_partial = observed("byte", TextPresentationExtent(segment_id=committed.segment_id, end_text_offset=3, offset_unit=TextOffsetUnit.UTF8_BYTE))
     delivered = PresentationObservation(operation_id=OperationId(value="delivery"), conversation_ref=conversation, turn_ref=turn, response_id=committed.response_id, presentation_operation_id=OperationId(value="present"), receipt_id=ReceiptId(value="delivery-receipt"), evidence_level=PresentationEvidenceLevel.DELIVERED, segment_id=committed.segment_id, observed_at=now)
