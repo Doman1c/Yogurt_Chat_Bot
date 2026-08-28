@@ -1,0 +1,46 @@
+from typing import Optional, Tuple
+
+from ..conversation.refs import TurnRef
+from ..foundation.identifiers import ResponseId, SegmentId
+from ..foundation.model import FrozenContract
+from .lifecycle import ResponseState
+
+
+class AgentOutputSegmentCommitted(FrozenContract):
+    response_id: ResponseId
+    segment_id: SegmentId
+    sequence: int
+    text: str
+    language: str
+    affect: Optional[str] = None
+    interruptibility: Optional[str] = None
+    content_hash: Optional[str] = None
+    is_segment_final: bool = True
+
+
+class AgentResponseStarted(FrozenContract):
+    response_id: ResponseId
+    turn_ref: TurnRef
+
+
+class AgentResponseFinalized(FrozenContract):
+    response_id: ResponseId
+    assembly_hash: Optional[str] = None
+
+
+class AgentResponseAborted(FrozenContract):
+    response_id: ResponseId
+    reason: str
+
+
+class LogicalResponse(FrozenContract):
+    response_id: ResponseId
+    state: ResponseState = ResponseState.STARTED
+    segments: Tuple[AgentOutputSegmentCommitted, ...] = ()
+
+    def append_segment(self, segment: AgentOutputSegmentCommitted) -> "LogicalResponse":
+        if self.state != ResponseState.STARTED or segment.response_id != self.response_id:
+            raise ValueError("cannot append segment to closed or different response")
+        if self.segments and segment.sequence <= self.segments[-1].sequence:
+            raise ValueError("segments must append in strictly increasing sequence")
+        return self.model_copy(update={"segments": self.segments + (segment,)})
