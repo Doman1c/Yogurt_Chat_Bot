@@ -138,3 +138,19 @@ def test_public_projection_uses_semantic_text_and_component_voice_merge() -> Non
     second_voice = PresentationProgressObserved(receipt_id=ReceiptId(value="voice-b"), operation_id=operation, observed_at=NOW, extent=VoicePresentationExtent(segment_id=SegmentId(value="segment"), played_duration_ms=2000, end_text_offset=3))
     voice = project_presentation(operation, (first_voice, second_voice)).max_voice_extent
     assert voice is not None and (voice.played_duration_ms, voice.end_text_offset) == (2000, 10)
+
+
+def test_public_projection_is_deterministic_and_segment_aware() -> None:
+    operation = OperationId(value="segment-aware")
+    segment_a = SegmentId(value="segment-a")
+    segment_b = SegmentId(value="segment-b")
+    text = PresentationProgressObserved(receipt_id=ReceiptId(value="text"), operation_id=operation, observed_at=NOW, extent=TextPresentationExtent(segment_id=segment_a, end_text_offset=2))
+    utf8 = PresentationProgressObserved(receipt_id=ReceiptId(value="utf8"), operation_id=operation, observed_at=NOW, extent=TextPresentationExtent(segment_id=segment_a, end_text_offset=6, offset_unit=TextOffsetUnit.UTF8_BYTE))
+    voice = PresentationProgressObserved(receipt_id=ReceiptId(value="voice"), operation_id=operation, observed_at=NOW, extent=VoicePresentationExtent(segment_id=segment_b, played_duration_ms=2000, end_text_offset=1))
+    forward = project_presentation(operation, (text, utf8, voice), {segment_a: "酸奶"})
+    reverse = project_presentation(operation, (voice, utf8, text), {segment_a: "酸奶"})
+    assert forward == reverse
+    assert len(forward.text_extents) == len(forward.voice_extents) == 1
+    assert forward.text_extents[0].segment_id == segment_a
+    assert forward.voice_extents[0].segment_id == segment_b
+    assert forward.max_text_extent is not None and forward.max_voice_extent is not None

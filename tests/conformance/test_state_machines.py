@@ -4,9 +4,12 @@ from hypothesis import settings, strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule, run_state_machine_as_test
 
 from yogurt_conformance.fakes.conformance_adapters import GoodCorePublicFake, GoodOperationProviderFake, GoodRuntimeLifecycleFake, GoodVoiceFake
+from yogurt_conformance.profiles.operation_provider import AUTHORITY, _typed_inputs
+from yogurt_contracts.foundation.durability import CorePersistenceMode, DurabilityLevel
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
+from yogurt_contracts.conversation.refs import ConversationRef
 from yogurt_contracts.foundation.idempotency import RequestFingerprint
-from yogurt_contracts.foundation.identifiers import OperationId, SegmentId, TurnId
+from yogurt_contracts.foundation.identifiers import ConversationId, OperationId, PersonaId, SegmentId, TurnId, UserId
 
 
 def _fingerprint() -> TurnFingerprint:
@@ -14,12 +17,15 @@ def _fingerprint() -> TurnFingerprint:
     return TurnFingerprint(input_digest=digest, origin_digest=digest, principal_binding_digest=digest)
 
 
+CONVERSATION = ConversationRef(persona_id=PersonaId(value="persona"), user_id=UserId(value="user"), conversation_id=ConversationId(value="conversation"))
+
+
 class TurnStateMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
         super().__init__(); self.adapter = GoodCorePublicFake(); self.turn = None; self.response = None; self.completed = False
     @rule()
     def commit_input(self) -> None:
-        self.turn = self.adapter.submit_turn(TurnId(value="turn"), _fingerprint()).logical_turn
+        self.turn = self.adapter.submit_turn(CONVERSATION, TurnId(value="turn"), _fingerprint()).logical_turn
     @precondition(lambda self: self.turn is not None and self.response is None)
     @rule()
     def start_response(self) -> None: self.response = self.adapter.start_response(self.turn)
@@ -35,7 +41,7 @@ class TurnStateMachine(RuleBasedStateMachine):
 
 class ResponseStateMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
-        super().__init__(); self.adapter = GoodCorePublicFake(); self.turn = self.adapter.submit_turn(TurnId(value="response-turn"), _fingerprint()).logical_turn; self.response = self.adapter.start_response(self.turn); self.closed = False
+        super().__init__(); self.adapter = GoodCorePublicFake(); self.turn = self.adapter.submit_turn(CONVERSATION, TurnId(value="response-turn"), _fingerprint()).logical_turn; self.response = self.adapter.start_response(self.turn); self.closed = False
     @precondition(lambda self: not self.closed)
     @rule()
     def append(self) -> None: assert self.response is not None and self.adapter.append_segment(self.turn, self.response, SegmentId(value="segment"), "x")
@@ -61,19 +67,19 @@ class PresentationStateMachine(RuleBasedStateMachine):
 
 class OperationStateMachine(RuleBasedStateMachine):
     def __init__(self) -> None:
-        super().__init__(); self.adapter = GoodOperationProviderFake(); self.operation = OperationId(value="operation-state"); self.committed = False; self.attempts = 0
+        super().__init__(); self.adapter = GoodOperationProviderFake(); self.intent, self.authorization, self.runtime, self.assignment = _typed_inputs(); self.operation = self.intent.operation.operation_id; self.committed = False; self.attempts = 0
     @rule()
-    def commit_intent(self) -> None: self.adapter.commit_intent(self.operation, "fingerprint"); self.committed = True
+    def commit_intent(self) -> None: self.adapter.commit_intent(self.intent); self.committed = True
     @precondition(lambda self: self.committed)
     @rule()
-    def dispatch_attempt(self) -> None: self.attempts = len(self.adapter.dispatch(self.operation).attempts)
+    def dispatch_attempt(self) -> None: self.attempts = len(self.adapter.dispatch(self.intent, self.authorization, self.runtime, self.assignment, AUTHORITY, DurabilityLevel.DURABLY_PERSISTED, CorePersistenceMode.DURABLE).attempts)
     @precondition(lambda self: self.committed)
     @rule()
     def unknown_outcome(self) -> None: assert self.adapter.unknown_outcome(self.operation).outcome_unknown
     @invariant()
     def attempts_are_unique(self) -> None:
         if self.committed:
-            attempts = self.adapter.commit_intent(self.operation, "fingerprint").attempts
+            attempts = self.adapter.commit_intent(self.intent).attempts
             assert len(attempts) == len(set(attempts))
 
 
