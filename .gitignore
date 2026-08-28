@@ -27,6 +27,9 @@ sessions/
 private/memory_benchmark/
 logs/
 runtime/
+!yogurt_contracts/
+!yogurt_contracts/runtime/
+!yogurt_contracts/runtime/*.py
 *.log
 
 # Local sticker assets and generated metadata
