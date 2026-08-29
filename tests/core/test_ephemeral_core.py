@@ -6,7 +6,7 @@ import pytest
 
 from yogurt_contracts.conversation.fingerprint import turn_fingerprint
 from yogurt_contracts.conversation.input import TextInputPart, TurnInput
-from yogurt_contracts.conversation.lifecycle import TurnState
+from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
 from yogurt_contracts.conversation.refs import ConversationRef, TurnOrigin
 from yogurt_contracts.execution.persona import PersonaSnapshot
 from yogurt_contracts.execution.turn_snapshot import TurnSnapshot
@@ -53,10 +53,10 @@ def _command(turn: str = "t1", text: str = "hello", origin: TurnOrigin = None) -
     )
 
 
-async def _core(model=None, scheduler=None):
+async def _core(model=None, scheduler=None, context_policy=None):
     store = InMemoryCoreStateStore()
     identity = FakeIdentityResolver({"external-u1": IdentityResolution(reference=IdentityResolutionRef(value="res-u1"), logical_user=UserId(value="u1"), identity_revision="identity", source_hash="source")})
-    core = YogurtCore(store, identity, FakePersonaSnapshotPort({"yogurt": _persona()}), model or FakeModelAdapter(((),)), CoreInstanceId(value="core"), scheduler=scheduler)
+    core = YogurtCore(store, identity, FakePersonaSnapshotPort({"yogurt": _persona()}), model or FakeModelAdapter(((),)), CoreInstanceId(value="core"), context_policy=context_policy, scheduler=scheduler)
     await core.start()
     await core.create_conversation(_ref())
     return core, store
@@ -105,6 +105,26 @@ def test_terminalization_validates_claim_before_writing_and_normal_release_is_at
     asyncio.run(scenario())
 
 
+def test_turn_lifecycle_transitions_are_authoritative_and_validate_r1_graph():
+    async def scenario():
+        store, token = await _admitted_store()
+        admitted = await store.get_turn(_ref(), TurnId(value="t1"))
+        assert admitted.state == TurnState.INPUT_COMMITTED
+        with pytest.raises(CoreStateError, match="INVALID_TURN_TRANSITION"):
+            await store.terminalize_turn(token, _ref(), TurnId(value="t1"), admitted.revision, TurnState.COMPLETED)
+        assert (await store.get_turn(_ref(), TurnId(value="t1"))).state == TurnState.INPUT_COMMITTED
+        assert await store.active_claim(_ref()) == TurnId(value="t1")
+        await store.commit_response_started(token, _ref(), TurnId(value="t1"), ResponseId(value="r1"))
+        assert (await store.get_turn(_ref(), TurnId(value="t1"))).state == TurnState.PROCESSING
+
+        core, core_store = await _core(FakeModelAdapter(((VisibleTextDelta(text="ok"),),)))
+        command = _command()
+        await core.submit_turn(command)
+        await core.drain()
+        assert (await core_store.get_turn(_ref(), command.turn_id)).state == TurnState.COMPLETED
+    asyncio.run(scenario())
+
+
 def test_cancel_turn_before_and_after_response_started_and_after_terminal():
     async def scenario():
         core, store = await _core()
@@ -129,6 +149,35 @@ def test_cancel_turn_before_and_after_response_started_and_after_terminal():
         release.set()
         await core2.drain()
         assert (await core2.cancel_turn(CancelTurnCommand(caller_context=command2.caller_context, conversation_ref=_ref(), turn_id=command2.turn_id))).status == CancelTurnStatus.ALREADY_TERMINAL
+    asyncio.run(scenario())
+
+
+def test_cancel_converges_from_finalized_and_typed_aborted_response_terminal_facts():
+    async def scenario():
+        async def prepare_terminal(response_reason=None):
+            core, store = await _core()
+            token = core._token
+            command = _command()
+            await store.try_admit_turn(token, _ref(), command.turn_id, command.fingerprint, _snapshot(), command.input)
+            started = await store.commit_response_started(token, _ref(), command.turn_id, ResponseId(value="r1"))
+            if response_reason is None:
+                await store.finalize_response(token, started.response_id, started.revision)
+            else:
+                await store.abort_response(token, started.response_id, started.revision, response_reason)
+            assert (await store.get_turn(_ref(), command.turn_id)).state == TurnState.PROCESSING
+            return core, store, command
+
+        core, store, command = await prepare_terminal()
+        result = await core.cancel_turn(CancelTurnCommand(caller_context=command.caller_context, conversation_ref=_ref(), turn_id=command.turn_id))
+        assert result.status == CancelTurnStatus.ALREADY_TERMINAL
+        assert (await store.get_turn(_ref(), command.turn_id)).state == TurnState.COMPLETED
+
+        for response_reason, expected_reason in ((ResponseAbortReason.PROVIDER_FAILURE, AbortReason.PROVIDER_FAILURE), (ResponseAbortReason.EXECUTION_FAILURE, AbortReason.EXECUTION_FAILURE)):
+            core, store, command = await prepare_terminal(response_reason)
+            result = await core.cancel_turn(CancelTurnCommand(caller_context=command.caller_context, conversation_ref=_ref(), turn_id=command.turn_id))
+            turn = await store.get_turn(_ref(), command.turn_id)
+            assert result.status == CancelTurnStatus.ALREADY_TERMINAL
+            assert turn.state == TurnState.ABORTED and turn.abort_reason == expected_reason
     asyncio.run(scenario())
 
 
@@ -171,10 +220,14 @@ def test_provider_exceptions_abort_deterministically_and_scheduler_surfaces_unex
             core, store = await _core(_RaisingModel(events))
             command = _command()
             await core.submit_turn(command)
-            await core.drain()
+            with pytest.raises(RuntimeError, match="before|after"):
+                await core.drain()
             response_id = (await core.submit_turn(command)).response_id
             response = await core.get_response(GetResponseCommand(caller_context=command.caller_context, response_id=response_id))
             assert response.state == ResponseState.ABORTED and await store.active_claim(_ref()) is None
+            assert response.abort_reason == ResponseAbortReason.EXECUTION_FAILURE
+            turn = await store.get_turn(_ref(), command.turn_id)
+            assert turn.state == TurnState.ABORTED and turn.abort_reason == AbortReason.EXECUTION_FAILURE
             assert len(response.segments) == (0 if isinstance(events[0], RuntimeError) else 1)
 
         scheduler = ConversationScheduler()
@@ -184,6 +237,22 @@ def test_provider_exceptions_abort_deterministically_and_scheduler_surfaces_unex
         await asyncio.sleep(0)
         with pytest.raises(ValueError, match="unexpected"):
             await scheduler.drain()
+    asyncio.run(scenario())
+
+
+def test_context_policy_failure_after_response_started_converges_then_reraises_original_error():
+    async def scenario():
+        core, store = await _core(context_policy=_FailingContextPolicy())
+        command = _command()
+        await core.submit_turn(command)
+        with pytest.raises(ValueError, match="context failed"):
+            await core.drain()
+        response_id = (await core.submit_turn(command)).response_id
+        response = await core.get_response(GetResponseCommand(caller_context=command.caller_context, response_id=response_id))
+        turn = await store.get_turn(_ref(), command.turn_id)
+        assert response.state == ResponseState.ABORTED and response.abort_reason == ResponseAbortReason.EXECUTION_FAILURE
+        assert turn.state == TurnState.ABORTED and turn.abort_reason == AbortReason.EXECUTION_FAILURE
+        assert await store.active_claim(_ref()) is None
     asyncio.run(scenario())
 
 
@@ -253,3 +322,8 @@ class _RaisingModel:
 
     async def cancel(self, attempt):
         return None
+
+
+class _FailingContextPolicy(ContextBudgetPolicy):
+    def compose(self, projection, turn):
+        raise ValueError("context failed")
