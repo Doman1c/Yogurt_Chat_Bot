@@ -51,3 +51,6 @@ class IdentityResolutionRef(Identifier): generation_authority = "Identity Resolv
 class HypothesisId(Identifier): generation_authority = "STT Runtime"
 class SurfaceId(Identifier): generation_authority = "Surface Authority"
 class GenerationAuthorityId(Identifier): generation_authority = "Management Generation Authority"
+class CoreInstanceId(Identifier): generation_authority = "Yogurt Core Instance"
+class StoreAuthorityId(Identifier): generation_authority = "Core State Store"
+class ResponseEventId(Identifier): generation_authority = "Core Response Event Stream"

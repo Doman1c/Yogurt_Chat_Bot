@@ -4,3 +4,6 @@ from .lease import RuntimeLease
 from ..capability.framework import CapabilityState
 from .lifecycle import ProcessState, ServiceState
 from .manifest import RuntimeManifest
+from .core_authority import CoreAuthorityOwnership, CoreAuthorityToken
+
+__all__ = ["CoreAuthorityOwnership", "CoreAuthorityToken"]
