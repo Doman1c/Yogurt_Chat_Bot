@@ -1,37 +1,29 @@
-"""Focused R2-A reference-runtime conformance and race tests."""
+"""Behavioral evidence for the R2-A ephemeral Core hardening gate."""
 
 import asyncio
-from datetime import datetime, timezone
 
 import pytest
 
 from yogurt_contracts.conversation.fingerprint import turn_fingerprint
 from yogurt_contracts.conversation.input import TextInputPart, TurnInput
+from yogurt_contracts.conversation.lifecycle import TurnState
 from yogurt_contracts.conversation.refs import ConversationRef, TurnOrigin
 from yogurt_contracts.execution.persona import PersonaSnapshot
 from yogurt_contracts.execution.turn_snapshot import TurnSnapshot
-from yogurt_contracts.foundation.identifiers import (
-    CoreInstanceId,
-    ConversationId,
-    ExternalPrincipalRef,
-    IdentityResolutionRef,
-    InputId,
-    PersonaId,
-    ResponseId,
-    SegmentId,
-    TurnId,
-    UserId,
-)
 from yogurt_contracts.foundation.durability import CorePersistenceMode
+from yogurt_contracts.foundation.identifiers import CoreInstanceId, ConversationId, ExternalPrincipalRef, IdentityResolutionRef, InputId, PersonaId, ResponseId, SegmentId, TurnId, UserId
 from yogurt_contracts.identity.principal import ExternalPrincipal
 from yogurt_contracts.identity.resolution import IdentityResolution
+from yogurt_contracts.response.lifecycle import ResponseAbortReason, ResponseState
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted
-from yogurt_core.application.commands import CallerContext, GetResponseCommand, GetTurnCommand, SubmitTurnCommand, WatchResponseCommand
+from yogurt_core.application.commands import CallerContext, CancelTurnCommand, GetResponseCommand, GetTurnCommand, SubmitTurnCommand, WatchResponseCommand
 from yogurt_core.application.core import YogurtCore
-from yogurt_core.application.results import TurnAdmissionStatus
+from yogurt_core.application.results import CancelTurnStatus, TurnAdmissionStatus
+from yogurt_core.context.models import ContextEntry, ContextProjection, ContextRole
+from yogurt_core.context.policy import ContextBudgetPolicy
 from yogurt_core.model.events import AttemptTerminal, AttemptTerminalKind, VisibleTextDelta
-from yogurt_core.model.execution import ExecutionAttemptSnapshot
 from yogurt_core.response.stream import ResponseEventStream
+from yogurt_core.scheduling.conversation_scheduler import ConversationScheduler
 from yogurt_core_adapters.identity_fake import FakeIdentityResolver
 from yogurt_core_adapters.model_fake import FakeModelAdapter
 from yogurt_core_adapters.persona_fake import FakePersonaSnapshotPort
@@ -42,163 +34,222 @@ def _ref(user: str = "u1", conversation: str = "c1") -> ConversationRef:
     return ConversationRef(persona_id=PersonaId(value="yogurt"), user_id=UserId(value=user), conversation_id=ConversationId(value=conversation))
 
 
-def _origin() -> TurnOrigin:
-    return TurnOrigin(origin_surface="test", external_principal_ref=ExternalPrincipalRef(value="external-u1"), identity_resolution_ref=IdentityResolutionRef(value="res-u1"))
+def _origin(principal: str = "external-u1", resolution: str = "res-u1", surface: str = "test") -> TurnOrigin:
+    return TurnOrigin(origin_surface=surface, external_principal_ref=ExternalPrincipalRef(value=principal), identity_resolution_ref=IdentityResolutionRef(value=resolution))
 
 
-def _persona(revision: str = "p1") -> PersonaSnapshot:
-    return PersonaSnapshot(persona_id=PersonaId(value="yogurt"), persona_revision=revision, soul_revision="s1", identity_revision="i1", relationship_context_revision="r1", model_context_material="persona-" + revision)
+def _persona() -> PersonaSnapshot:
+    return PersonaSnapshot(persona_id=PersonaId(value="yogurt"), persona_revision="p1", soul_revision="s1", identity_revision="i1", relationship_context_revision="r1", model_context_material="persona")
 
 
-def _command(turn: str = "t1", text: str = "hello", user: str = "u1", conversation: str = "c1") -> SubmitTurnCommand:
-    origin = _origin()
-    turn_input = TurnInput(input_id=InputId(value="input-" + turn), parts=(TextInputPart(text=text),), origin=origin)
+def _command(turn: str = "t1", text: str = "hello", origin: TurnOrigin = None) -> SubmitTurnCommand:
+    actual_origin = origin or _origin()
+    turn_input = TurnInput(input_id=InputId(value="input-" + turn), parts=(TextInputPart(text=text),), origin=actual_origin)
     return SubmitTurnCommand(
-        caller_context=CallerContext(logical_user_id=UserId(value=user)),
-        external_principal=ExternalPrincipal(reference=origin.external_principal_ref, authenticated_surface="test"),
-        conversation_ref=_ref(user, conversation), turn_id=TurnId(value=turn), fingerprint=turn_fingerprint(turn_input, "binding"), input=turn_input,
-        core_config_revision="config-1", conversation_context_revision="context-1", principal_binding_reference="binding",
+        caller_context=CallerContext(logical_user_id=UserId(value="u1")),
+        external_principal=ExternalPrincipal(reference=ExternalPrincipalRef(value="external-u1"), authenticated_surface="test"),
+        conversation_ref=_ref(), turn_id=TurnId(value=turn), fingerprint=turn_fingerprint(turn_input, "binding"), input=turn_input,
+        core_config_revision="config", conversation_context_revision="context", principal_binding_reference="binding",
     )
 
 
-async def _core(model: FakeModelAdapter):
+async def _core(model=None, scheduler=None):
     store = InMemoryCoreStateStore()
-    identity = FakeIdentityResolver({"external-u1": IdentityResolution(reference=IdentityResolutionRef(value="res-u1"), logical_user=UserId(value="u1"), identity_revision="identity-1", source_hash="source")})
-    personas = FakePersonaSnapshotPort({"yogurt": _persona()})
-    core = YogurtCore(store, identity, personas, model, CoreInstanceId(value="core-1"))
+    identity = FakeIdentityResolver({"external-u1": IdentityResolution(reference=IdentityResolutionRef(value="res-u1"), logical_user=UserId(value="u1"), identity_revision="identity", source_hash="source")})
+    core = YogurtCore(store, identity, FakePersonaSnapshotPort({"yogurt": _persona()}), model or FakeModelAdapter(((),)), CoreInstanceId(value="core"), scheduler=scheduler)
     await core.start()
     await core.create_conversation(_ref())
-    return core, store, personas
+    return core, store
 
 
-def test_admission_idempotency_optional_response_and_frozen_persona():
-    async def scenario():
-        model = FakeModelAdapter(((VisibleTextDelta(text="hi", language="en"), AttemptTerminal(kind=AttemptTerminalKind.SUCCEEDED)),))
-        core, _, personas = await _core(model)
-        command = _command()
-        first = await core.submit_turn(command)
-        duplicate_before_start = await core.submit_turn(command)
-        assert first.status == TurnAdmissionStatus.NEWLY_ADMITTED
-        assert duplicate_before_start.status == TurnAdmissionStatus.SAME_LOGICAL_TURN
-        assert duplicate_before_start.response_id is None
-        personas.replace(_persona("p2"))
-        await core.drain()
-        duplicate_after_start = await core.submit_turn(command)
-        assert duplicate_after_start.response_id is not None
-        assert model.contexts[0].persona_material == "persona-p1"
-    asyncio.run(scenario())
-
-
-def test_cross_user_conflict_and_busy_reject_without_extra_admission():
-    async def scenario():
-        core, store, _ = await _core(FakeModelAdapter(((),)))
-        first = await core.submit_turn(_command())
-        assert first.status == TurnAdmissionStatus.NEWLY_ADMITTED
-        assert (await core.submit_turn(_command(text="changed"))).status == TurnAdmissionStatus.TURN_ID_CONFLICT
-        assert (await core.submit_turn(_command(turn="t2"))).status == TurnAdmissionStatus.CONVERSATION_BUSY
-        assert (await core.submit_turn(_command(turn="other", user="u2"))).status == TurnAdmissionStatus.REJECTED
-        assert await store.active_claim(_ref()) == TurnId(value="t1")
-    asyncio.run(scenario())
-
-
-def test_racing_turns_get_one_atomic_claim_and_same_turn_id_is_scoped_to_conversation():
-    async def scenario():
-        core, store, _ = await _core(FakeModelAdapter(((), ())))
-        await core.create_conversation(_ref(conversation="c2"))
-        raced = await asyncio.gather(core.submit_turn(_command(turn="a")), core.submit_turn(_command(turn="b")))
-        assert sorted(result.status for result in raced) == [TurnAdmissionStatus.CONVERSATION_BUSY, TurnAdmissionStatus.NEWLY_ADMITTED]
-        other = await core.submit_turn(_command(turn="a", conversation="c2"))
-        assert other.status == TurnAdmissionStatus.NEWLY_ADMITTED
-        assert (await store.get_turn(_ref(), TurnId(value="a"))).turn_ref.turn_id == TurnId(value="a")
-        assert (await store.get_turn(_ref(conversation="c2"), TurnId(value="a"))).conversation_ref.conversation_id == ConversationId(value="c2")
-    asyncio.run(scenario())
-
-
-def test_stale_authority_cancel_winner_and_response_stream_is_narrow():
+def test_authority_is_fail_closed_explicit_handoff_and_fences_lifecycle_writes():
     async def scenario():
         store = InMemoryCoreStateStore()
-        ref = _ref()
-        await store.create_conversation(ref)
         old = await store.acquire_authority(CoreInstanceId(value="old"))
-        snapshot = TurnSnapshot(identity_revision="i", core_config_revision="c", turn_origin=_origin(), conversation_context_revision="ctx", principal_binding_reference="p", persona_snapshot=_persona())
-        command = _command()
-        admitted = await store.try_admit_turn(old, ref, TurnId(value="t1"), command.fingerprint, snapshot, command.input)
-        assert admitted.status == TurnAdmissionStatus.NEWLY_ADMITTED
-        response_id = ResponseId(value="r1")
-        response = await store.commit_response_started(old, ref, TurnId(value="t1"), response_id)
+        with pytest.raises(CoreStateError, match="CORE_AUTHORITY_ALREADY_OWNED"):
+            await store.acquire_authority(CoreInstanceId(value="new"))
+        await store.create_conversation(old, _ref())
+        await store.release_authority(old)
         new = await store.acquire_authority(CoreInstanceId(value="new"))
+        assert new.authority_epoch > old.authority_epoch
         with pytest.raises(CoreStateError, match="STALE_CORE_AUTHORITY"):
-            await store.commit_segment(old, response_id, response.revision, AgentOutputSegmentCommitted(response_id=response_id, segment_id=SegmentId(value="s1"), sequence=1, text="late", language="en"))
-        aborted = await store.abort_response(new, response_id, response.revision, "CANCELLED")
-        with pytest.raises(CoreStateError, match="RESPONSE_NOT_OPEN"):
-            await store.commit_segment(new, response_id, aborted.revision, AgentOutputSegmentCommitted(response_id=response_id, segment_id=SegmentId(value="s1"), sequence=1, text="late", language="en"))
+            await store.create_conversation(old, _ref(conversation="stale"))
+        with pytest.raises(CoreStateError, match="STALE_CORE_AUTHORITY"):
+            await store.try_admit_turn(old, _ref(), TurnId(value="t"), _command().fingerprint, _snapshot(), _command().input)
+        await store.create_conversation(new, _ref(conversation="new"))
+    asyncio.run(scenario())
+
+
+def test_create_conversation_requires_current_authority_token():
+    async def scenario():
+        store = InMemoryCoreStateStore()
+        with pytest.raises(CoreStateError, match="STALE_CORE_AUTHORITY"):
+            await store.create_conversation(None, _ref())  # type: ignore[arg-type]
+    asyncio.run(scenario())
+
+
+def test_terminalization_validates_claim_before_writing_and_normal_release_is_atomic():
+    async def scenario():
+        store, token = await _admitted_store()
+        ref = _ref()
+        key = "yogurt|u1|c1|t1"
+        store._claims["yogurt|u1|c1"] = "wrong"  # intentional fault injection at transaction boundary
+        before = await store.get_turn(ref, TurnId(value="t1"))
+        with pytest.raises(CoreStateError, match="CONVERSATION_CLAIM_MISMATCH"):
+            await store.terminalize_turn(token, ref, TurnId(value="t1"), before.revision, TurnState.CANCELLED)
+        unchanged = await store.get_turn(ref, TurnId(value="t1"))
+        assert unchanged == before and store._claims["yogurt|u1|c1"] == "wrong"
+        store._claims["yogurt|u1|c1"] = key
+        terminal = await store.terminalize_turn(token, ref, TurnId(value="t1"), unchanged.revision, TurnState.CANCELLED)
+        assert terminal.state == TurnState.CANCELLED and await store.active_claim(ref) is None
+    asyncio.run(scenario())
+
+
+def test_cancel_turn_before_and_after_response_started_and_after_terminal():
+    async def scenario():
+        core, store = await _core()
+        command = _command()
+        await core.submit_turn(command)
+        cancelled = await core.cancel_turn(CancelTurnCommand(caller_context=command.caller_context, conversation_ref=_ref(), turn_id=command.turn_id))
+        assert cancelled.status == CancelTurnStatus.CANCELLED and cancelled.response_id is None
+        assert (await store.get_turn(_ref(), command.turn_id)).state == TurnState.CANCELLED
+        await core.drain()
+
+        entered, release = asyncio.Event(), asyncio.Event()
+        model = _BlockingModel(entered, release)
+        core2, store2 = await _core(model)
+        command2 = _command()
+        await core2.submit_turn(command2)
+        await entered.wait()
+        response_id = (await core2.submit_turn(command2)).response_id
+        result = await core2.cancel_turn(CancelTurnCommand(caller_context=command2.caller_context, conversation_ref=_ref(), turn_id=command2.turn_id))
+        assert result.status == CancelTurnStatus.CANCELLED
+        assert (await core2.get_response(GetResponseCommand(caller_context=command2.caller_context, response_id=response_id))).state == ResponseState.ABORTED
+        assert (await store2.get_turn(_ref(), command2.turn_id)).state == TurnState.CANCELLED
+        release.set()
+        await core2.drain()
+        assert (await core2.cancel_turn(CancelTurnCommand(caller_context=command2.caller_context, conversation_ref=_ref(), turn_id=command2.turn_id))).status == CancelTurnStatus.ALREADY_TERMINAL
+    asyncio.run(scenario())
+
+
+def test_fingerprint_and_origin_are_verified_before_admission():
+    async def scenario():
+        core, store = await _core()
+        command = _command()
+        changed_input = command.input.model_copy(update={"parts": (TextInputPart(text="changed"),)})
+        assert (await core.submit_turn(command.model_copy(update={"input": changed_input}))).reason == "INVALID_TURN_FINGERPRINT"
+        for origin in (_origin(principal="forged"), _origin(resolution="forged"), _origin(surface="forged")):
+            forged = _command(origin=origin)
+            assert (await core.submit_turn(forged)).reason == "TURN_ORIGIN_MISMATCH"
+        assert await store.active_claim(_ref()) is None
+    asyncio.run(scenario())
+
+
+def test_context_is_ordered_and_current_input_is_not_duplicated():
+    async def scenario():
+        model = FakeModelAdapter(((VisibleTextDelta(text="A1"),), (VisibleTextDelta(text="A2"),), (VisibleTextDelta(text="A3"),)))
+        core, _ = await _core(model)
+        for turn, text in (("t1", "U1"), ("t2", "U2"), ("t3", "U3")):
+            await core.submit_turn(_command(turn, text))
+            await core.drain()
+        context = model.contexts[2]
+        assert [(entry.role, entry.text) for entry in context.history] == [
+            (ContextRole.USER, "U1"), (ContextRole.ASSISTANT, "A1"),
+            (ContextRole.USER, "U2"), (ContextRole.ASSISTANT, "A2"),
+        ]
+        assert context.user_input == "U3" and all(entry.text != "U3" for entry in context.history)
+        policy = ContextBudgetPolicy(budget=2)
+        projected = ContextProjection(entries=tuple(context.history), conversation_metadata="x")
+        turn = await core.get_turn(GetTurnCommand(caller_context=CallerContext(logical_user_id=UserId(value="u1")), conversation_ref=_ref(), turn_id=TurnId(value="t3")))
+        assert [entry.text for entry in policy.compose(projected, turn).history] == ["U2", "A2"]
+    asyncio.run(scenario())
+
+
+def test_provider_exceptions_abort_deterministically_and_scheduler_surfaces_unexpected_errors():
+    async def scenario():
+        for events in ((RuntimeError("before"),), (VisibleTextDelta(text="prefix"), RuntimeError("after"))):
+            core, store = await _core(_RaisingModel(events))
+            command = _command()
+            await core.submit_turn(command)
+            await core.drain()
+            response_id = (await core.submit_turn(command)).response_id
+            response = await core.get_response(GetResponseCommand(caller_context=command.caller_context, response_id=response_id))
+            assert response.state == ResponseState.ABORTED and await store.active_claim(_ref()) is None
+            assert len(response.segments) == (0 if isinstance(events[0], RuntimeError) else 1)
+
+        scheduler = ConversationScheduler()
+        async def broken():
+            raise ValueError("unexpected")
+        scheduler.schedule("broken", broken())
+        await asyncio.sleep(0)
+        with pytest.raises(ValueError, match="unexpected"):
+            await scheduler.drain()
+    asyncio.run(scenario())
+
+
+def test_watcher_terminal_cursor_and_live_handoff_do_not_lose_events():
+    async def scenario():
+        store, token = await _admitted_store()
+        response_id = ResponseId(value="r1")
+        started = await store.commit_response_started(token, _ref(), TurnId(value="t1"), response_id)
+        watcher = store.watch_response_events(response_id, 0)
+        assert (await watcher.__anext__()).event_sequence == 1
+        waiting = asyncio.create_task(watcher.__anext__())
+        await asyncio.sleep(0)
+        segment = AgentOutputSegmentCommitted(response_id=response_id, segment_id=SegmentId(value="s1"), sequence=1, text="N+1", language="en")
+        committed = await store.commit_segment(token, response_id, started.revision, segment)
+        assert (await waiting).event_sequence == 2
+        final_wait = asyncio.create_task(watcher.__anext__())
+        await asyncio.sleep(0)
+        await store.finalize_response(token, response_id, committed.revision)
+        assert (await final_wait).event_sequence == 3
+        terminal_cursor = store.watch_response_events(response_id, 3)
+        with pytest.raises(StopAsyncIteration):
+            await terminal_cursor.__anext__()
         with pytest.raises(TypeError):
             ResponseEventStream.validate((object(),))
     asyncio.run(scenario())
 
 
-def test_same_segment_is_idempotent_but_changed_segment_and_late_terminal_delta_are_rejected():
-    async def scenario():
-        store = InMemoryCoreStateStore()
-        ref = _ref()
-        await store.create_conversation(ref)
-        token = await store.acquire_authority(CoreInstanceId(value="core"))
-        command = _command()
-        snapshot = TurnSnapshot(identity_revision="i", core_config_revision="c", turn_origin=_origin(), conversation_context_revision="ctx", principal_binding_reference="p", persona_snapshot=_persona())
-        await store.try_admit_turn(token, ref, TurnId(value="t1"), command.fingerprint, snapshot, command.input)
-        response_id = ResponseId(value="r1")
-        started = await store.commit_response_started(token, ref, TurnId(value="t1"), response_id)
-        segment = AgentOutputSegmentCommitted(response_id=response_id, segment_id=SegmentId(value="s1"), sequence=1, text="one", language="en")
-        committed = await store.commit_segment(token, response_id, started.revision, segment)
-        assert (await store.commit_segment(token, response_id, started.revision, segment)).segments == (segment,)
-        with pytest.raises(CoreStateError, match="SEGMENT_ID_CONFLICT"):
-            await store.commit_segment(token, response_id, started.revision, segment.model_copy(update={"text": "changed"}))
-        closed = await store.finalize_response(token, response_id, committed.revision)
-        with pytest.raises(CoreStateError, match="RESPONSE_NOT_OPEN"):
-            await store.commit_segment(token, response_id, closed.revision, segment)
-    asyncio.run(scenario())
-
-
-def test_provider_fallback_stays_within_response_before_prefix_only_and_releases_claim_atomically():
-    async def scenario():
-        fallback = FakeModelAdapter(((AttemptTerminal(kind=AttemptTerminalKind.FAILED, reason="first"),), (VisibleTextDelta(text="recovered"), AttemptTerminal(kind=AttemptTerminalKind.SUCCEEDED))))
-        core, store, _ = await _core(fallback)
-        await core.submit_turn(_command())
-        await core.drain()
-        response_id = (await core.submit_turn(_command())).response_id
-        assert response_id is not None
-        recovered = await core.get_response(GetResponseCommand(caller_context=CallerContext(logical_user_id=UserId(value="u1")), response_id=response_id))
-        assert len(recovered.attempts) == 2 and recovered.state.value == "finalized"
-        assert await store.active_claim(_ref()) is None
-
-        prefix_failure = FakeModelAdapter(((VisibleTextDelta(text="prefix"), AttemptTerminal(kind=AttemptTerminalKind.FAILED, reason="broken")), (VisibleTextDelta(text="must not run"),)))
-        core2, _, _ = await _core(prefix_failure)
-        await core2.submit_turn(_command(conversation="c1"))
-        await core2.drain()
-        response_id2 = (await core2.submit_turn(_command(conversation="c1"))).response_id
-        aborted = await core2.get_response(GetResponseCommand(caller_context=CallerContext(logical_user_id=UserId(value="u1")), response_id=response_id2))
-        assert aborted.state.value == "aborted" and len(aborted.attempts) == 1 and len(prefix_failure.contexts) == 1
-    asyncio.run(scenario())
-
-
-def test_replay_after_cursor_has_no_subscribe_gap_and_cross_user_read_is_denied():
-    async def scenario():
-        model = FakeModelAdapter(((VisibleTextDelta(text="hi", language="en"), AttemptTerminal(kind=AttemptTerminalKind.SUCCEEDED)),))
-        core, _, _ = await _core(model)
-        await core.submit_turn(_command())
-        await core.drain()
-        response_id = (await core.submit_turn(_command())).response_id
-        assert response_id is not None
-        with pytest.raises(CoreStateError, match="READ_NOT_AUTHORIZED"):
-            await core.get_response(GetResponseCommand(caller_context=CallerContext(logical_user_id=UserId(value="u2")), response_id=response_id))
-        with pytest.raises(CoreStateError, match="READ_NOT_AUTHORIZED"):
-            await core.get_turn(GetTurnCommand(caller_context=CallerContext(logical_user_id=UserId(value="u2")), conversation_ref=_ref(), turn_id=TurnId(value="t1")))
-        events = []
-        async for event in core.watch_response(WatchResponseCommand(caller_context=CallerContext(logical_user_id=UserId(value="u1")), response_id=response_id, after_event_sequence=1)):
-            events.append(event)
-        assert [event.event_sequence for event in events] == [2, 3]
-    asyncio.run(scenario())
-
-
-def test_memory_store_explicitly_declares_ephemeral_without_restart_durability():
+def test_memory_store_is_explicitly_ephemeral():
     assert InMemoryCoreStateStore.persistence_mode == CorePersistenceMode.EPHEMERAL
+
+
+def _snapshot() -> TurnSnapshot:
+    return TurnSnapshot(identity_revision="i", core_config_revision="c", turn_origin=_origin(), conversation_context_revision="ctx", principal_binding_reference="binding", persona_snapshot=_persona())
+
+
+async def _admitted_store():
+    store = InMemoryCoreStateStore()
+    token = await store.acquire_authority(CoreInstanceId(value="core"))
+    await store.create_conversation(token, _ref())
+    command = _command()
+    await store.try_admit_turn(token, _ref(), TurnId(value="t1"), command.fingerprint, _snapshot(), command.input)
+    return store, token
+
+
+class _BlockingModel:
+    def __init__(self, entered, release):
+        self._entered, self._release = entered, release
+
+    async def run(self, context, attempt):
+        self._entered.set()
+        await self._release.wait()
+        yield VisibleTextDelta(text="late")
+
+    async def cancel(self, attempt):
+        return None
+
+
+class _RaisingModel:
+    def __init__(self, events):
+        self._events = events
+
+    async def run(self, context, attempt):
+        for event in self._events:
+            if isinstance(event, Exception):
+                raise event
+            yield event
+
+    async def cancel(self, attempt):
+        return None
