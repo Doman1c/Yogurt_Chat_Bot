@@ -10,7 +10,9 @@ from dataclasses import replace
 from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 from yogurt_contracts.conversation.input import TurnInput
+from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
 from yogurt_contracts.conversation.refs import ConversationRef, TurnRef
+from yogurt_contracts.execution import ExecutionAttemptSnapshot
 from yogurt_contracts.execution.turn_snapshot import TurnSnapshot
 from yogurt_contracts.foundation.identifiers import (
     CoreInstanceId,
@@ -28,13 +30,14 @@ from yogurt_contracts.response.events import (
     ResponseStartedEvent,
     SegmentCommittedEvent,
 )
-from yogurt_contracts.response.lifecycle import ResponseState
+from yogurt_contracts.response.lifecycle import ResponseAbortReason, ResponseState
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted
 from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
 from yogurt_contracts.foundation.durability import CorePersistenceMode
 
 from yogurt_core.application.results import AdmissionResponseState, TurnAdmissionResult, TurnAdmissionStatus
-from yogurt_core.model.execution import ExecutionAttemptSnapshot, StoredResponse, StoredTurn
+from yogurt_core.context.models import ContextEntry, ContextRole
+from yogurt_core.model.execution import StoredResponse, StoredTurn
 from yogurt_core.ports.state_store import CoreStateError
 
 
@@ -64,6 +67,8 @@ class InMemoryCoreStateStore:
 
     async def acquire_authority(self, core_instance_id: CoreInstanceId) -> CoreAuthorityToken:
         async with self._condition:
+            if self._authority is not None:
+                raise CoreStateError("CORE_AUTHORITY_ALREADY_OWNED")
             self._authority_epoch += 1
             self._authority = CoreAuthorityToken(
                 core_instance_id=core_instance_id,
@@ -79,8 +84,9 @@ class InMemoryCoreStateStore:
             self._authority = None
             self._authority_epoch += 1
 
-    async def create_conversation(self, conversation_ref: ConversationRef) -> None:
+    async def create_conversation(self, token: CoreAuthorityToken, conversation_ref: ConversationRef) -> None:
         async with self._condition:
+            self._validate_token(token)
             key = _conversation_key(conversation_ref)
             existing = self._conversations.get(key)
             if existing is not None and existing != conversation_ref:
@@ -184,6 +190,8 @@ class InMemoryCoreStateStore:
             turn = self._turns.get(key)
             if turn is None:
                 raise CoreStateError("TURN_NOT_FOUND")
+            if turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
+                raise CoreStateError("TURN_NOT_OPEN")
             if turn.response_id is not None:
                 return self._responses[turn.response_id.value]
             event = ResponseStartedEvent(
@@ -260,7 +268,7 @@ class InMemoryCoreStateStore:
             return response
 
     async def abort_response(
-        self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int, reason: str
+        self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int, reason: ResponseAbortReason
     ) -> StoredResponse:
         async with self._condition:
             self._validate_token(token)
@@ -277,7 +285,13 @@ class InMemoryCoreStateStore:
             return response
 
     async def terminalize_turn(
-        self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, expected_turn_revision: int, reason: str
+        self,
+        token: CoreAuthorityToken,
+        conversation_ref: ConversationRef,
+        turn_id: TurnId,
+        expected_turn_revision: int,
+        state: TurnState,
+        abort_reason: Optional[AbortReason] = None,
     ) -> StoredTurn:
         """Atomic terminal event/claim release transition; never split by application code."""
         async with self._condition:
@@ -288,29 +302,39 @@ class InMemoryCoreStateStore:
                 raise CoreStateError("TURN_NOT_FOUND")
             if turn.revision != expected_turn_revision:
                 raise CoreStateError("TURN_REVISION_CONFLICT")
-            if turn.terminal_reason is not None:
+            if turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
                 return turn
-            turn = replace(turn, terminal_reason=reason, revision=turn.revision + 1)
-            self._turns[key] = turn
             conversation_key = _conversation_key(conversation_ref)
             if self._claims.get(conversation_key) != key:
                 raise CoreStateError("CONVERSATION_CLAIM_MISMATCH")
+            if state not in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
+                raise CoreStateError("INVALID_TURN_TERMINAL_STATE")
+            if state == TurnState.ABORTED and abort_reason is None:
+                raise CoreStateError("ABORT_REASON_REQUIRED")
+            if state != TurnState.ABORTED and abort_reason is not None:
+                raise CoreStateError("UNEXPECTED_ABORT_REASON")
+            # All validation happens before either state write. This is the
+            # in-memory transaction boundary for terminalization + claim release.
+            turn = replace(turn, state=state, abort_reason=abort_reason, revision=turn.revision + 1)
+            self._turns[key] = turn
             del self._claims[conversation_key]
             return turn
 
-    async def get_conversation_context(self, conversation_ref: ConversationRef, excluding_turn_id: TurnId) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    async def get_conversation_context(self, conversation_ref: ConversationRef, excluding_turn_id: TurnId) -> Tuple[ContextEntry, ...]:
         async with self._condition:
-            inputs: List[str] = []
-            outputs: List[str] = []
+            entries: List[ContextEntry] = []
             for turn in self._turns.values():
                 if turn.conversation_ref != conversation_ref or turn.turn_ref.turn_id == excluding_turn_id:
                     continue
-                inputs.extend(part.text for part in turn.turn_input.parts if hasattr(part, "text"))
+                entries.extend(
+                    ContextEntry(role=ContextRole.USER, text=part.text)
+                    for part in turn.turn_input.parts if hasattr(part, "text")
+                )
                 if turn.response_id is not None:
                     response = self._responses.get(turn.response_id.value)
                     if response is not None:
-                        outputs.extend(segment.text for segment in response.segments)
-            return tuple(inputs), tuple(outputs)
+                        entries.extend(ContextEntry(role=ContextRole.ASSISTANT, text=segment.text) for segment in response.segments)
+            return tuple(entries)
 
     async def watch_response_events(self, response_id: ResponseId, after_event_sequence: int) -> AsyncIterator[ResponseEvent]:
         cursor = after_event_sequence
@@ -321,6 +345,8 @@ class InMemoryCoreStateStore:
                     raise CoreStateError("RESPONSE_NOT_FOUND")
                 replay = tuple(event for event in response.events if event.event_sequence > cursor)
                 if not replay:
+                    if response.state in {ResponseState.FINALIZED, ResponseState.ABORTED}:
+                        return
                     # The predicate is checked while holding the same lock as commits:
                     # no replay->subscribe gap can lose a committed event.
                     await self._condition.wait_for(
@@ -342,6 +368,8 @@ class InMemoryCoreStateStore:
     def _validate_token(self, token: CoreAuthorityToken) -> None:
         if self._authority != token:
             raise CoreStateError("STALE_CORE_AUTHORITY")
+        if token is None:
+            raise CoreStateError("STALE_CORE_AUTHORITY")
         if token.store_authority_id != self._store_authority_id or token.authority_epoch != self._authority_epoch:
             raise CoreStateError("STALE_CORE_AUTHORITY")
 
@@ -357,7 +385,7 @@ class InMemoryCoreStateStore:
         if response.state != ResponseState.STARTED:
             raise CoreStateError("RESPONSE_NOT_OPEN")
         turn = self._turns[self._response_turns[response_id.value]]
-        if turn.terminal_reason is not None:
+        if turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
             raise CoreStateError("TURN_NOT_OPEN")
         return response
 

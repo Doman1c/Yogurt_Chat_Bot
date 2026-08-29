@@ -4,6 +4,7 @@ from typing import Literal, Union
 
 from ..foundation.identifiers import ResponseEventId, ResponseId, SegmentId
 from ..foundation.model import FrozenContract
+from .lifecycle import ResponseAbortReason
 
 
 class ResponseEventBase(FrozenContract):
@@ -30,7 +31,7 @@ class ResponseFinalizedEvent(ResponseEventBase):
 
 class ResponseAbortedEvent(ResponseEventBase):
     event_type: Literal["response_aborted"] = "response_aborted"
-    reason: str
+    reason: ResponseAbortReason
 
 
 ResponseEvent = Union[ResponseStartedEvent, SegmentCommittedEvent, ResponseFinalizedEvent, ResponseAbortedEvent]

@@ -42,6 +42,8 @@ class AgentResponseFinalized(FrozenContract):
 
 class AgentResponseAborted(FrozenContract):
     response_id: ResponseId
+    # R1 public record remains wire-compatible. R2-A's authoritative response
+    # event stream uses ResponseAbortReason rather than this legacy payload.
     reason: str
 
 
