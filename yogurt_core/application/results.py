@@ -26,3 +26,16 @@ class TurnAdmissionResult(FrozenContract):
     response_id: Optional[ResponseId] = None
     response_state: AdmissionResponseState = AdmissionResponseState.NOT_STARTED
     reason: Optional[str] = None
+
+
+class CancelTurnStatus(str, Enum):
+    CANCELLED = "cancelled"
+    ALREADY_TERMINAL = "already_terminal"
+    REJECTED = "rejected"
+
+
+class CancelTurnResult(FrozenContract):
+    status: CancelTurnStatus
+    turn_id: Optional[TurnId] = None
+    response_id: Optional[ResponseId] = None
+    reason: Optional[str] = None

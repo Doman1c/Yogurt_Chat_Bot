@@ -10,10 +10,8 @@ class ContextProjectionService:
         self._store = store
 
     async def project(self, turn: StoredTurn) -> ContextProjection:
-        history = await self._store.get_conversation_context(turn.conversation_ref, turn.turn_ref.turn_id)
-        current = tuple(part.text for part in turn.turn_input.parts if hasattr(part, "text"))
+        entries = await self._store.get_conversation_context(turn.conversation_ref, turn.turn_ref.turn_id)
         return ContextProjection(
-            committed_user_inputs=history[0] + current,
-            committed_assistant_segments=history[1],
+            entries=entries,
             conversation_metadata=turn.snapshot.conversation_context_revision,
         )

@@ -1,5 +1,3 @@
-from yogurt_contracts.execution.persona import PersonaSnapshot
-
 from yogurt_core.context.models import ContextProjection
 from yogurt_core.model.execution import ModelContext, StoredTurn
 
@@ -14,8 +12,7 @@ class ContextBudgetPolicy:
         persona = turn.snapshot.persona_snapshot
         if persona is None:
             raise ValueError("R2-A turn execution requires a frozen PersonaSnapshot")
-        history = projection.committed_user_inputs + projection.committed_assistant_segments
-        history = history[-self._budget:]
+        history = projection.entries[-self._budget:]
         input_text = "\n".join(part.text for part in turn.turn_input.parts if hasattr(part, "text"))
         return ModelContext(
             persona_material=persona.model_context_material,

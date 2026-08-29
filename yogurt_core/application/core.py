@@ -1,23 +1,28 @@
 """Application facade for the R2-A process-lifetime reference Core."""
 
 import uuid
+from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
+from yogurt_contracts.conversation.fingerprint import turn_fingerprint
+from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
 from yogurt_contracts.conversation.refs import ConversationRef
+from yogurt_contracts.execution import ExecutionAttemptSnapshot
 from yogurt_contracts.execution.turn_snapshot import TurnSnapshot
 from yogurt_contracts.foundation.identifiers import CoreInstanceId, ExecutionAttemptId, ResponseId, SegmentId, TurnId, UserId
-from yogurt_contracts.identity.principal import ExternalPrincipal
+from yogurt_contracts.foundation.time import UtcInstant
 from yogurt_contracts.response.events import ResponseEvent
+from yogurt_contracts.response.lifecycle import ResponseAbortReason, ResponseState
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted
 from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
 
-from yogurt_core.application.commands import GetResponseCommand, GetTurnCommand, SubmitTurnCommand, WatchResponseCommand
-from yogurt_core.application.results import TurnAdmissionResult, TurnAdmissionStatus
+from yogurt_core.application.commands import CancelTurnCommand, GetResponseCommand, GetTurnCommand, SubmitTurnCommand, WatchResponseCommand
+from yogurt_core.application.results import CancelTurnResult, CancelTurnStatus, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.authority.conversation_authority import ConversationAuthority
 from yogurt_core.context.policy import ContextBudgetPolicy
 from yogurt_core.context.projection import ContextProjectionService
 from yogurt_core.model.events import AttemptTerminal, AttemptTerminalKind, VisibleTextDelta
-from yogurt_core.model.execution import ExecutionAttemptSnapshot, StoredResponse, StoredTurn
+from yogurt_core.model.execution import StoredResponse, StoredTurn
 from yogurt_core.ports.identity import IdentityResolver
 from yogurt_core.ports.model import ModelPort
 from yogurt_core.ports.persona import PersonaSnapshotPort
@@ -58,13 +63,21 @@ class YogurtCore:
             self._token = None
 
     async def create_conversation(self, conversation_ref: ConversationRef) -> None:
-        await ConversationAuthority(self._store).create(conversation_ref)
+        await ConversationAuthority(self._store).create(self._require_token(), conversation_ref)
 
     async def submit_turn(self, command: SubmitTurnCommand) -> TurnAdmissionResult:
         token = self._require_token()
+        expected_fingerprint = turn_fingerprint(command.input, command.principal_binding_reference)
+        if command.fingerprint != expected_fingerprint:
+            return TurnAdmissionResult(status=TurnAdmissionStatus.REJECTED, reason="INVALID_TURN_FINGERPRINT")
         resolution = await self._identity_resolver.resolve(command.external_principal)
-        # The authenticated caller and resolved identity must both own the ref before
-        # the store receives an InputCommitted admission request.
+        origin = command.input.origin
+        if (
+            origin.external_principal_ref != command.external_principal.reference
+            or origin.identity_resolution_ref != resolution.reference
+            or origin.origin_surface != command.external_principal.authenticated_surface
+        ):
+            return TurnAdmissionResult(status=TurnAdmissionStatus.REJECTED, reason="TURN_ORIGIN_MISMATCH")
         if resolution.logical_user != command.caller_context.logical_user_id:
             return TurnAdmissionResult(status=TurnAdmissionStatus.REJECTED, reason="CALLER_IDENTITY_MISMATCH")
         authority = ConversationAuthority(self._store)
@@ -74,50 +87,47 @@ class YogurtCore:
         snapshot = TurnSnapshot(
             identity_revision=resolution.identity_revision,
             core_config_revision=command.core_config_revision,
-            turn_origin=command.input.origin,
+            turn_origin=origin,
             conversation_context_revision=command.conversation_context_revision,
             principal_binding_reference=command.principal_binding_reference,
             persona_snapshot=persona,
         )
         result = await self._store.try_admit_turn(
-            token, command.conversation_ref, command.turn_id, command.fingerprint, snapshot, command.input
+            token, command.conversation_ref, command.turn_id, expected_fingerprint, snapshot, command.input
         )
         if result.status == TurnAdmissionStatus.NEWLY_ADMITTED:
             self._scheduler.schedule(self._scheduler_key(command.conversation_ref, command.turn_id), self._run_turn(command.conversation_ref, command.turn_id))
         return result
 
-    async def get_turn(self, command: GetTurnCommand) -> StoredTurn:
-        return await self._store.get_authorized_turn(
+    async def cancel_turn(self, command: CancelTurnCommand) -> CancelTurnResult:
+        token = self._require_token()
+        turn = await self._store.get_authorized_turn(
             command.conversation_ref, command.turn_id, command.caller_context.logical_user_id
         )
+        if turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
+            return CancelTurnResult(status=CancelTurnStatus.ALREADY_TERMINAL, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id)
+        if turn.response_id is not None:
+            response = await self._store.get_authorized_response(turn.response_id, command.caller_context.logical_user_id)
+            if response.state == ResponseState.STARTED:
+                closed = await self._abort_with_retry(
+                    token, response, ResponseAbortReason.CANCELLED, command.caller_context.logical_user_id
+                )
+                if closed.attempts:
+                    await self._model.cancel(closed.attempts[-1])
+        turn = await self._store.get_turn(command.conversation_ref, command.turn_id)
+        await self._store.terminalize_turn(token, command.conversation_ref, command.turn_id, turn.revision, TurnState.CANCELLED)
+        return CancelTurnResult(status=CancelTurnStatus.CANCELLED, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id)
+
+    async def get_turn(self, command: GetTurnCommand) -> StoredTurn:
+        return await self._store.get_authorized_turn(command.conversation_ref, command.turn_id, command.caller_context.logical_user_id)
 
     async def get_response(self, command: GetResponseCommand) -> StoredResponse:
         return await self._store.get_authorized_response(command.response_id, command.caller_context.logical_user_id)
 
     async def watch_response(self, command: WatchResponseCommand) -> AsyncIterator[ResponseEvent]:
-        # Authorize before opening the stream; IDs alone confer no read capability.
         await self._store.get_authorized_response(command.response_id, command.caller_context.logical_user_id)
         async for event in self._store.watch_response_events(command.response_id, command.after_event_sequence):
             yield event
-
-    async def cancel_response(self, response_id: ResponseId, caller_user_id: UserId, reason: str = "CANCELLED") -> None:
-        """Authoritative close first; a provider ignoring cancel cannot commit late output."""
-        token = self._require_token()
-        response = await self._store.get_authorized_response(response_id, caller_user_id)
-        # A segment may win its CAS immediately before cancellation. Refreshing and
-        # closing then preserves that prefix while cancellation still terminalizes.
-        while True:
-            try:
-                closed = await self._store.abort_response(token, response_id, response.revision, reason)
-                break
-            except CoreStateError as error:
-                if error.code != "RESPONSE_REVISION_CONFLICT":
-                    raise
-                response = await self._store.get_authorized_response(response_id, caller_user_id)
-        turn = await self._store.get_turn_by_response(response_id)
-        await self._store.terminalize_turn(token, turn.conversation_ref, turn.turn_ref.turn_id, turn.revision, reason)
-        if closed.attempts:
-            await self._model.cancel(closed.attempts[-1])
 
     async def drain(self) -> None:
         await self._scheduler.drain()
@@ -131,51 +141,83 @@ class YogurtCore:
             projection = await self._projection.project(turn)
             context = self._context_policy.compose(projection, turn)
             saw_committed_prefix = False
-            for number in (1, 2):
+            for _ in (1, 2):
                 attempt = ExecutionAttemptSnapshot(
                     execution_attempt_id=ExecutionAttemptId(value="attempt-" + uuid.uuid4().hex),
                     response_id=response_id,
-                    attempt_number=number,
-                    model_binding="r2a-fake-model",
-                    provider_generation="r2a",
-                    provider_config_revision="r2a",
+                    binding_snapshots=(),
+                    started_at=UtcInstant(value=datetime.now(timezone.utc)),
+                    provider_applied_config_revision="r2a",
                 )
                 response = await self._store.add_execution_attempt(token, response_id, attempt)
                 terminal = AttemptTerminal(kind=AttemptTerminalKind.SUCCEEDED)
-                async for draft in self._model.run(context, attempt):
-                    if isinstance(draft, VisibleTextDelta):
-                        text = draft.text.strip()
-                        if not text:
-                            continue
-                        segment = AgentOutputSegmentCommitted(
-                            response_id=response_id,
-                            segment_id=SegmentId(value="segment-" + uuid.uuid4().hex),
-                            sequence=len(response.segments) + 1,
-                            text=text,
-                            language=draft.language,
-                        )
-                        response = await self._store.commit_segment(token, response_id, response.revision, segment)
-                        saw_committed_prefix = True
-                    elif isinstance(draft, AttemptTerminal):
-                        terminal = draft
-                if terminal.kind == AttemptTerminalKind.SUCCEEDED:
-                    response = await self._store.finalize_response(token, response_id, response.revision)
-                    await self._terminalize(conversation_ref, turn.turn_ref.turn_id, "COMPLETED")
+                try:
+                    async for draft in self._model.run(context, attempt):
+                        if isinstance(draft, VisibleTextDelta):
+                            text = draft.text.strip()
+                            if not text:
+                                continue
+                            segment = AgentOutputSegmentCommitted(
+                                response_id=response_id,
+                                segment_id=SegmentId(value="segment-" + uuid.uuid4().hex),
+                                sequence=len(response.segments) + 1,
+                                text=text,
+                                language=draft.language,
+                            )
+                            response = await self._store.commit_segment(token, response_id, response.revision, segment)
+                            saw_committed_prefix = True
+                        elif isinstance(draft, AttemptTerminal):
+                            terminal = draft
+                except Exception:
+                    await self._abort_and_terminalize(
+                        conversation_ref, turn.turn_ref.turn_id, response, ResponseAbortReason.EXECUTION_FAILURE,
+                        AbortReason.EXECUTION_FAILURE,
+                    )
                     return
-                # A fallback is allowed only before the first semantic segment commits.
-                if saw_committed_prefix or number == 2:
-                    await self._store.abort_response(token, response_id, response.revision, terminal.reason or "PROVIDER_FAILURE")
-                    await self._terminalize(conversation_ref, turn.turn_ref.turn_id, terminal.reason or "PROVIDER_FAILURE")
+                if terminal.kind == AttemptTerminalKind.SUCCEEDED:
+                    await self._store.finalize_response(token, response_id, response.revision)
+                    await self._terminalize(conversation_ref, turn.turn_ref.turn_id, TurnState.COMPLETED)
+                    return
+                if saw_committed_prefix or terminal.kind == AttemptTerminalKind.CANCELLED or _ == 2:
+                    await self._abort_and_terminalize(
+                        conversation_ref, turn.turn_ref.turn_id, response, ResponseAbortReason.PROVIDER_FAILURE,
+                        AbortReason.PROVIDER_FAILURE,
+                    )
                     return
         except CoreStateError as error:
-            # Cancellation and authority transfer deliberately fence a late task.
-            if error.code in {"STALE_CORE_AUTHORITY", "RESPONSE_NOT_OPEN", "TURN_NOT_OPEN"}:
+            if error.code in {"STALE_CORE_AUTHORITY", "RESPONSE_NOT_OPEN", "TURN_NOT_OPEN", "TURN_REVISION_CONFLICT"}:
                 return
             raise
 
-    async def _terminalize(self, conversation_ref: ConversationRef, turn_id: TurnId, reason: str) -> None:
+    async def _abort_and_terminalize(
+        self,
+        conversation_ref: ConversationRef,
+        turn_id: TurnId,
+        response: StoredResponse,
+        response_reason: ResponseAbortReason,
+        turn_reason: AbortReason,
+    ) -> None:
+        await self._store.abort_response(self._require_token(), response.response_id, response.revision, response_reason)
+        await self._terminalize(conversation_ref, turn_id, TurnState.ABORTED, turn_reason)
+
+    async def _abort_with_retry(
+        self, token: CoreAuthorityToken, response: StoredResponse, reason: ResponseAbortReason, caller_user_id: UserId
+    ) -> StoredResponse:
+        while True:
+            try:
+                return await self._store.abort_response(token, response.response_id, response.revision, reason)
+            except CoreStateError as error:
+                if error.code != "RESPONSE_REVISION_CONFLICT":
+                    raise
+                response = await self._store.get_authorized_response(response.response_id, caller_user_id)
+
+    async def _terminalize(
+        self, conversation_ref: ConversationRef, turn_id: TurnId, state: TurnState, abort_reason: Optional[AbortReason] = None
+    ) -> None:
         turn = await self._store.get_turn(conversation_ref, turn_id)
-        await self._store.terminalize_turn(self._require_token(), conversation_ref, turn.turn_ref.turn_id, turn.revision, reason)
+        await self._store.terminalize_turn(
+            self._require_token(), conversation_ref, turn.turn_ref.turn_id, turn.revision, state, abort_reason
+        )
 
     def _require_token(self) -> CoreAuthorityToken:
         if self._token is None:

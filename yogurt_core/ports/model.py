@@ -1,7 +1,9 @@
 from typing import AsyncIterator, Protocol
 
+from yogurt_contracts.execution import ExecutionAttemptSnapshot
+
 from yogurt_core.model.events import ModelDraftEvent
-from yogurt_core.model.execution import ExecutionAttemptSnapshot, ModelContext
+from yogurt_core.model.execution import ModelContext
 
 
 class ModelPort(Protocol):

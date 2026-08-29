@@ -50,3 +50,9 @@ class GetTurnCommand(FrozenContract):
     caller_context: CallerContext
     conversation_ref: ConversationRef
     turn_id: TurnId
+
+
+class CancelTurnCommand(FrozenContract):
+    caller_context: CallerContext
+    conversation_ref: ConversationRef
+    turn_id: TurnId
