@@ -53,8 +53,8 @@ def _command(turn: str = "t1", text: str = "hello", origin: TurnOrigin = None) -
     )
 
 
-async def _core(model=None, scheduler=None, context_policy=None):
-    store = InMemoryCoreStateStore()
+async def _core(model=None, scheduler=None, context_policy=None, store=None):
+    store = store or InMemoryCoreStateStore()
     identity = FakeIdentityResolver({"external-u1": IdentityResolution(reference=IdentityResolutionRef(value="res-u1"), logical_user=UserId(value="u1"), identity_revision="identity", source_hash="source")})
     core = YogurtCore(store, identity, FakePersonaSnapshotPort({"yogurt": _persona()}), model or FakeModelAdapter(((),)), CoreInstanceId(value="core"), context_policy=context_policy, scheduler=scheduler)
     await core.start()
@@ -256,6 +256,43 @@ def test_context_policy_failure_after_response_started_converges_then_reraises_o
     asyncio.run(scenario())
 
 
+def test_cancel_race_reloads_finalized_or_provider_aborted_response_before_converging_turn():
+    async def scenario():
+        for winner, expected_state, expected_reason in (
+            ("finalized", TurnState.COMPLETED, None),
+            ("provider", TurnState.ABORTED, AbortReason.PROVIDER_FAILURE),
+        ):
+            store = _TerminalWinningStore(winner)
+            core, _ = await _core(store=store)
+            command = _command()
+            token = core._token
+            await store.try_admit_turn(token, _ref(), command.turn_id, command.fingerprint, _snapshot(), command.input)
+            await store.commit_response_started(token, _ref(), command.turn_id, ResponseId(value="r1"))
+            result = await core.cancel_turn(CancelTurnCommand(caller_context=command.caller_context, conversation_ref=_ref(), turn_id=command.turn_id))
+            turn = await store.get_turn(_ref(), command.turn_id)
+            assert result.status == CancelTurnStatus.ALREADY_TERMINAL
+            assert turn.state == expected_state and turn.abort_reason == expected_reason
+            assert await store.active_claim(_ref()) is None
+    asyncio.run(scenario())
+
+
+def test_execution_cleanup_handles_terminal_race_and_reraises_original_failure():
+    async def scenario():
+        store = _TerminalWinningStore("provider")
+        core, _ = await _core(_RaisingModel((RuntimeError("original execution failure"),)), store=store)
+        command = _command()
+        await core.submit_turn(command)
+        with pytest.raises(RuntimeError, match="original execution failure"):
+            await core.drain()
+        response_id = (await core.submit_turn(command)).response_id
+        response = await core.get_response(GetResponseCommand(caller_context=command.caller_context, response_id=response_id))
+        turn = await store.get_turn(_ref(), command.turn_id)
+        assert response.abort_reason == ResponseAbortReason.PROVIDER_FAILURE
+        assert turn.state == TurnState.ABORTED and turn.abort_reason == AbortReason.PROVIDER_FAILURE
+        assert await store.active_claim(_ref()) is None
+    asyncio.run(scenario())
+
+
 def test_watcher_terminal_cursor_and_live_handoff_do_not_lose_events():
     async def scenario():
         store, token = await _admitted_store()
@@ -327,3 +364,21 @@ class _RaisingModel:
 class _FailingContextPolicy(ContextBudgetPolicy):
     def compose(self, projection, turn):
         raise ValueError("context failed")
+
+
+class _TerminalWinningStore(InMemoryCoreStateStore):
+    """Injects an authoritative terminal winner between cancel/cleanup read and abort CAS."""
+
+    def __init__(self, winner):
+        super().__init__()
+        self._winner = winner
+        self._injected = False
+
+    async def abort_response(self, token, response_id, expected_response_revision, reason):
+        if not self._injected:
+            self._injected = True
+            if self._winner == "finalized":
+                await super().finalize_response(token, response_id, expected_response_revision)
+            else:
+                await super().abort_response(token, response_id, expected_response_revision, ResponseAbortReason.PROVIDER_FAILURE)
+        return await super().abort_response(token, response_id, expected_response_revision, reason)
