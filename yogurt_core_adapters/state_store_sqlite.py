@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import msvcrt
 import os
 import sqlite3
 import uuid
@@ -18,6 +17,11 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Set, Tuple, TypeVar, Union, cast
+
+if os.name == "nt":
+    import msvcrt
+else:
+    fcntl = cast(Any, __import__("fcntl"))
 
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
 from yogurt_contracts.conversation.input import TurnInput
@@ -534,7 +538,10 @@ class SQLiteCoreStateStore:
             if os.path.getsize(lock_path) == 0:
                 handle.write(b"0")
                 handle.flush()
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
             handle.close()
             raise CoreStateError("CORE_AUTHORITY_ALREADY_OWNED") from error

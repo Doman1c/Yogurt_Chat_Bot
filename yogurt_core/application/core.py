@@ -3,7 +3,7 @@
 import uuid
 import asyncio
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, TypeVar
 
 from yogurt_contracts.conversation.fingerprint import turn_fingerprint
 from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
@@ -12,6 +12,7 @@ from yogurt_contracts.execution import ExecutionAttemptSnapshot
 from yogurt_contracts.execution.turn_snapshot import TurnSnapshot
 from yogurt_contracts.foundation.identifiers import CoreInstanceId, ExecutionAttemptId, ResponseId, SegmentId, TurnId, UserId
 from yogurt_contracts.foundation.time import UtcInstant
+from yogurt_contracts.foundation.facts import CommitCertainty
 from yogurt_contracts.response.events import ResponseEvent
 from yogurt_contracts.response.lifecycle import ResponseAbortReason, ResponseState
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted
@@ -29,7 +30,7 @@ from yogurt_core.lifecycle import CoreLifecycleState
 from yogurt_core.ports.identity import IdentityResolver
 from yogurt_core.ports.model import ModelPort
 from yogurt_core.ports.persona import PersonaSnapshotPort
-from yogurt_core.ports.state_store import CoreStateError, CoreStateStore
+from yogurt_core.ports.state_store import CoreStateError, CoreStateStore, StateCommit
 from yogurt_core.response.terminal import consequence_from_response_terminal
 from yogurt_core.scheduling.conversation_scheduler import ConversationScheduler
 
@@ -117,9 +118,10 @@ class YogurtCore:
             principal_binding_reference=command.principal_binding_reference,
             persona_snapshot=persona,
         )
-        result = await self._store.try_admit_turn(
+        commit = await self._store.try_admit_turn_commit(
             token, command.conversation_ref, command.turn_id, expected_fingerprint, snapshot, command.input
         )
+        result = self._commit_value(commit)
         if result.status == TurnAdmissionStatus.NEWLY_ADMITTED:
             self._scheduler.schedule(self._scheduler_key(command.conversation_ref, command.turn_id), self._run_turn(command.conversation_ref, command.turn_id))
         return result
@@ -196,7 +198,7 @@ class YogurtCore:
                             text=text,
                             language=draft.language,
                         )
-                        response = await self._store.commit_segment(token, response_id, response.revision, segment)
+                        response = self._commit_value(await self._store.commit_segment_commit(token, response_id, response.revision, segment))
                         saw_committed_prefix = True
                     elif isinstance(draft, AttemptTerminal):
                         terminal = draft
@@ -250,9 +252,9 @@ class YogurtCore:
         if turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
             return
         try:
-            await self._store.terminalize_turn(
+            self._commit_value(await self._store.terminalize_turn_commit(
                 self._require_token(), conversation_ref, turn_id, turn.revision, consequence.state, consequence.abort_reason,
-            )
+            ))
         except CoreStateError as error:
             if error.code == "TURN_REVISION_CONFLICT" and await self._turn_is_terminal(conversation_ref, turn_id):
                 return
@@ -289,9 +291,9 @@ class YogurtCore:
     ) -> None:
         turn = await self._store.get_turn(conversation_ref, turn_id)
         try:
-            await self._store.terminalize_turn(
+            self._commit_value(await self._store.terminalize_turn_commit(
                 self._require_token(), conversation_ref, turn.turn_ref.turn_id, turn.revision, state, abort_reason
-            )
+            ))
         except CoreStateError as error:
             if error.code == "TURN_REVISION_CONFLICT" and await self._turn_is_terminal(conversation_ref, turn_id):
                 return
@@ -305,6 +307,16 @@ class YogurtCore:
     def _require_serving(self) -> None:
         if self._lifecycle != CoreLifecycleState.SERVING:
             raise CoreStateError("CORE_NOT_SERVING")
+
+    _CommittedValue = TypeVar("_CommittedValue")
+
+    @staticmethod
+    def _commit_value(commit: StateCommit[_CommittedValue]) -> _CommittedValue:
+        if commit.certainty == CommitCertainty.NOT_COMMITTED or commit.value is None:
+            raise CoreStateError("STATE_NOT_COMMITTED")
+        # OUTCOME_UNKNOWN is reconciled by the adapter using the identical
+        # stable identity before returning its durable projection value.
+        return commit.value
 
     @staticmethod
     def _scheduler_key(conversation_ref: ConversationRef, turn_id: TurnId) -> str:
