@@ -86,6 +86,11 @@ class InMemoryCoreStateStore:
             self._authority = None
             self._authority_epoch += 1
 
+    async def recover(self, token: CoreAuthorityToken) -> None:
+        """Ephemeral stores have no prior process state to recover."""
+        async with self._condition:
+            self._validate_token(token)
+
     async def create_conversation(self, token: CoreAuthorityToken, conversation_ref: ConversationRef) -> None:
         async with self._condition:
             self._validate_token(token)

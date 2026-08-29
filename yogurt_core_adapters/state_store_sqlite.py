@@ -129,6 +129,61 @@ class SQLiteCoreStateStore:
 
             self._write(write)
 
+    async def recover(self, token: CoreAuthorityToken) -> None:
+        """Rebuild local projections then deterministically close old work.
+
+        No model work is resumed after a process loss.  Each repair is recorded
+        in the same SQLite transaction as the resulting projection and claim
+        release, making a crash during recovery safely repeatable.
+        """
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> None:
+                self._validate_token(connection, token)
+                facts = connection.execute("SELECT fact_id, fact_type, fact_schema_version, aggregate_id, aggregate_revision, recorded_at, payload FROM facts ORDER BY rowid").fetchall()
+                connection.execute("DELETE FROM claims")
+                connection.execute("DELETE FROM responses")
+                connection.execute("DELETE FROM turns")
+                connection.execute("DELETE FROM conversations")
+                for row in facts:
+                    self._apply_projection_fact(connection, self._decode_fact(row))
+                rows = connection.execute("SELECT turn_key, payload FROM turns").fetchall()
+                for row in rows:
+                    key = str(row["turn_key"])
+                    turn = self._decode_turn(_load_json(str(row["payload"])))
+                    if turn.state in _TERMINAL_TURNS:
+                        continue
+                    if turn.response_id is None:
+                        repaired = replace(turn, state=TurnState.ABORTED, abort_reason=AbortReason.RECOVERY, revision=turn.revision + 1)
+                        self._append_fact(connection, self._projection_fact("turn_recovered", key, repaired.revision, {"kind": "turn", "turn": self._encode_turn(repaired)}))
+                        self._write_turn(connection, key, repaired)
+                        continue
+                    response = self._response_from_connection(connection, turn.response_id)
+                    if response.state == ResponseState.STARTED:
+                        event = ResponseAbortedEvent(event_id=ResponseEventId(value="event-" + uuid.uuid4().hex), response_id=response.response_id, event_sequence=len(response.events) + 1, reason=ResponseAbortReason.RECOVERY)
+                        response = replace(response, state=ResponseState.ABORTED, abort_reason=ResponseAbortReason.RECOVERY, events=response.events + (event,), revision=response.revision + 1)
+                        self._append_fact(connection, self._projection_fact("response_recovered", response.response_id.value, response.revision, {"kind": "response", "response": self._encode_response(response)}))
+                        self._write_response(connection, response)
+                    if response.state == ResponseState.FINALIZED:
+                        target, reason = TurnState.COMPLETED, None
+                    elif response.abort_reason == ResponseAbortReason.CANCELLED:
+                        target, reason = TurnState.CANCELLED, None
+                    else:
+                        if response.abort_reason is None:
+                            raise CoreStateError("INCOMPATIBLE_FACT_SCHEMA")
+                        target, reason = TurnState.ABORTED, AbortReason(response.abort_reason.value)
+                    repaired = replace(turn, state=target, abort_reason=reason, revision=turn.revision + 1)
+                    self._append_fact(connection, self._projection_fact("turn_recovered", key, repaired.revision, {"kind": "turn", "turn": self._encode_turn(repaired)}))
+                    self._write_turn(connection, key, repaired)
+                # Recovery never leaves a process-lost active claim behind.
+                connection.execute("DELETE FROM claims")
+
+            try:
+                self._write(write)
+            except CoreStateError as error:
+                if error.code in {"INCOMPATIBLE_FACT_SCHEMA", "INCOMPATIBLE_SCHEMA"}:
+                    self._serving = False
+                raise
+
     async def create_conversation(self, token: CoreAuthorityToken, conversation_ref: ConversationRef) -> None:
         async with self._lock:
             def write(connection: sqlite3.Connection) -> None:
@@ -619,7 +674,9 @@ class SQLiteCoreStateStore:
         if event_type == "response_finalized":
             return ResponseFinalizedEvent.model_validate(payload)
         if event_type == "response_aborted":
-            return ResponseAbortedEvent.model_validate(payload)
+            aborted_payload = dict(payload)
+            aborted_payload["reason"] = ResponseAbortReason(str(aborted_payload["reason"]))
+            return ResponseAbortedEvent.model_validate(aborted_payload)
         raise CoreStateError("INCOMPATIBLE_FACT_SCHEMA")
 
     @staticmethod

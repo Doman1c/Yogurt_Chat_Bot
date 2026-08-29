@@ -15,6 +15,7 @@ from yogurt_contracts.response.events import ResponseEvent
 from yogurt_contracts.response.lifecycle import ResponseAbortReason, ResponseState
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted
 from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
+from yogurt_contracts.foundation.durability import CorePersistenceMode
 
 from yogurt_core.application.commands import CancelTurnCommand, GetResponseCommand, GetTurnCommand, SubmitTurnCommand, WatchResponseCommand
 from yogurt_core.application.results import CancelTurnResult, CancelTurnStatus, TurnAdmissionResult, TurnAdmissionStatus
@@ -23,6 +24,7 @@ from yogurt_core.context.policy import ContextBudgetPolicy
 from yogurt_core.context.projection import ContextProjectionService
 from yogurt_core.model.events import AttemptTerminal, AttemptTerminalKind, VisibleTextDelta
 from yogurt_core.model.execution import StoredResponse, StoredTurn
+from yogurt_core.lifecycle import CoreLifecycleState
 from yogurt_core.ports.identity import IdentityResolver
 from yogurt_core.ports.model import ModelPort
 from yogurt_core.ports.persona import PersonaSnapshotPort
@@ -53,20 +55,35 @@ class YogurtCore:
         self._scheduler = scheduler or ConversationScheduler()
         self._projection = ContextProjectionService(store)
         self._token: Optional[CoreAuthorityToken] = None
+        self._lifecycle = CoreLifecycleState.STOPPED
 
     async def start(self) -> CoreAuthorityToken:
-        self._token = await self._store.acquire_authority(self._core_instance_id)
-        return self._token
+        self._lifecycle = CoreLifecycleState.STARTING
+        try:
+            self._token = await self._store.acquire_authority(self._core_instance_id)
+            if getattr(self._store, "persistence_mode", CorePersistenceMode.EPHEMERAL) == CorePersistenceMode.DURABLE:
+                self._lifecycle = CoreLifecycleState.RECOVERING
+                await self._store.recover(self._token)
+            self._lifecycle = CoreLifecycleState.SERVING
+            return self._token
+        except Exception:
+            self._lifecycle = CoreLifecycleState.NOT_SERVING
+            raise
 
     async def stop(self) -> None:
+        self._lifecycle = CoreLifecycleState.DRAINING
+        await self._scheduler.drain()
         if self._token is not None:
             await self._store.release_authority(self._token)
             self._token = None
+        self._lifecycle = CoreLifecycleState.STOPPED
 
     async def create_conversation(self, conversation_ref: ConversationRef) -> None:
+        self._require_serving()
         await ConversationAuthority(self._store).create(self._require_token(), conversation_ref)
 
     async def submit_turn(self, command: SubmitTurnCommand) -> TurnAdmissionResult:
+        self._require_serving()
         token = self._require_token()
         expected_fingerprint = turn_fingerprint(command.input, command.principal_binding_reference)
         if command.fingerprint != expected_fingerprint:
@@ -101,6 +118,7 @@ class YogurtCore:
         return result
 
     async def cancel_turn(self, command: CancelTurnCommand) -> CancelTurnResult:
+        self._require_serving()
         token = self._require_token()
         turn = await self._store.get_authorized_turn(
             command.conversation_ref, command.turn_id, command.caller_context.logical_user_id
@@ -276,6 +294,10 @@ class YogurtCore:
         if self._token is None:
             raise RuntimeError("Core has not acquired authority")
         return self._token
+
+    def _require_serving(self) -> None:
+        if self._lifecycle != CoreLifecycleState.SERVING:
+            raise CoreStateError("CORE_NOT_SERVING")
 
     @staticmethod
     def _scheduler_key(conversation_ref: ConversationRef, turn_id: TurnId) -> str:
