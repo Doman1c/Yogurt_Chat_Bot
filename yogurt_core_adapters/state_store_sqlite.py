@@ -93,6 +93,7 @@ class SQLiteCoreStateStore:
         self._lock = asyncio.Lock()
         self._unknown_commit_once = False
         self._semantic_unknown_once = False
+        self._semantic_not_committed_once = False
         self._writer_lock: Optional[Any] = None
         self._serving = True
         try:
@@ -119,6 +120,9 @@ class SQLiteCoreStateStore:
 
     def simulate_semantic_outcome_unknown_once(self) -> None:
         self._semantic_unknown_once = True
+
+    def simulate_semantic_not_committed_once(self) -> None:
+        self._semantic_not_committed_once = True
 
     async def close(self) -> None:
         async with self._lock:
@@ -231,35 +235,12 @@ class SQLiteCoreStateStore:
 
     async def try_admit_turn(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint, snapshot: TurnSnapshot, turn_input: TurnInput) -> TurnAdmissionResult:
         async with self._lock:
-            def write(connection: sqlite3.Connection) -> TurnAdmissionResult:
-                self._validate_token(connection, token)
-                conversation_key = _conversation_key(conversation_ref)
-                row = connection.execute("SELECT payload FROM conversations WHERE conversation_key = ?", (conversation_key,)).fetchone()
-                if row is None or ConversationRef.model_validate(_load_json(str(row["payload"]))) != conversation_ref:
-                    return TurnAdmissionResult(status=TurnAdmissionStatus.REJECTED, reason="CONVERSATION_NOT_FOUND")
-                key = _turn_key(conversation_ref, turn_id)
-                existing = connection.execute("SELECT payload FROM turns WHERE turn_key = ?", (key,)).fetchone()
-                fingerprint_value = fingerprint.model_dump_json()
-                if existing is not None:
-                    turn = self._decode_turn(_load_json(str(existing["payload"])))
-                    if turn.fingerprint != fingerprint_value:
-                        return TurnAdmissionResult(status=TurnAdmissionStatus.TURN_ID_CONFLICT, turn_id=turn_id)
-                    return self._existing_admission(connection, turn)
-                active = connection.execute("SELECT turn_key FROM claims WHERE conversation_key = ?", (conversation_key,)).fetchone()
-                if active is not None:
-                    return TurnAdmissionResult(status=TurnAdmissionStatus.CONVERSATION_BUSY, reason="CONVERSATION_BUSY")
-                turn = StoredTurn(conversation_ref=conversation_ref, turn_ref=TurnRef(conversation_id=conversation_ref.conversation_id, turn_id=turn_id), fingerprint=fingerprint_value, snapshot=snapshot, turn_input=turn_input)
-                self._append_fact(connection, self._projection_fact("turn_input_committed", key, turn.revision, {"kind": "turn", "turn": self._encode_turn(turn)}))
-                connection.execute("INSERT INTO turns(turn_key, conversation_key, payload) VALUES (?, ?, ?)", (key, conversation_key, _json(self._encode_turn(turn))))
-                connection.execute("INSERT INTO claims(conversation_key, turn_key) VALUES (?, ?)", (conversation_key, key))
-                return TurnAdmissionResult(status=TurnAdmissionStatus.NEWLY_ADMITTED, turn_id=turn_id)
-
-            return self._write(write)
+            return self._write(lambda connection: self._try_admit_turn_tx(connection, token, conversation_ref, turn_id, fingerprint, snapshot, turn_input))
 
     async def try_admit_turn_commit(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint, snapshot: TurnSnapshot, turn_input: TurnInput) -> StateCommit[TurnAdmissionResult]:
         identity = "admission:" + _turn_key(conversation_ref, turn_id) + ":" + fingerprint.model_dump_json()
-        value = await self.try_admit_turn(token, conversation_ref, turn_id, fingerprint, snapshot, turn_input)
-        return self._semantic_commit(value, identity)
+        async with self._lock:
+            return self._write_commit(identity, lambda connection: self._try_admit_turn_tx(connection, token, conversation_ref, turn_id, fingerprint, snapshot, turn_input), lambda: self._reconcile_admission(conversation_ref, turn_id, fingerprint))
 
     async def get_turn(self, conversation_ref: ConversationRef, turn_id: TurnId) -> StoredTurn:
         async with self._lock:
@@ -332,31 +313,12 @@ class SQLiteCoreStateStore:
 
     async def commit_segment(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int, segment: AgentOutputSegmentCommitted) -> StoredResponse:
         async with self._lock:
-            def write(connection: sqlite3.Connection) -> StoredResponse:
-                self._validate_token(connection, token)
-                response = self._require_open_response(connection, response_id)
-                if response.revision != expected_response_revision:
-                    for present in response.segments:
-                        if present.segment_id == segment.segment_id:
-                            if present == segment:
-                                return response
-                            raise CoreStateError("SEGMENT_ID_CONFLICT")
-                    raise CoreStateError("RESPONSE_REVISION_CONFLICT")
-                if segment.response_id != response_id:
-                    raise CoreStateError("SEGMENT_RESPONSE_MISMATCH")
-                if response.segments and segment.sequence <= response.segments[-1].sequence:
-                    raise CoreStateError("SEGMENT_SEQUENCE_CONFLICT")
-                event = SegmentCommittedEvent(event_id=ResponseEventId(value="event-" + uuid.uuid4().hex), response_id=response_id, event_sequence=len(response.events) + 1, segment_id=segment.segment_id, segment_sequence=segment.sequence, text=segment.text, language=segment.language)
-                response = replace(response, segments=response.segments + (segment,), events=response.events + (event,), revision=response.revision + 1)
-                self._append_fact(connection, self._projection_fact("response_segment_committed", response_id.value, response.revision, {"kind": "response", "response": self._encode_response(response)}))
-                self._write_response(connection, response)
-                return response
-
-            return self._write(write)
+            return self._write(lambda connection: self._commit_segment_tx(connection, token, response_id, expected_response_revision, segment))
 
     async def commit_segment_commit(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int, segment: AgentOutputSegmentCommitted) -> StateCommit[StoredResponse]:
-        value = await self.commit_segment(token, response_id, expected_response_revision, segment)
-        return self._semantic_commit(value, "segment:" + response_id.value + ":" + segment.segment_id.value)
+        identity = "segment:" + response_id.value + ":" + segment.segment_id.value
+        async with self._lock:
+            return self._write_commit(identity, lambda connection: self._commit_segment_tx(connection, token, response_id, expected_response_revision, segment), lambda: self._reconcile_segment(response_id, segment))
 
     async def finalize_response(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int) -> StoredResponse:
         async with self._lock:
@@ -368,39 +330,12 @@ class SQLiteCoreStateStore:
 
     async def terminalize_turn(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, expected_turn_revision: int, state: TurnState, abort_reason: Optional[AbortReason] = None) -> StoredTurn:
         async with self._lock:
-            def write(connection: sqlite3.Connection) -> StoredTurn:
-                self._validate_token(connection, token)
-                key = _turn_key(conversation_ref, turn_id)
-                turn = self._turn_from_connection(connection, key)
-                if turn.state in _TERMINAL_TURNS:
-                    return turn
-                if turn.revision != expected_turn_revision:
-                    raise CoreStateError("TURN_REVISION_CONFLICT")
-                if connection.execute("SELECT 1 FROM claims WHERE conversation_key = ? AND turn_key = ?", (_conversation_key(conversation_ref), key)).fetchone() is None:
-                    raise CoreStateError("CONVERSATION_CLAIM_MISMATCH")
-                if not validate_turn_transition(turn.state, state):
-                    raise CoreStateError("INVALID_TURN_TRANSITION")
-                if state == TurnState.ABORTED and abort_reason is None:
-                    raise CoreStateError("ABORT_REASON_REQUIRED")
-                if state != TurnState.ABORTED and abort_reason is not None:
-                    raise CoreStateError("UNEXPECTED_ABORT_REASON")
-                turn = replace(turn, state=state, abort_reason=abort_reason, revision=turn.revision + 1)
-                self._append_fact(connection, self._projection_fact("turn_terminalized", key, turn.revision, {"kind": "turn", "turn": self._encode_turn(turn)}))
-                self._write_turn(connection, key, turn)
-                connection.execute("DELETE FROM claims WHERE conversation_key = ? AND turn_key = ?", (_conversation_key(conversation_ref), key))
-                return turn
-
-            return self._write(write)
+            return self._write(lambda connection: self._terminalize_turn_tx(connection, token, conversation_ref, turn_id, expected_turn_revision, state, abort_reason))
 
     async def terminalize_turn_commit(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, expected_turn_revision: int, state: TurnState, abort_reason: Optional[AbortReason] = None) -> StateCommit[StoredTurn]:
-        value = await self.terminalize_turn(token, conversation_ref, turn_id, expected_turn_revision, state, abort_reason)
-        return self._semantic_commit(value, "terminal:" + _turn_key(conversation_ref, turn_id) + ":" + state.value + ":" + ("" if abort_reason is None else abort_reason.value))
-
-    def _semantic_commit(self, value: _WriteResult, identity: str) -> StateCommit[_WriteResult]:
-        if self._semantic_unknown_once:
-            self._semantic_unknown_once = False
-            return StateCommit(value=value, certainty=CommitCertainty.OUTCOME_UNKNOWN, stable_identity=identity)
-        return StateCommit(value=value, certainty=CommitCertainty.COMMITTED, stable_identity=identity)
+        identity = "terminal:" + _turn_key(conversation_ref, turn_id) + ":" + state.value + ":" + ("" if abort_reason is None else abort_reason.value)
+        async with self._lock:
+            return self._write_commit(identity, lambda connection: self._terminalize_turn_tx(connection, token, conversation_ref, turn_id, expected_turn_revision, state, abort_reason), lambda: self._reconcile_terminal(conversation_ref, turn_id, state, abort_reason))
 
     async def get_conversation_context(self, conversation_ref: ConversationRef, excluding_turn_id: TurnId) -> Tuple[ContextEntry, ...]:
         async with self._lock:
@@ -615,6 +550,61 @@ class SQLiteCoreStateStore:
             if turn.state not in _TERMINAL_TURNS:
                 connection.execute("INSERT INTO claims(conversation_key, turn_key) VALUES (?, ?)", (str(row["conversation_key"]), str(row["turn_key"])))
 
+    def _try_admit_turn_tx(self, connection: sqlite3.Connection, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint, snapshot: TurnSnapshot, turn_input: TurnInput) -> TurnAdmissionResult:
+        self._validate_token(connection, token); conversation_key = _conversation_key(conversation_ref)
+        row = connection.execute("SELECT payload FROM conversations WHERE conversation_key = ?", (conversation_key,)).fetchone()
+        if row is None or ConversationRef.model_validate(_load_json(str(row["payload"]))) != conversation_ref: return TurnAdmissionResult(status=TurnAdmissionStatus.REJECTED, reason="CONVERSATION_NOT_FOUND")
+        key = _turn_key(conversation_ref, turn_id); fingerprint_value = fingerprint.model_dump_json(); existing = connection.execute("SELECT payload FROM turns WHERE turn_key = ?", (key,)).fetchone()
+        if existing is not None:
+            turn = self._decode_turn(_load_json(str(existing["payload"])))
+            return TurnAdmissionResult(status=TurnAdmissionStatus.TURN_ID_CONFLICT, turn_id=turn_id) if turn.fingerprint != fingerprint_value else self._existing_admission(connection, turn)
+        if connection.execute("SELECT 1 FROM claims WHERE conversation_key = ?", (conversation_key,)).fetchone() is not None: return TurnAdmissionResult(status=TurnAdmissionStatus.CONVERSATION_BUSY, reason="CONVERSATION_BUSY")
+        turn = StoredTurn(conversation_ref=conversation_ref, turn_ref=TurnRef(conversation_id=conversation_ref.conversation_id, turn_id=turn_id), fingerprint=fingerprint_value, snapshot=snapshot, turn_input=turn_input)
+        self._append_fact(connection, self._projection_fact("turn_input_committed", key, turn.revision, {"kind":"turn", "turn":self._encode_turn(turn)})); connection.execute("INSERT INTO turns(turn_key, conversation_key, payload) VALUES (?, ?, ?)", (key, conversation_key, _json(self._encode_turn(turn)))); connection.execute("INSERT INTO claims(conversation_key, turn_key) VALUES (?, ?)", (conversation_key, key))
+        return TurnAdmissionResult(status=TurnAdmissionStatus.NEWLY_ADMITTED, turn_id=turn_id)
+
+    def _commit_segment_tx(self, connection: sqlite3.Connection, token: CoreAuthorityToken, response_id: ResponseId, expected: int, segment: AgentOutputSegmentCommitted) -> StoredResponse:
+        self._validate_token(connection, token); response = self._require_open_response(connection, response_id)
+        if response.revision != expected:
+            for present in response.segments:
+                if present.segment_id == segment.segment_id:
+                    if present == segment: return response
+                    raise CoreStateError("SEGMENT_ID_CONFLICT")
+            raise CoreStateError("RESPONSE_REVISION_CONFLICT")
+        if segment.response_id != response_id: raise CoreStateError("SEGMENT_RESPONSE_MISMATCH")
+        if response.segments and segment.sequence <= response.segments[-1].sequence: raise CoreStateError("SEGMENT_SEQUENCE_CONFLICT")
+        event = SegmentCommittedEvent(event_id=ResponseEventId(value="event-" + uuid.uuid4().hex), response_id=response_id, event_sequence=len(response.events)+1, segment_id=segment.segment_id, segment_sequence=segment.sequence, text=segment.text, language=segment.language)
+        response = replace(response, segments=response.segments+(segment,), events=response.events+(event,), revision=response.revision+1); self._append_fact(connection, self._projection_fact("response_segment_committed", response_id.value, response.revision, {"kind":"response", "response":self._encode_response(response)})); self._write_response(connection, response)
+        return response
+
+    def _terminalize_turn_tx(self, connection: sqlite3.Connection, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, expected: int, state: TurnState, abort_reason: Optional[AbortReason]) -> StoredTurn:
+        self._validate_token(connection, token); key = _turn_key(conversation_ref, turn_id); turn = self._turn_from_connection(connection, key)
+        if turn.state in _TERMINAL_TURNS: return turn
+        if turn.revision != expected: raise CoreStateError("TURN_REVISION_CONFLICT")
+        if connection.execute("SELECT 1 FROM claims WHERE conversation_key = ? AND turn_key = ?", (_conversation_key(conversation_ref), key)).fetchone() is None: raise CoreStateError("CONVERSATION_CLAIM_MISMATCH")
+        if not validate_turn_transition(turn.state, state): raise CoreStateError("INVALID_TURN_TRANSITION")
+        if state == TurnState.ABORTED and abort_reason is None: raise CoreStateError("ABORT_REASON_REQUIRED")
+        if state != TurnState.ABORTED and abort_reason is not None: raise CoreStateError("UNEXPECTED_ABORT_REASON")
+        turn = replace(turn, state=state, abort_reason=abort_reason, revision=turn.revision+1); self._append_fact(connection, self._projection_fact("turn_terminalized", key, turn.revision, {"kind":"turn", "turn":self._encode_turn(turn)})); self._write_turn(connection, key, turn); connection.execute("DELETE FROM claims WHERE conversation_key = ? AND turn_key = ?", (_conversation_key(conversation_ref), key)); return turn
+
+    def _reconcile_admission(self, ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint) -> TurnAdmissionResult:
+        turn = self._turn_from_connection(self._connection, _turn_key(ref, turn_id))
+        if turn.fingerprint != fingerprint.model_dump_json(): raise CoreStateError("TURN_ID_CONFLICT")
+        return self._existing_admission(self._connection, turn)
+
+    def _reconcile_segment(self, response_id: ResponseId, segment: AgentOutputSegmentCommitted) -> StoredResponse:
+        response = self._response_from_connection(self._connection, response_id)
+        for present in response.segments:
+            if present.segment_id == segment.segment_id:
+                if present == segment: return response
+                raise CoreStateError("SEGMENT_ID_CONFLICT")
+        raise CoreStateError("RECONCILIATION_NOT_FOUND")
+
+    def _reconcile_terminal(self, ref: ConversationRef, turn_id: TurnId, state: TurnState, reason: Optional[AbortReason]) -> StoredTurn:
+        turn = self._turn_from_connection(self._connection, _turn_key(ref, turn_id))
+        if turn.state == state and turn.abort_reason == reason: return turn
+        raise CoreStateError("RECONCILIATION_NOT_FOUND")
+
     def _write(self, action: Callable[[sqlite3.Connection], _WriteResult]) -> _WriteResult:
         self._require_serving()
         connection = self._connection
@@ -634,6 +624,33 @@ class SQLiteCoreStateStore:
             if "locked" in str(error).lower() or "busy" in str(error).lower():
                 raise CoreStateError("STORE_CONTENTION") from error
             self._serving = False
+            raise CoreStateError("STORE_NOT_SERVING") from error
+
+    def _write_commit(self, identity: str, action: Callable[[sqlite3.Connection], _WriteResult], reconcile: Callable[[], _WriteResult]) -> StateCommit[_WriteResult]:
+        """Own the semantic mutation's BEGIN/COMMIT boundary and certainty."""
+        self._require_serving()
+        connection = self._connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            value = action(connection)
+            if self._semantic_not_committed_once:
+                self._semantic_not_committed_once = False
+                connection.execute("ROLLBACK")
+                return StateCommit(value=None, certainty=CommitCertainty.NOT_COMMITTED, stable_identity=identity)
+            connection.execute("COMMIT")
+            if self._semantic_unknown_once:
+                self._semantic_unknown_once = False
+                # Do not expose the pre-commit object: reconcile from durable DB.
+                return StateCommit(value=reconcile(), certainty=CommitCertainty.OUTCOME_UNKNOWN, stable_identity=identity)
+            return StateCommit(value=value, certainty=CommitCertainty.COMMITTED, stable_identity=identity)
+        except CoreStateError:
+            connection.execute("ROLLBACK")
+            raise
+        except sqlite3.DatabaseError as error:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.DatabaseError:
+                pass
             raise CoreStateError("STORE_NOT_SERVING") from error
 
     def _require_serving(self) -> None:

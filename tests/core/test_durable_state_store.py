@@ -183,6 +183,34 @@ async def test_semantic_commit_unknown_reuses_admission_segment_and_terminal_ide
 
 
 @_async_test
+async def test_semantic_precommit_failure_rolls_back_all_authoritative_paths(tmp_path) -> None:
+    store = SQLiteCoreStateStore(tmp_path / "precommit.db")
+    token = await store.acquire_authority(CoreInstanceId(value="core"))
+    await store.create_conversation(token, _ref())
+    turn_id = TurnId(value="pre-turn")
+    fingerprint = turn_fingerprint(_input(), "binding")
+    store.simulate_semantic_not_committed_once()
+    admission = await store.try_admit_turn_commit(token, _ref(), turn_id, fingerprint, _snapshot(), _input())
+    assert admission.certainty == CommitCertainty.NOT_COMMITTED and admission.value is None
+    with pytest.raises(CoreStateError, match="TURN_NOT_FOUND"):
+        await store.get_turn(_ref(), turn_id)
+    assert await store.active_claim(_ref()) is None
+    await store.try_admit_turn(token, _ref(), turn_id, fingerprint, _snapshot(), _input())
+    response = await store.commit_response_started(token, _ref(), turn_id, ResponseId(value="pre-response"))
+    segment = AgentOutputSegmentCommitted(response_id=response.response_id, segment_id=SegmentId(value="pre-segment"), sequence=1, text="no", language="en")
+    store.simulate_semantic_not_committed_once()
+    result = await store.commit_segment_commit(token, response.response_id, response.revision, segment)
+    assert result.certainty == CommitCertainty.NOT_COMMITTED and result.value is None
+    assert (await store.get_response(response.response_id)).revision == response.revision
+    turn = await store.get_turn(_ref(), turn_id)
+    store.simulate_semantic_not_committed_once()
+    terminal = await store.terminalize_turn_commit(token, _ref(), turn_id, turn.revision, TurnState.CANCELLED)
+    assert terminal.certainty == CommitCertainty.NOT_COMMITTED and terminal.value is None
+    assert (await store.get_turn(_ref(), turn_id)).state == TurnState.PROCESSING
+    assert await store.active_claim(_ref()) == turn_id
+
+
+@_async_test
 async def test_recovery_closes_input_started_and_converges_terminal_response(tmp_path) -> None:
     path = tmp_path / "recovery.db"
     store = SQLiteCoreStateStore(path)
