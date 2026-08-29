@@ -113,10 +113,13 @@ class YogurtCore:
                 closed = await self._abort_with_retry(
                     token, response, ResponseAbortReason.CANCELLED, command.caller_context.logical_user_id
                 )
-                if closed.attempts:
-                    await self._model.cancel(closed.attempts[-1])
+                if closed.state == ResponseState.ABORTED and closed.abort_reason == ResponseAbortReason.CANCELLED:
+                    if closed.attempts:
+                        await self._model.cancel(closed.attempts[-1])
+                    await self._converge_turn_from_response_terminal(command.conversation_ref, command.turn_id, closed)
+                    return CancelTurnResult(status=CancelTurnStatus.CANCELLED, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id)
                 await self._converge_turn_from_response_terminal(command.conversation_ref, command.turn_id, closed)
-                return CancelTurnResult(status=CancelTurnStatus.CANCELLED, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id)
+                return CancelTurnResult(status=CancelTurnStatus.ALREADY_TERMINAL, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id)
             await self._converge_turn_from_response_terminal(command.conversation_ref, command.turn_id, response)
             return CancelTurnResult(status=CancelTurnStatus.ALREADY_TERMINAL, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id)
         await self._terminalize(command.conversation_ref, command.turn_id, TurnState.CANCELLED)
@@ -187,12 +190,13 @@ class YogurtCore:
             if error.code == "TURN_REVISION_CONFLICT" and await self._turn_is_terminal(conversation_ref, turn_id):
                 return
             raise
-        except Exception:
+        except Exception as original_error:
             try:
                 await self._converge_execution_failure(conversation_ref, turn_id, response)
-            except Exception:
-                # Cleanup must never mask the original execution failure.
-                pass
+            except Exception as cleanup_error:
+                # Preserve cleanup diagnostics without replacing the execution
+                # failure surfaced by the scheduler on every supported Python.
+                raise original_error from cleanup_error
             raise
 
     async def _converge_execution_failure(
@@ -204,8 +208,8 @@ class YogurtCore:
             if turn.response_id is not None:
                 response = await self._store.get_response(turn.response_id)
         if response is not None and response.state == ResponseState.STARTED:
-            response = await self._store.abort_response(
-                token, response.response_id, response.revision, ResponseAbortReason.EXECUTION_FAILURE
+            response = await self._abort_with_retry(
+                token, response, ResponseAbortReason.EXECUTION_FAILURE, None
             )
         if response is not None and response.state in {ResponseState.FINALIZED, ResponseState.ABORTED}:
             await self._converge_turn_from_response_terminal(conversation_ref, turn_id, response)
@@ -220,33 +224,53 @@ class YogurtCore:
         turn = await self._store.get_turn(conversation_ref, turn_id)
         if turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
             return
-        await self._store.terminalize_turn(
-            self._require_token(), conversation_ref, turn_id, turn.revision,
-            consequence.state, consequence.abort_reason,
-        )
+        try:
+            await self._store.terminalize_turn(
+                self._require_token(), conversation_ref, turn_id, turn.revision, consequence.state, consequence.abort_reason,
+            )
+        except CoreStateError as error:
+            if error.code == "TURN_REVISION_CONFLICT" and await self._turn_is_terminal(conversation_ref, turn_id):
+                return
+            raise
 
     async def _turn_is_terminal(self, conversation_ref: ConversationRef, turn_id: TurnId) -> bool:
         turn = await self._store.get_turn(conversation_ref, turn_id)
         return turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}
 
     async def _abort_with_retry(
-        self, token: CoreAuthorityToken, response: StoredResponse, reason: ResponseAbortReason, caller_user_id: UserId
+        self,
+        token: CoreAuthorityToken,
+        response: StoredResponse,
+        reason: ResponseAbortReason,
+        caller_user_id: Optional[UserId],
     ) -> StoredResponse:
         while True:
             try:
                 return await self._store.abort_response(token, response.response_id, response.revision, reason)
             except CoreStateError as error:
-                if error.code != "RESPONSE_REVISION_CONFLICT":
+                if error.code not in {"RESPONSE_REVISION_CONFLICT", "RESPONSE_NOT_OPEN"}:
                     raise
-                response = await self._store.get_authorized_response(response.response_id, caller_user_id)
+                if caller_user_id is None:
+                    response = await self._store.get_response(response.response_id)
+                else:
+                    response = await self._store.get_authorized_response(response.response_id, caller_user_id)
+                if response.state in {ResponseState.FINALIZED, ResponseState.ABORTED}:
+                    return response
+                if error.code == "RESPONSE_NOT_OPEN":
+                    raise
 
     async def _terminalize(
         self, conversation_ref: ConversationRef, turn_id: TurnId, state: TurnState, abort_reason: Optional[AbortReason] = None
     ) -> None:
         turn = await self._store.get_turn(conversation_ref, turn_id)
-        await self._store.terminalize_turn(
-            self._require_token(), conversation_ref, turn.turn_ref.turn_id, turn.revision, state, abort_reason
-        )
+        try:
+            await self._store.terminalize_turn(
+                self._require_token(), conversation_ref, turn.turn_ref.turn_id, turn.revision, state, abort_reason
+            )
+        except CoreStateError as error:
+            if error.code == "TURN_REVISION_CONFLICT" and await self._turn_is_terminal(conversation_ref, turn_id):
+                return
+            raise
 
     def _require_token(self) -> CoreAuthorityToken:
         if self._token is None:
