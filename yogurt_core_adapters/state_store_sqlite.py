@@ -36,11 +36,14 @@ from yogurt_contracts.response.events import ResponseAbortedEvent, ResponseEvent
 from yogurt_contracts.response.lifecycle import ResponseAbortReason, ResponseState
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted
 from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
+from yogurt_contracts.operations.intent import OperationIntentCommitted
+from yogurt_contracts.foundation.identifiers import OperationId
 
 from yogurt_core.application.results import AdmissionResponseState, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.context.models import ContextEntry, ContextRole
 from yogurt_core.model.execution import StoredResponse, StoredTurn
 from yogurt_core.ports.state_store import CoreStateError, StateCommit
+from yogurt_core.operations.models import DurableOperationState, NotDispatchedReason, StoredOperation
 
 
 _SCHEMA_VERSION = "1"
@@ -167,6 +170,7 @@ class SQLiteCoreStateStore:
                 connection.execute("DELETE FROM responses")
                 connection.execute("DELETE FROM turns")
                 connection.execute("DELETE FROM conversations")
+                connection.execute("DELETE FROM operations")
                 for row in facts:
                     self._apply_projection_fact(connection, self._decode_fact(row))
                 rows = connection.execute("SELECT turn_key, payload FROM turns").fetchall()
@@ -337,6 +341,38 @@ class SQLiteCoreStateStore:
         async with self._lock:
             return self._write_commit(identity, lambda connection: self._terminalize_turn_tx(connection, token, conversation_ref, turn_id, expected_turn_revision, state, abort_reason), lambda: self._reconcile_terminal(conversation_ref, turn_id, state, abort_reason))
 
+    async def commit_operation_intent(self, token: CoreAuthorityToken, intent: OperationIntentCommitted) -> StateCommit[StoredOperation]:
+        identity = "operation-intent:" + intent.operation.operation_id.value
+        async with self._lock:
+            return self._write_commit(identity, lambda connection: self._commit_operation_intent_tx(connection, token, intent), lambda: self._operation_from_connection(self._connection, intent.operation.operation_id))
+
+    async def get_operation(self, operation_id: OperationId) -> StoredOperation:
+        async with self._lock:
+            return self._operation_from_connection(self._connection, operation_id)
+
+    async def mark_dispatch_attempted(self, token: CoreAuthorityToken, operation_id: OperationId, expected_revision: int) -> StateCommit[StoredOperation]:
+        return await self._mark_operation(token, operation_id, expected_revision, DurableOperationState.DISPATCH_ATTEMPTED, None)
+
+    async def mark_succeeded(self, token: CoreAuthorityToken, operation_id: OperationId, expected_revision: int) -> StateCommit[StoredOperation]:
+        return await self._mark_operation(token, operation_id, expected_revision, DurableOperationState.SUCCEEDED, None)
+
+    async def mark_failed(self, token: CoreAuthorityToken, operation_id: OperationId, expected_revision: int) -> StateCommit[StoredOperation]:
+        return await self._mark_operation(token, operation_id, expected_revision, DurableOperationState.FAILED, None)
+
+    async def mark_outcome_unknown(self, token: CoreAuthorityToken, operation_id: OperationId, expected_revision: int) -> StateCommit[StoredOperation]:
+        return await self._mark_operation(token, operation_id, expected_revision, DurableOperationState.OUTCOME_UNKNOWN, None)
+
+    async def mark_not_dispatched(self, token: CoreAuthorityToken, operation_id: OperationId, expected_revision: int, reason: NotDispatchedReason) -> StateCommit[StoredOperation]:
+        return await self._mark_operation(token, operation_id, expected_revision, DurableOperationState.NOT_DISPATCHED, reason)
+
+    async def reconcile_operation(self, operation_id: OperationId) -> StoredOperation:
+        return await self.get_operation(operation_id)
+
+    async def _mark_operation(self, token: CoreAuthorityToken, operation_id: OperationId, expected_revision: int, state: DurableOperationState, reason: Optional[NotDispatchedReason]) -> StateCommit[StoredOperation]:
+        identity = "operation:" + operation_id.value + ":" + state.value + ":" + ("" if reason is None else reason.value)
+        async with self._lock:
+            return self._write_commit(identity, lambda connection: self._mark_operation_tx(connection, token, operation_id, expected_revision, state, reason), lambda: self._operation_from_connection(self._connection, operation_id))
+
     async def get_conversation_context(self, conversation_ref: ConversationRef, excluding_turn_id: TurnId) -> Tuple[ContextEntry, ...]:
         async with self._lock:
             self._require_serving()
@@ -433,6 +469,7 @@ class SQLiteCoreStateStore:
             connection.execute("CREATE TABLE IF NOT EXISTS turns (turn_key TEXT PRIMARY KEY, conversation_key TEXT NOT NULL, payload TEXT NOT NULL)")
             connection.execute("CREATE TABLE IF NOT EXISTS responses (response_id TEXT PRIMARY KEY, turn_key TEXT NOT NULL, payload TEXT NOT NULL)")
             connection.execute("CREATE TABLE IF NOT EXISTS claims (conversation_key TEXT PRIMARY KEY, turn_key TEXT UNIQUE NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS operations (operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, payload TEXT NOT NULL)")
             row = connection.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
             if row is None:
                 authority = requested_id or StoreAuthorityId(value="sqlite-store-" + uuid.uuid4().hex)
@@ -542,6 +579,9 @@ class SQLiteCoreStateStore:
         elif kind == "response":
             response = self._decode_response(fact.payload["response"])
             connection.execute("INSERT OR REPLACE INTO responses(response_id, turn_key, payload) VALUES (?, ?, ?)", (response.response_id.value, response.turn_key, _json(self._encode_response(response))))
+        elif kind == "operation":
+            operation = self._decode_operation(fact.payload["operation"])
+            connection.execute("INSERT OR REPLACE INTO operations(operation_id, fingerprint, payload) VALUES (?, ?, ?)", (operation.intent.operation.operation_id.value, operation.intent.operation.request_fingerprint.value, _json(self._encode_operation(operation))))
 
     def _rebuild_claims(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("SELECT turn_key, conversation_key, payload FROM turns").fetchall()
@@ -549,6 +589,33 @@ class SQLiteCoreStateStore:
             turn = self._decode_turn(_load_json(str(row["payload"])))
             if turn.state not in _TERMINAL_TURNS:
                 connection.execute("INSERT INTO claims(conversation_key, turn_key) VALUES (?, ?)", (str(row["conversation_key"]), str(row["turn_key"])))
+
+    def _commit_operation_intent_tx(self, connection: sqlite3.Connection, token: CoreAuthorityToken, intent: OperationIntentCommitted) -> StoredOperation:
+        self._validate_token(connection, token)
+        operation_id = intent.operation.operation_id
+        row = connection.execute("SELECT fingerprint, payload FROM operations WHERE operation_id = ?", (operation_id.value,)).fetchone()
+        if row is not None:
+            if str(row["fingerprint"]) != intent.operation.request_fingerprint.value:
+                raise CoreStateError("OPERATION_ID_CONFLICT")
+            return self._decode_operation(_load_json(str(row["payload"])))
+        operation = StoredOperation(intent=intent, state=DurableOperationState.INTENT_COMMITTED, revision=1)
+        self._append_fact(connection, self._projection_fact("operation_intent_committed", "operation:" + operation_id.value, operation.revision, {"kind": "operation", "operation": self._encode_operation(operation)}))
+        connection.execute("INSERT INTO operations(operation_id, fingerprint, payload) VALUES (?, ?, ?)", (operation_id.value, intent.operation.request_fingerprint.value, _json(self._encode_operation(operation))))
+        return operation
+
+    def _mark_operation_tx(self, connection: sqlite3.Connection, token: CoreAuthorityToken, operation_id: OperationId, expected_revision: int, state: DurableOperationState, reason: Optional[NotDispatchedReason]) -> StoredOperation:
+        self._validate_token(connection, token)
+        operation = self._operation_from_connection(connection, operation_id)
+        if operation.state in {DurableOperationState.SUCCEEDED, DurableOperationState.FAILED, DurableOperationState.NOT_DISPATCHED}:
+            return operation
+        if operation.state == DurableOperationState.OUTCOME_UNKNOWN and state != DurableOperationState.DISPATCH_ATTEMPTED:
+            return operation
+        if operation.revision != expected_revision:
+            raise CoreStateError("OPERATION_REVISION_CONFLICT")
+        operation = StoredOperation(intent=operation.intent, state=state, revision=operation.revision + 1, attempts=operation.attempts, outcome=None, not_dispatched_reason=reason)
+        self._append_fact(connection, self._projection_fact("operation_" + state.value, "operation:" + operation_id.value, operation.revision, {"kind": "operation", "operation": self._encode_operation(operation)}))
+        connection.execute("UPDATE operations SET payload = ? WHERE operation_id = ?", (_json(self._encode_operation(operation)), operation_id.value))
+        return operation
 
     def _try_admit_turn_tx(self, connection: sqlite3.Connection, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint, snapshot: TurnSnapshot, turn_input: TurnInput) -> TurnAdmissionResult:
         self._validate_token(connection, token); conversation_key = _conversation_key(conversation_ref)
@@ -701,6 +768,12 @@ class SQLiteCoreStateStore:
             raise CoreStateError("RESPONSE_NOT_FOUND")
         return self._decode_response(_load_json(str(row["payload"])))
 
+    def _operation_from_connection(self, connection: sqlite3.Connection, operation_id: OperationId) -> StoredOperation:
+        row = connection.execute("SELECT payload FROM operations WHERE operation_id = ?", (operation_id.value,)).fetchone()
+        if row is None:
+            raise CoreStateError("OPERATION_NOT_FOUND")
+        return self._decode_operation(_load_json(str(row["payload"])))
+
     def _require_open_response(self, connection: sqlite3.Connection, response_id: ResponseId) -> StoredResponse:
         response = self._response_from_connection(connection, response_id)
         if response.state != ResponseState.STARTED:
@@ -733,6 +806,17 @@ class SQLiteCoreStateStore:
     @staticmethod
     def _encode_response(response: StoredResponse) -> Dict[str, Any]:
         return {"response_id": response.response_id.value, "turn_key": response.turn_key, "state": response.state.value, "revision": response.revision, "segments": [_contract(item) for item in response.segments], "events": [_contract(item) for item in response.events], "attempts": [_contract(item) for item in response.attempts], "abort_reason": None if response.abort_reason is None else response.abort_reason.value}
+
+    @staticmethod
+    def _encode_operation(operation: StoredOperation) -> Dict[str, Any]:
+        return {"intent": operation.intent.model_dump(mode="json"), "state": operation.state.value, "revision": operation.revision, "not_dispatched_reason": None if operation.not_dispatched_reason is None else operation.not_dispatched_reason.value}
+
+    @staticmethod
+    def _decode_operation(payload: Dict[str, Any]) -> StoredOperation:
+        # Pydantic's JSON decoder is deliberately used for the frozen contract
+        # data only; the surrounding operation ledger envelope is explicit.
+        intent = OperationIntentCommitted.model_validate_json(_json(payload["intent"]))
+        return StoredOperation(intent=intent, state=DurableOperationState(str(payload["state"])), revision=int(payload["revision"]), not_dispatched_reason=None if payload["not_dispatched_reason"] is None else NotDispatchedReason(str(payload["not_dispatched_reason"])))
 
     @staticmethod
     def _decode_response(payload: Dict[str, Any]) -> StoredResponse:
