@@ -1,0 +1,647 @@
+"""SQLite-backed authoritative R2-B Core state store.
+
+This adapter has a deliberately small persistence surface: append-only facts are
+the durable source of truth and the relational tables are rebuildable read
+projections.  SQLite transactions never await and never invoke providers.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import sqlite3
+import uuid
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar, Union, cast
+
+from yogurt_contracts.conversation.fingerprint import TurnFingerprint
+from yogurt_contracts.conversation.input import TurnInput
+from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState, validate_turn_transition
+from yogurt_contracts.conversation.refs import ConversationRef, TurnRef
+from yogurt_contracts.execution import ExecutionAttemptSnapshot
+from yogurt_contracts.execution.turn_snapshot import TurnSnapshot
+from yogurt_contracts.foundation.durability import CorePersistenceMode
+from yogurt_contracts.foundation.facts import CommitCertainty, FactCommitResult, FactEnvelope, utc_now
+from yogurt_contracts.foundation.identifiers import CoreInstanceId, FactId, ResponseEventId, ResponseId, StoreAuthorityId, TurnId, UserId
+from yogurt_contracts.response.events import ResponseAbortedEvent, ResponseEvent, ResponseFinalizedEvent, ResponseStartedEvent, SegmentCommittedEvent
+from yogurt_contracts.response.lifecycle import ResponseAbortReason, ResponseState
+from yogurt_contracts.response.models import AgentOutputSegmentCommitted
+from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
+
+from yogurt_core.application.results import AdmissionResponseState, TurnAdmissionResult, TurnAdmissionStatus
+from yogurt_core.context.models import ContextEntry, ContextRole
+from yogurt_core.model.execution import StoredResponse, StoredTurn
+from yogurt_core.ports.state_store import CoreStateError
+
+
+_SCHEMA_VERSION = "1"
+_TERMINAL_TURNS = {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}
+_TERMINAL_RESPONSES = {ResponseState.FINALIZED, ResponseState.ABORTED}
+_WriteResult = TypeVar("_WriteResult")
+
+
+def _conversation_key(ref: ConversationRef) -> str:
+    return "|".join((ref.persona_id.value, ref.user_id.value, ref.conversation_id.value))
+
+
+def _turn_key(ref: ConversationRef, turn_id: TurnId) -> str:
+    return _conversation_key(ref) + "|" + turn_id.value
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _load_json(value: str) -> Any:
+    return json.loads(value)
+
+
+def _parse_datetime(value: object) -> datetime:
+    """Accept the RFC3339 ``Z`` spelling on all supported Python versions."""
+
+    text = str(value)
+    return datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+
+
+def _contract(value: Any) -> Dict[str, Any]:
+    """Map contract values to a named JSON shape, never a model JSON blob."""
+
+    return cast(Dict[str, Any], value.model_dump(mode="json"))
+
+
+def _fact_id(domain_key: str) -> FactId:
+    return FactId(value="fact-" + hashlib.sha256(domain_key.encode("utf-8")).hexdigest())
+
+
+class SQLiteCoreStateStore:
+    """Local-filesystem, single-writer, rebuildable durable Core store."""
+
+    persistence_mode = CorePersistenceMode.DURABLE
+
+    def __init__(self, database_path: Union[str, Path], store_authority_id: Optional[StoreAuthorityId] = None) -> None:
+        self._path = str(database_path)
+        self._lock = asyncio.Lock()
+        self._unknown_commit_once = False
+        self._serving = True
+        try:
+            self._connection = sqlite3.connect(self._path, isolation_level=None, check_same_thread=False, timeout=2.0)
+            self._connection.row_factory = sqlite3.Row
+            self._connection.execute("PRAGMA foreign_keys = ON")
+            if self._path != ":memory:":
+                self._connection.execute("PRAGMA journal_mode = WAL")
+                self._connection.execute("PRAGMA synchronous = FULL")
+            self._initialize(store_authority_id)
+        except (CoreStateError, sqlite3.DatabaseError, sqlite3.OperationalError):
+            # Never reset or replace a failed store: it is explicitly NOT_SERVING.
+            self._serving = False
+            self._connection = None  # type: ignore[assignment]
+
+    @property
+    def is_serving(self) -> bool:
+        return self._serving
+
+    def simulate_outcome_unknown_once(self) -> None:
+        """Test seam: commit succeeds but the caller cannot learn that it did."""
+
+        self._unknown_commit_once = True
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None  # type: ignore[assignment]
+            self._serving = False
+
+    async def acquire_authority(self, core_instance_id: CoreInstanceId) -> CoreAuthorityToken:
+        async with self._lock:
+            return self._acquire_authority(core_instance_id)
+
+    async def release_authority(self, token: CoreAuthorityToken) -> None:
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> None:
+                self._validate_token(connection, token)
+                epoch = int(self._meta(connection, "authority_epoch")) + 1
+                self._set_meta(connection, "authority_epoch", str(epoch))
+                self._set_meta(connection, "active_authority", "")
+
+            self._write(write)
+
+    async def create_conversation(self, token: CoreAuthorityToken, conversation_ref: ConversationRef) -> None:
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> None:
+                self._validate_token(connection, token)
+                key = _conversation_key(conversation_ref)
+                row = connection.execute("SELECT payload FROM conversations WHERE conversation_key = ?", (key,)).fetchone()
+                if row is not None:
+                    if _load_json(str(row["payload"])) != _contract(conversation_ref):
+                        raise CoreStateError("CONVERSATION_CONFLICT")
+                    return
+                self._append_fact(connection, self._projection_fact("conversation_created", key, 1, {"kind": "conversation", "conversation": _contract(conversation_ref)}))
+                connection.execute("INSERT INTO conversations(conversation_key, payload) VALUES (?, ?)", (key, _json(_contract(conversation_ref))))
+
+            self._write(write)
+
+    async def resolve_conversation(self, conversation_ref: ConversationRef) -> ConversationRef:
+        async with self._lock:
+            row = self._read_one("SELECT payload FROM conversations WHERE conversation_key = ?", (_conversation_key(conversation_ref),), "CONVERSATION_NOT_FOUND")
+            return ConversationRef.model_validate(_load_json(str(row["payload"])))
+
+    async def validate_conversation_owner(self, conversation_ref: ConversationRef, user_id: UserId) -> bool:
+        async with self._lock:
+            self._require_serving()
+            row = self._connection.execute("SELECT payload FROM conversations WHERE conversation_key = ?", (_conversation_key(conversation_ref),)).fetchone()
+            return row is not None and ConversationRef.model_validate(_load_json(str(row["payload"]))).user_id == user_id
+
+    async def try_admit_turn(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint, snapshot: TurnSnapshot, turn_input: TurnInput) -> TurnAdmissionResult:
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> TurnAdmissionResult:
+                self._validate_token(connection, token)
+                conversation_key = _conversation_key(conversation_ref)
+                row = connection.execute("SELECT payload FROM conversations WHERE conversation_key = ?", (conversation_key,)).fetchone()
+                if row is None or ConversationRef.model_validate(_load_json(str(row["payload"]))) != conversation_ref:
+                    return TurnAdmissionResult(status=TurnAdmissionStatus.REJECTED, reason="CONVERSATION_NOT_FOUND")
+                key = _turn_key(conversation_ref, turn_id)
+                existing = connection.execute("SELECT payload FROM turns WHERE turn_key = ?", (key,)).fetchone()
+                fingerprint_value = fingerprint.model_dump_json()
+                if existing is not None:
+                    turn = self._decode_turn(_load_json(str(existing["payload"])))
+                    if turn.fingerprint != fingerprint_value:
+                        return TurnAdmissionResult(status=TurnAdmissionStatus.TURN_ID_CONFLICT, turn_id=turn_id)
+                    return self._existing_admission(connection, turn)
+                active = connection.execute("SELECT turn_key FROM claims WHERE conversation_key = ?", (conversation_key,)).fetchone()
+                if active is not None:
+                    return TurnAdmissionResult(status=TurnAdmissionStatus.CONVERSATION_BUSY, reason="CONVERSATION_BUSY")
+                turn = StoredTurn(conversation_ref=conversation_ref, turn_ref=TurnRef(conversation_id=conversation_ref.conversation_id, turn_id=turn_id), fingerprint=fingerprint_value, snapshot=snapshot, turn_input=turn_input)
+                self._append_fact(connection, self._projection_fact("turn_input_committed", key, turn.revision, {"kind": "turn", "turn": self._encode_turn(turn)}))
+                connection.execute("INSERT INTO turns(turn_key, conversation_key, payload) VALUES (?, ?, ?)", (key, conversation_key, _json(self._encode_turn(turn))))
+                connection.execute("INSERT INTO claims(conversation_key, turn_key) VALUES (?, ?)", (conversation_key, key))
+                return TurnAdmissionResult(status=TurnAdmissionStatus.NEWLY_ADMITTED, turn_id=turn_id)
+
+            return self._write(write)
+
+    async def get_turn(self, conversation_ref: ConversationRef, turn_id: TurnId) -> StoredTurn:
+        async with self._lock:
+            row = self._read_one("SELECT payload FROM turns WHERE turn_key = ?", (_turn_key(conversation_ref, turn_id),), "TURN_NOT_FOUND")
+            return self._decode_turn(_load_json(str(row["payload"])))
+
+    async def get_response(self, response_id: ResponseId) -> StoredResponse:
+        async with self._lock:
+            row = self._read_one("SELECT payload FROM responses WHERE response_id = ?", (response_id.value,), "RESPONSE_NOT_FOUND")
+            return self._decode_response(_load_json(str(row["payload"])))
+
+    async def get_turn_by_response(self, response_id: ResponseId) -> StoredTurn:
+        async with self._lock:
+            row = self._read_one("SELECT turn_key FROM responses WHERE response_id = ?", (response_id.value,), "RESPONSE_NOT_FOUND")
+            turn_row = self._read_one("SELECT payload FROM turns WHERE turn_key = ?", (str(row["turn_key"]),), "TURN_NOT_FOUND")
+            return self._decode_turn(_load_json(str(turn_row["payload"])))
+
+    async def get_authorized_turn(self, conversation_ref: ConversationRef, turn_id: TurnId, caller: UserId) -> StoredTurn:
+        async with self._lock:
+            self._validate_conversation_read(conversation_ref, caller)
+            row = self._read_one("SELECT payload FROM turns WHERE turn_key = ?", (_turn_key(conversation_ref, turn_id),), "TURN_NOT_FOUND")
+            return self._decode_turn(_load_json(str(row["payload"])))
+
+    async def get_authorized_response(self, response_id: ResponseId, caller: UserId) -> StoredResponse:
+        async with self._lock:
+            row = self._read_one("SELECT turn_key, payload FROM responses WHERE response_id = ?", (response_id.value,), "RESPONSE_NOT_FOUND")
+            turn_row = self._read_one("SELECT payload FROM turns WHERE turn_key = ?", (str(row["turn_key"]),), "TURN_NOT_FOUND")
+            turn = self._decode_turn(_load_json(str(turn_row["payload"])))
+            self._validate_conversation_read(turn.conversation_ref, caller)
+            return self._decode_response(_load_json(str(row["payload"])))
+
+    async def commit_response_started(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, response_id: ResponseId) -> StoredResponse:
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> StoredResponse:
+                self._validate_token(connection, token)
+                key = _turn_key(conversation_ref, turn_id)
+                turn = self._turn_from_connection(connection, key)
+                if turn.state in _TERMINAL_TURNS:
+                    raise CoreStateError("TURN_NOT_OPEN")
+                if turn.response_id is not None:
+                    return self._response_from_connection(connection, turn.response_id)
+                if not validate_turn_transition(turn.state, TurnState.PROCESSING):
+                    raise CoreStateError("INVALID_TURN_TRANSITION")
+                event = ResponseStartedEvent(event_id=ResponseEventId(value="event-" + uuid.uuid4().hex), response_id=response_id, event_sequence=1)
+                response = StoredResponse(response_id=response_id, turn_key=key, state=ResponseState.STARTED, revision=1, events=(event,))
+                turn = replace(turn, response_id=response_id, state=TurnState.PROCESSING, revision=turn.revision + 1)
+                self._append_fact(connection, self._projection_fact("response_started", response_id.value, response.revision, {"kind": "response", "response": self._encode_response(response)}))
+                self._append_fact(connection, self._projection_fact("turn_processing", key, turn.revision, {"kind": "turn", "turn": self._encode_turn(turn)}))
+                connection.execute("INSERT INTO responses(response_id, turn_key, payload) VALUES (?, ?, ?)", (response_id.value, key, _json(self._encode_response(response))))
+                self._write_turn(connection, key, turn)
+                return response
+
+            return self._write(write)
+
+    async def add_execution_attempt(self, token: CoreAuthorityToken, response_id: ResponseId, attempt: ExecutionAttemptSnapshot) -> StoredResponse:
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> StoredResponse:
+                self._validate_token(connection, token)
+                response = self._require_open_response(connection, response_id)
+                if attempt.response_id != response_id:
+                    raise CoreStateError("ATTEMPT_RESPONSE_MISMATCH")
+                if any(item.execution_attempt_id == attempt.execution_attempt_id for item in response.attempts):
+                    return response
+                response = replace(response, attempts=response.attempts + (attempt,), revision=response.revision + 1)
+                self._append_fact(connection, self._projection_fact("execution_attempt_added", response_id.value, response.revision, {"kind": "response", "response": self._encode_response(response)}))
+                self._write_response(connection, response)
+                return response
+
+            return self._write(write)
+
+    async def commit_segment(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int, segment: AgentOutputSegmentCommitted) -> StoredResponse:
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> StoredResponse:
+                self._validate_token(connection, token)
+                response = self._require_open_response(connection, response_id)
+                if response.revision != expected_response_revision:
+                    for present in response.segments:
+                        if present.segment_id == segment.segment_id:
+                            if present == segment:
+                                return response
+                            raise CoreStateError("SEGMENT_ID_CONFLICT")
+                    raise CoreStateError("RESPONSE_REVISION_CONFLICT")
+                if segment.response_id != response_id:
+                    raise CoreStateError("SEGMENT_RESPONSE_MISMATCH")
+                if response.segments and segment.sequence <= response.segments[-1].sequence:
+                    raise CoreStateError("SEGMENT_SEQUENCE_CONFLICT")
+                event = SegmentCommittedEvent(event_id=ResponseEventId(value="event-" + uuid.uuid4().hex), response_id=response_id, event_sequence=len(response.events) + 1, segment_id=segment.segment_id, segment_sequence=segment.sequence, text=segment.text, language=segment.language)
+                response = replace(response, segments=response.segments + (segment,), events=response.events + (event,), revision=response.revision + 1)
+                self._append_fact(connection, self._projection_fact("response_segment_committed", response_id.value, response.revision, {"kind": "response", "response": self._encode_response(response)}))
+                self._write_response(connection, response)
+                return response
+
+            return self._write(write)
+
+    async def finalize_response(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int) -> StoredResponse:
+        async with self._lock:
+            return self._terminal_response(token, response_id, expected_response_revision, None)
+
+    async def abort_response(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int, reason: ResponseAbortReason) -> StoredResponse:
+        async with self._lock:
+            return self._terminal_response(token, response_id, expected_response_revision, reason)
+
+    async def terminalize_turn(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, expected_turn_revision: int, state: TurnState, abort_reason: Optional[AbortReason] = None) -> StoredTurn:
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> StoredTurn:
+                self._validate_token(connection, token)
+                key = _turn_key(conversation_ref, turn_id)
+                turn = self._turn_from_connection(connection, key)
+                if turn.revision != expected_turn_revision:
+                    raise CoreStateError("TURN_REVISION_CONFLICT")
+                if turn.state in _TERMINAL_TURNS:
+                    return turn
+                if connection.execute("SELECT 1 FROM claims WHERE conversation_key = ? AND turn_key = ?", (_conversation_key(conversation_ref), key)).fetchone() is None:
+                    raise CoreStateError("CONVERSATION_CLAIM_MISMATCH")
+                if not validate_turn_transition(turn.state, state):
+                    raise CoreStateError("INVALID_TURN_TRANSITION")
+                if state == TurnState.ABORTED and abort_reason is None:
+                    raise CoreStateError("ABORT_REASON_REQUIRED")
+                if state != TurnState.ABORTED and abort_reason is not None:
+                    raise CoreStateError("UNEXPECTED_ABORT_REASON")
+                turn = replace(turn, state=state, abort_reason=abort_reason, revision=turn.revision + 1)
+                self._append_fact(connection, self._projection_fact("turn_terminalized", key, turn.revision, {"kind": "turn", "turn": self._encode_turn(turn)}))
+                self._write_turn(connection, key, turn)
+                connection.execute("DELETE FROM claims WHERE conversation_key = ? AND turn_key = ?", (_conversation_key(conversation_ref), key))
+                return turn
+
+            return self._write(write)
+
+    async def get_conversation_context(self, conversation_ref: ConversationRef, excluding_turn_id: TurnId) -> Tuple[ContextEntry, ...]:
+        async with self._lock:
+            self._require_serving()
+            rows = self._connection.execute("SELECT turn_key, payload FROM turns WHERE conversation_key = ? ORDER BY rowid", (_conversation_key(conversation_ref),)).fetchall()
+            entries: List[ContextEntry] = []
+            for row in rows:
+                turn = self._decode_turn(_load_json(str(row["payload"])))
+                if turn.turn_ref.turn_id == excluding_turn_id:
+                    continue
+                entries.extend(ContextEntry(role=ContextRole.USER, text=part.text) for part in turn.turn_input.parts if hasattr(part, "text"))
+                if turn.response_id is not None:
+                    response_row = self._connection.execute("SELECT payload FROM responses WHERE response_id = ?", (turn.response_id.value,)).fetchone()
+                    if response_row is not None:
+                        response = self._decode_response(_load_json(str(response_row["payload"])))
+                        entries.extend(ContextEntry(role=ContextRole.ASSISTANT, text=segment.text) for segment in response.segments)
+            return tuple(entries)
+
+    async def watch_response_events(self, response_id: ResponseId, after_event_sequence: int) -> AsyncIterator[ResponseEvent]:
+        cursor = after_event_sequence
+        while True:
+            response = await self.get_response(response_id)
+            replay = tuple(event for event in response.events if event.event_sequence > cursor)
+            for event in replay:
+                cursor = event.event_sequence
+                yield event
+            if response.state in _TERMINAL_RESPONSES:
+                return
+            await asyncio.sleep(0.01)
+
+    async def active_claim(self, conversation_ref: ConversationRef) -> Optional[TurnId]:
+        async with self._lock:
+            self._require_serving()
+            row = self._connection.execute("SELECT turn_key FROM claims WHERE conversation_key = ?", (_conversation_key(conversation_ref),)).fetchone()
+            if row is None:
+                return None
+            turn = self._turn_from_connection(self._connection, str(row["turn_key"]))
+            return turn.turn_ref.turn_id
+
+    async def append_fact(self, token: CoreAuthorityToken, fact: FactEnvelope) -> FactCommitResult:
+        """Append a fact with stable FactId idempotency and explicit certainty."""
+
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> FactCommitResult:
+                self._validate_token(connection, token)
+                return self._append_fact(connection, fact)
+
+            result = self._write(write)
+            if self._unknown_commit_once:
+                self._unknown_commit_once = False
+                return FactCommitResult(fact_id=fact.fact_id, certainty=CommitCertainty.OUTCOME_UNKNOWN, aggregate_revision=fact.aggregate_revision)
+            return result
+
+    async def get_fact(self, fact_id: FactId) -> Optional[FactEnvelope]:
+        async with self._lock:
+            self._require_serving()
+            row = self._connection.execute("SELECT fact_id, fact_type, fact_schema_version, aggregate_id, aggregate_revision, recorded_at, payload FROM facts WHERE fact_id = ?", (fact_id.value,)).fetchone()
+            return None if row is None else self._decode_fact(row)
+
+    async def reconcile_fact(self, fact_id: FactId) -> Optional[FactEnvelope]:
+        """Stable FactId reconciliation after an OUTCOME_UNKNOWN commit result."""
+
+        return await self.get_fact(fact_id)
+
+    async def rebuild_projections(self, token: CoreAuthorityToken) -> None:
+        """Recreate projections solely from the append-only fact ledger."""
+
+        async with self._lock:
+            def write(connection: sqlite3.Connection) -> None:
+                self._validate_token(connection, token)
+                facts = connection.execute("SELECT fact_id, fact_type, fact_schema_version, aggregate_id, aggregate_revision, recorded_at, payload FROM facts ORDER BY rowid").fetchall()
+                connection.execute("DELETE FROM claims")
+                connection.execute("DELETE FROM responses")
+                connection.execute("DELETE FROM turns")
+                connection.execute("DELETE FROM conversations")
+                for row in facts:
+                    fact = self._decode_fact(row)
+                    self._apply_projection_fact(connection, fact)
+                self._rebuild_claims(connection)
+
+            try:
+                self._write(write)
+            except CoreStateError as error:
+                if error.code in {"INCOMPATIBLE_FACT_SCHEMA", "INCOMPATIBLE_SCHEMA"}:
+                    self._serving = False
+                raise
+
+    def _initialize(self, requested_id: Optional[StoreAuthorityId]) -> None:
+        connection = self._connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS facts (fact_id TEXT PRIMARY KEY, fact_type TEXT NOT NULL, fact_schema_version INTEGER NOT NULL, aggregate_id TEXT NOT NULL, aggregate_revision INTEGER NOT NULL, recorded_at TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(aggregate_id, aggregate_revision))")
+            connection.execute("CREATE TABLE IF NOT EXISTS conversations (conversation_key TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS turns (turn_key TEXT PRIMARY KEY, conversation_key TEXT NOT NULL, payload TEXT NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS responses (response_id TEXT PRIMARY KEY, turn_key TEXT NOT NULL, payload TEXT NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS claims (conversation_key TEXT PRIMARY KEY, turn_key TEXT UNIQUE NOT NULL)")
+            row = connection.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
+            if row is None:
+                authority = requested_id or StoreAuthorityId(value="sqlite-store-" + uuid.uuid4().hex)
+                self._set_meta(connection, "schema_version", _SCHEMA_VERSION)
+                self._set_meta(connection, "store_authority_id", authority.value)
+                self._set_meta(connection, "authority_epoch", "0")
+                self._set_meta(connection, "active_authority", "")
+            elif str(row["value"]) != _SCHEMA_VERSION:
+                raise CoreStateError("INCOMPATIBLE_SCHEMA")
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+
+    def _acquire_authority(self, core_instance_id: CoreInstanceId) -> CoreAuthorityToken:
+        def write(connection: sqlite3.Connection) -> CoreAuthorityToken:
+            if self._meta(connection, "active_authority"):
+                raise CoreStateError("CORE_AUTHORITY_ALREADY_OWNED")
+            epoch = int(self._meta(connection, "authority_epoch")) + 1
+            token = CoreAuthorityToken(core_instance_id=core_instance_id, store_authority_id=StoreAuthorityId(value=self._meta(connection, "store_authority_id")), authority_epoch=epoch, token_nonce=uuid.uuid4().hex)
+            self._set_meta(connection, "authority_epoch", str(epoch))
+            self._set_meta(connection, "active_authority", _json(_contract(token)))
+            return token
+
+        return self._write(write)
+
+    def _terminal_response(self, token: CoreAuthorityToken, response_id: ResponseId, expected_revision: int, abort_reason: Optional[ResponseAbortReason]) -> StoredResponse:
+        def write(connection: sqlite3.Connection) -> StoredResponse:
+            self._validate_token(connection, token)
+            response = self._require_open_response(connection, response_id)
+            if response.revision != expected_revision:
+                raise CoreStateError("RESPONSE_REVISION_CONFLICT")
+            if abort_reason is None:
+                event: ResponseEvent = ResponseFinalizedEvent(event_id=ResponseEventId(value="event-" + uuid.uuid4().hex), response_id=response_id, event_sequence=len(response.events) + 1)
+                response = replace(response, state=ResponseState.FINALIZED, events=response.events + (event,), revision=response.revision + 1)
+                fact_type = "response_finalized"
+            else:
+                event = ResponseAbortedEvent(event_id=ResponseEventId(value="event-" + uuid.uuid4().hex), response_id=response_id, event_sequence=len(response.events) + 1, reason=abort_reason)
+                response = replace(response, state=ResponseState.ABORTED, abort_reason=abort_reason, events=response.events + (event,), revision=response.revision + 1)
+                fact_type = "response_aborted"
+            self._append_fact(connection, self._projection_fact(fact_type, response_id.value, response.revision, {"kind": "response", "response": self._encode_response(response)}))
+            self._write_response(connection, response)
+            return response
+
+        return self._write(write)
+
+    def _projection_fact(self, fact_type: str, aggregate_id: str, revision: int, payload: Dict[str, Any]) -> FactEnvelope:
+        return FactEnvelope(fact_id=_fact_id(fact_type + ":" + aggregate_id + ":" + str(revision)), fact_type=fact_type, fact_schema_version=1, aggregate_id=aggregate_id, aggregate_revision=revision, recorded_at=utc_now(), payload=payload)
+
+    def _append_fact(self, connection: sqlite3.Connection, fact: FactEnvelope) -> FactCommitResult:
+        row = connection.execute("SELECT fact_type, fact_schema_version, aggregate_id, aggregate_revision, recorded_at, payload FROM facts WHERE fact_id = ?", (fact.fact_id.value,)).fetchone()
+        if row is not None:
+            current = self._decode_fact(row, fact.fact_id)
+            if current != fact:
+                raise CoreStateError("FACT_ID_CONFLICT")
+            return FactCommitResult(fact_id=fact.fact_id, certainty=CommitCertainty.COMMITTED, aggregate_revision=fact.aggregate_revision)
+        latest = connection.execute("SELECT MAX(aggregate_revision) AS revision FROM facts WHERE aggregate_id = ?", (fact.aggregate_id,)).fetchone()
+        current_revision = 0 if latest is None or latest["revision"] is None else int(latest["revision"])
+        if fact.aggregate_revision != current_revision + 1:
+            raise CoreStateError("FACT_REVISION_CONFLICT")
+        connection.execute("INSERT INTO facts(fact_id, fact_type, fact_schema_version, aggregate_id, aggregate_revision, recorded_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?)", (fact.fact_id.value, fact.fact_type, fact.fact_schema_version, fact.aggregate_id, fact.aggregate_revision, fact.recorded_at.value.isoformat(), _json(fact.payload)))
+        return FactCommitResult(fact_id=fact.fact_id, certainty=CommitCertainty.COMMITTED, aggregate_revision=fact.aggregate_revision)
+
+    def _apply_projection_fact(self, connection: sqlite3.Connection, fact: FactEnvelope) -> None:
+        kind = fact.payload.get("kind")
+        if kind == "conversation":
+            conversation = ConversationRef.model_validate(fact.payload["conversation"])
+            connection.execute("INSERT OR REPLACE INTO conversations(conversation_key, payload) VALUES (?, ?)", (_conversation_key(conversation), _json(_contract(conversation))))
+        elif kind == "turn":
+            turn = self._decode_turn(fact.payload["turn"])
+            connection.execute("INSERT OR REPLACE INTO turns(turn_key, conversation_key, payload) VALUES (?, ?, ?)", (self._turn_key_from_turn(turn), _conversation_key(turn.conversation_ref), _json(self._encode_turn(turn))))
+        elif kind == "response":
+            response = self._decode_response(fact.payload["response"])
+            connection.execute("INSERT OR REPLACE INTO responses(response_id, turn_key, payload) VALUES (?, ?, ?)", (response.response_id.value, response.turn_key, _json(self._encode_response(response))))
+
+    def _rebuild_claims(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute("SELECT turn_key, conversation_key, payload FROM turns").fetchall()
+        for row in rows:
+            turn = self._decode_turn(_load_json(str(row["payload"])))
+            if turn.state not in _TERMINAL_TURNS:
+                connection.execute("INSERT INTO claims(conversation_key, turn_key) VALUES (?, ?)", (str(row["conversation_key"]), str(row["turn_key"])))
+
+    def _write(self, action: Callable[[sqlite3.Connection], _WriteResult]) -> _WriteResult:
+        self._require_serving()
+        connection = self._connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            result = action(connection)
+            connection.execute("COMMIT")
+            return result
+        except CoreStateError:
+            connection.execute("ROLLBACK")
+            raise
+        except (sqlite3.DatabaseError, sqlite3.OperationalError) as error:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.DatabaseError:
+                pass
+            if "locked" in str(error).lower() or "busy" in str(error).lower():
+                raise CoreStateError("STORE_CONTENTION") from error
+            self._serving = False
+            raise CoreStateError("STORE_NOT_SERVING") from error
+
+    def _require_serving(self) -> None:
+        if not self._serving or self._connection is None:
+            raise CoreStateError("STORE_NOT_SERVING")
+
+    def _meta(self, connection: sqlite3.Connection, key: str) -> str:
+        row = connection.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            self._serving = False
+            raise CoreStateError("STORE_NOT_SERVING")
+        return str(row["value"])
+
+    @staticmethod
+    def _set_meta(connection: sqlite3.Connection, key: str, value: str) -> None:
+        connection.execute("INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
+
+    def _validate_token(self, connection: sqlite3.Connection, token: CoreAuthorityToken) -> None:
+        active = self._meta(connection, "active_authority")
+        if not active or _load_json(active) != _contract(token) or token.store_authority_id.value != self._meta(connection, "store_authority_id") or token.authority_epoch != int(self._meta(connection, "authority_epoch")):
+            raise CoreStateError("STALE_CORE_AUTHORITY")
+
+    def _read_one(self, query: str, params: Sequence[Any], missing: str) -> sqlite3.Row:
+        self._require_serving()
+        try:
+            row = self._connection.execute(query, params).fetchone()
+        except sqlite3.DatabaseError as error:
+            self._serving = False
+            raise CoreStateError("STORE_NOT_SERVING") from error
+        if row is None:
+            raise CoreStateError(missing)
+        return cast(sqlite3.Row, row)
+
+    def _validate_conversation_read(self, conversation_ref: ConversationRef, caller: UserId) -> None:
+        row = self._read_one("SELECT payload FROM conversations WHERE conversation_key = ?", (_conversation_key(conversation_ref),), "READ_NOT_AUTHORIZED")
+        if ConversationRef.model_validate(_load_json(str(row["payload"]))) != conversation_ref or conversation_ref.user_id != caller:
+            raise CoreStateError("READ_NOT_AUTHORIZED")
+
+    def _turn_from_connection(self, connection: sqlite3.Connection, key: str) -> StoredTurn:
+        row = connection.execute("SELECT payload FROM turns WHERE turn_key = ?", (key,)).fetchone()
+        if row is None:
+            raise CoreStateError("TURN_NOT_FOUND")
+        return self._decode_turn(_load_json(str(row["payload"])))
+
+    def _response_from_connection(self, connection: sqlite3.Connection, response_id: ResponseId) -> StoredResponse:
+        row = connection.execute("SELECT payload FROM responses WHERE response_id = ?", (response_id.value,)).fetchone()
+        if row is None:
+            raise CoreStateError("RESPONSE_NOT_FOUND")
+        return self._decode_response(_load_json(str(row["payload"])))
+
+    def _require_open_response(self, connection: sqlite3.Connection, response_id: ResponseId) -> StoredResponse:
+        response = self._response_from_connection(connection, response_id)
+        if response.state != ResponseState.STARTED:
+            raise CoreStateError("RESPONSE_NOT_OPEN")
+        turn = self._turn_from_connection(connection, response.turn_key)
+        if turn.state in _TERMINAL_TURNS:
+            raise CoreStateError("TURN_NOT_OPEN")
+        return response
+
+    def _write_turn(self, connection: sqlite3.Connection, key: str, turn: StoredTurn) -> None:
+        connection.execute("UPDATE turns SET payload = ? WHERE turn_key = ?", (_json(self._encode_turn(turn)), key))
+
+    def _write_response(self, connection: sqlite3.Connection, response: StoredResponse) -> None:
+        connection.execute("UPDATE responses SET payload = ? WHERE response_id = ?", (_json(self._encode_response(response)), response.response_id.value))
+
+    @staticmethod
+    def _turn_key_from_turn(turn: StoredTurn) -> str:
+        return _turn_key(turn.conversation_ref, turn.turn_ref.turn_id)
+
+    @staticmethod
+    def _encode_turn(turn: StoredTurn) -> Dict[str, Any]:
+        return {"conversation_ref": _contract(turn.conversation_ref), "turn_ref": _contract(turn.turn_ref), "fingerprint": turn.fingerprint, "snapshot": _contract(turn.snapshot), "turn_input": _contract(turn.turn_input), "revision": turn.revision, "state": turn.state.value, "abort_reason": None if turn.abort_reason is None else turn.abort_reason.value, "response_id": None if turn.response_id is None else turn.response_id.value}
+
+    @staticmethod
+    def _decode_turn(payload: Dict[str, Any]) -> StoredTurn:
+        input_payload = dict(payload["turn_input"])
+        input_payload["parts"] = tuple(input_payload["parts"])
+        return StoredTurn(conversation_ref=ConversationRef.model_validate(payload["conversation_ref"]), turn_ref=TurnRef.model_validate(payload["turn_ref"]), fingerprint=str(payload["fingerprint"]), snapshot=TurnSnapshot.model_validate(payload["snapshot"]), turn_input=TurnInput.model_validate(input_payload), revision=int(payload["revision"]), state=TurnState(str(payload["state"])), abort_reason=None if payload["abort_reason"] is None else AbortReason(str(payload["abort_reason"])), response_id=None if payload["response_id"] is None else ResponseId(value=str(payload["response_id"])))
+
+    @staticmethod
+    def _encode_response(response: StoredResponse) -> Dict[str, Any]:
+        return {"response_id": response.response_id.value, "turn_key": response.turn_key, "state": response.state.value, "revision": response.revision, "segments": [_contract(item) for item in response.segments], "events": [_contract(item) for item in response.events], "attempts": [_contract(item) for item in response.attempts], "abort_reason": None if response.abort_reason is None else response.abort_reason.value}
+
+    @staticmethod
+    def _decode_response(payload: Dict[str, Any]) -> StoredResponse:
+        attempts = []
+        for item in payload["attempts"]:
+            attempt_payload = dict(item)
+            attempt_payload["binding_snapshots"] = tuple(attempt_payload["binding_snapshots"])
+            started = dict(attempt_payload["started_at"])
+            started["value"] = _parse_datetime(started["value"])
+            attempt_payload["started_at"] = started
+            bindings = []
+            for binding in attempt_payload["binding_snapshots"]:
+                binding_payload = dict(binding)
+                valid_until = dict(binding_payload["authority_valid_until"])
+                valid_until["value"] = _parse_datetime(valid_until["value"])
+                binding_payload["authority_valid_until"] = valid_until
+                bindings.append(binding_payload)
+            attempt_payload["binding_snapshots"] = tuple(bindings)
+            attempts.append(ExecutionAttemptSnapshot.model_validate(attempt_payload))
+        return StoredResponse(response_id=ResponseId(value=str(payload["response_id"])), turn_key=str(payload["turn_key"]), state=ResponseState(str(payload["state"])), revision=int(payload["revision"]), segments=tuple(AgentOutputSegmentCommitted.model_validate(item) for item in payload["segments"]), events=tuple(SQLiteCoreStateStore._decode_event(item) for item in payload["events"]), attempts=tuple(attempts), abort_reason=None if payload["abort_reason"] is None else ResponseAbortReason(str(payload["abort_reason"])))
+
+    @staticmethod
+    def _decode_event(payload: Dict[str, Any]) -> ResponseEvent:
+        event_type = str(payload["event_type"])
+        if event_type == "response_started":
+            return ResponseStartedEvent.model_validate(payload)
+        if event_type == "segment_committed":
+            return SegmentCommittedEvent.model_validate(payload)
+        if event_type == "response_finalized":
+            return ResponseFinalizedEvent.model_validate(payload)
+        if event_type == "response_aborted":
+            return ResponseAbortedEvent.model_validate(payload)
+        raise CoreStateError("INCOMPATIBLE_FACT_SCHEMA")
+
+    @staticmethod
+    def _decode_fact(row: sqlite3.Row, known_id: Optional[FactId] = None) -> FactEnvelope:
+        version = int(row["fact_schema_version"])
+        if version == 0:
+            # v0 had the same explicit fields but lacked the schema marker in
+            # payload; this local upcast is deterministic and one-way.
+            version = 1
+        if version != 1:
+            raise CoreStateError("INCOMPATIBLE_FACT_SCHEMA")
+        fact_id = known_id or FactId(value=str(row["fact_id"]))
+        from yogurt_contracts.foundation.time import UtcInstant
+        return FactEnvelope(fact_id=fact_id, fact_type=str(row["fact_type"]), fact_schema_version=version, aggregate_id=str(row["aggregate_id"]), aggregate_revision=int(row["aggregate_revision"]), recorded_at=UtcInstant(value=_parse_datetime(row["recorded_at"])), payload=_load_json(str(row["payload"])))
+
+    @staticmethod
+    def _existing_admission(connection: sqlite3.Connection, turn: StoredTurn) -> TurnAdmissionResult:
+        if turn.response_id is None:
+            return TurnAdmissionResult(status=TurnAdmissionStatus.SAME_LOGICAL_TURN, turn_id=turn.turn_ref.turn_id)
+        row = connection.execute("SELECT payload FROM responses WHERE response_id = ?", (turn.response_id.value,)).fetchone()
+        if row is None:
+            raise CoreStateError("RESPONSE_NOT_FOUND")
+        response = SQLiteCoreStateStore._decode_response(_load_json(str(row["payload"])))
+        mapping = {ResponseState.STARTED: AdmissionResponseState.STARTED, ResponseState.FINALIZED: AdmissionResponseState.FINALIZED, ResponseState.ABORTED: AdmissionResponseState.ABORTED}
+        return TurnAdmissionResult(status=TurnAdmissionStatus.SAME_LOGICAL_TURN, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id, response_state=mapping[response.state])
