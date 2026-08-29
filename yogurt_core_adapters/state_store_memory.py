@@ -10,7 +10,9 @@ from dataclasses import replace
 from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 from yogurt_contracts.conversation.input import TurnInput
+from yogurt_contracts.conversation.fingerprint import TurnFingerprint
 from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
+from yogurt_contracts.conversation.lifecycle import validate_turn_transition
 from yogurt_contracts.conversation.refs import ConversationRef, TurnRef
 from yogurt_contracts.execution import ExecutionAttemptSnapshot
 from yogurt_contracts.execution.turn_snapshot import TurnSnapshot
@@ -110,7 +112,7 @@ class InMemoryCoreStateStore:
         token: CoreAuthorityToken,
         conversation_ref: ConversationRef,
         turn_id: TurnId,
-        fingerprint: object,
+        fingerprint: TurnFingerprint,
         snapshot: TurnSnapshot,
         turn_input: TurnInput,
     ) -> TurnAdmissionResult:
@@ -192,6 +194,8 @@ class InMemoryCoreStateStore:
                 raise CoreStateError("TURN_NOT_FOUND")
             if turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
                 raise CoreStateError("TURN_NOT_OPEN")
+            if not validate_turn_transition(turn.state, TurnState.PROCESSING):
+                raise CoreStateError("INVALID_TURN_TRANSITION")
             if turn.response_id is not None:
                 return self._responses[turn.response_id.value]
             event = ResponseStartedEvent(
@@ -200,7 +204,9 @@ class InMemoryCoreStateStore:
             response = StoredResponse(response_id=response_id, turn_key=key, state=ResponseState.STARTED, revision=1, events=(event,))
             self._responses[response_id.value] = response
             self._response_turns[response_id.value] = key
-            self._turns[key] = replace(turn, response_id=response_id, revision=turn.revision + 1)
+            self._turns[key] = replace(
+                turn, response_id=response_id, state=TurnState.PROCESSING, revision=turn.revision + 1
+            )
             self._condition.notify_all()
             return response
 
@@ -279,7 +285,10 @@ class InMemoryCoreStateStore:
                 event_id=ResponseEventId(value="event-" + uuid.uuid4().hex), response_id=response_id,
                 event_sequence=len(response.events) + 1, reason=reason,
             )
-            response = replace(response, state=ResponseState.ABORTED, events=response.events + (event,), revision=response.revision + 1)
+            response = replace(
+                response, state=ResponseState.ABORTED, abort_reason=reason,
+                events=response.events + (event,), revision=response.revision + 1,
+            )
             self._responses[response_id.value] = response
             self._condition.notify_all()
             return response
@@ -307,8 +316,8 @@ class InMemoryCoreStateStore:
             conversation_key = _conversation_key(conversation_ref)
             if self._claims.get(conversation_key) != key:
                 raise CoreStateError("CONVERSATION_CLAIM_MISMATCH")
-            if state not in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
-                raise CoreStateError("INVALID_TURN_TERMINAL_STATE")
+            if not validate_turn_transition(turn.state, state):
+                raise CoreStateError("INVALID_TURN_TRANSITION")
             if state == TurnState.ABORTED and abort_reason is None:
                 raise CoreStateError("ABORT_REASON_REQUIRED")
             if state != TurnState.ABORTED and abort_reason is not None:

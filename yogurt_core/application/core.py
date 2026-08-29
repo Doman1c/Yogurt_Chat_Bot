@@ -27,6 +27,7 @@ from yogurt_core.ports.identity import IdentityResolver
 from yogurt_core.ports.model import ModelPort
 from yogurt_core.ports.persona import PersonaSnapshotPort
 from yogurt_core.ports.state_store import CoreStateError, CoreStateStore
+from yogurt_core.response.terminal import consequence_from_response_terminal
 from yogurt_core.scheduling.conversation_scheduler import ConversationScheduler
 
 
@@ -114,9 +115,12 @@ class YogurtCore:
                 )
                 if closed.attempts:
                     await self._model.cancel(closed.attempts[-1])
-        turn = await self._store.get_turn(command.conversation_ref, command.turn_id)
-        await self._store.terminalize_turn(token, command.conversation_ref, command.turn_id, turn.revision, TurnState.CANCELLED)
-        return CancelTurnResult(status=CancelTurnStatus.CANCELLED, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id)
+                await self._converge_turn_from_response_terminal(command.conversation_ref, command.turn_id, closed)
+                return CancelTurnResult(status=CancelTurnStatus.CANCELLED, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id)
+            await self._converge_turn_from_response_terminal(command.conversation_ref, command.turn_id, response)
+            return CancelTurnResult(status=CancelTurnStatus.ALREADY_TERMINAL, turn_id=turn.turn_ref.turn_id, response_id=turn.response_id)
+        await self._terminalize(command.conversation_ref, command.turn_id, TurnState.CANCELLED)
+        return CancelTurnResult(status=CancelTurnStatus.CANCELLED, turn_id=turn.turn_ref.turn_id)
 
     async def get_turn(self, command: GetTurnCommand) -> StoredTurn:
         return await self._store.get_authorized_turn(command.conversation_ref, command.turn_id, command.caller_context.logical_user_id)
@@ -133,6 +137,7 @@ class YogurtCore:
         await self._scheduler.drain()
 
     async def _run_turn(self, conversation_ref: ConversationRef, turn_id: TurnId) -> None:
+        response: Optional[StoredResponse] = None
         try:
             token = self._require_token()
             turn = await self._store.get_turn(conversation_ref, turn_id)
@@ -151,54 +156,78 @@ class YogurtCore:
                 )
                 response = await self._store.add_execution_attempt(token, response_id, attempt)
                 terminal = AttemptTerminal(kind=AttemptTerminalKind.SUCCEEDED)
-                try:
-                    async for draft in self._model.run(context, attempt):
-                        if isinstance(draft, VisibleTextDelta):
-                            text = draft.text.strip()
-                            if not text:
-                                continue
-                            segment = AgentOutputSegmentCommitted(
-                                response_id=response_id,
-                                segment_id=SegmentId(value="segment-" + uuid.uuid4().hex),
-                                sequence=len(response.segments) + 1,
-                                text=text,
-                                language=draft.language,
-                            )
-                            response = await self._store.commit_segment(token, response_id, response.revision, segment)
-                            saw_committed_prefix = True
-                        elif isinstance(draft, AttemptTerminal):
-                            terminal = draft
-                except Exception:
-                    await self._abort_and_terminalize(
-                        conversation_ref, turn.turn_ref.turn_id, response, ResponseAbortReason.EXECUTION_FAILURE,
-                        AbortReason.EXECUTION_FAILURE,
-                    )
-                    return
+                async for draft in self._model.run(context, attempt):
+                    if isinstance(draft, VisibleTextDelta):
+                        text = draft.text.strip()
+                        if not text:
+                            continue
+                        segment = AgentOutputSegmentCommitted(
+                            response_id=response_id,
+                            segment_id=SegmentId(value="segment-" + uuid.uuid4().hex),
+                            sequence=len(response.segments) + 1,
+                            text=text,
+                            language=draft.language,
+                        )
+                        response = await self._store.commit_segment(token, response_id, response.revision, segment)
+                        saw_committed_prefix = True
+                    elif isinstance(draft, AttemptTerminal):
+                        terminal = draft
                 if terminal.kind == AttemptTerminalKind.SUCCEEDED:
-                    await self._store.finalize_response(token, response_id, response.revision)
-                    await self._terminalize(conversation_ref, turn.turn_ref.turn_id, TurnState.COMPLETED)
+                    response = await self._store.finalize_response(token, response_id, response.revision)
+                    await self._converge_turn_from_response_terminal(conversation_ref, turn.turn_ref.turn_id, response)
                     return
                 if saw_committed_prefix or terminal.kind == AttemptTerminalKind.CANCELLED or _ == 2:
-                    await self._abort_and_terminalize(
-                        conversation_ref, turn.turn_ref.turn_id, response, ResponseAbortReason.PROVIDER_FAILURE,
-                        AbortReason.PROVIDER_FAILURE,
-                    )
+                    abort_reason = ResponseAbortReason.CANCELLED if terminal.kind == AttemptTerminalKind.CANCELLED else ResponseAbortReason.PROVIDER_FAILURE
+                    response = await self._store.abort_response(token, response_id, response.revision, abort_reason)
+                    await self._converge_turn_from_response_terminal(conversation_ref, turn.turn_ref.turn_id, response)
                     return
         except CoreStateError as error:
-            if error.code in {"STALE_CORE_AUTHORITY", "RESPONSE_NOT_OPEN", "TURN_NOT_OPEN", "TURN_REVISION_CONFLICT"}:
+            if error.code in {"STALE_CORE_AUTHORITY", "RESPONSE_NOT_OPEN", "TURN_NOT_OPEN"}:
+                return
+            if error.code == "TURN_REVISION_CONFLICT" and await self._turn_is_terminal(conversation_ref, turn_id):
                 return
             raise
+        except Exception:
+            try:
+                await self._converge_execution_failure(conversation_ref, turn_id, response)
+            except Exception:
+                # Cleanup must never mask the original execution failure.
+                pass
+            raise
 
-    async def _abort_and_terminalize(
-        self,
-        conversation_ref: ConversationRef,
-        turn_id: TurnId,
-        response: StoredResponse,
-        response_reason: ResponseAbortReason,
-        turn_reason: AbortReason,
+    async def _converge_execution_failure(
+        self, conversation_ref: ConversationRef, turn_id: TurnId, response: Optional[StoredResponse]
     ) -> None:
-        await self._store.abort_response(self._require_token(), response.response_id, response.revision, response_reason)
-        await self._terminalize(conversation_ref, turn_id, TurnState.ABORTED, turn_reason)
+        token = self._require_token()
+        if response is None:
+            turn = await self._store.get_turn(conversation_ref, turn_id)
+            if turn.response_id is not None:
+                response = await self._store.get_response(turn.response_id)
+        if response is not None and response.state == ResponseState.STARTED:
+            response = await self._store.abort_response(
+                token, response.response_id, response.revision, ResponseAbortReason.EXECUTION_FAILURE
+            )
+        if response is not None and response.state in {ResponseState.FINALIZED, ResponseState.ABORTED}:
+            await self._converge_turn_from_response_terminal(conversation_ref, turn_id, response)
+            return
+        if not await self._turn_is_terminal(conversation_ref, turn_id):
+            await self._terminalize(conversation_ref, turn_id, TurnState.ABORTED, AbortReason.EXECUTION_FAILURE)
+
+    async def _converge_turn_from_response_terminal(
+        self, conversation_ref: ConversationRef, turn_id: TurnId, response: StoredResponse
+    ) -> None:
+        consequence = consequence_from_response_terminal(response.state, response.abort_reason)
+        turn = await self._store.get_turn(conversation_ref, turn_id)
+        if turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
+            return
+        await self._store.terminalize_turn(
+            self._require_token(), conversation_ref, turn_id, turn.revision,
+            consequence.state, consequence.abort_reason,
+        )
+
+    async def _turn_is_terminal(self, conversation_ref: ConversationRef, turn_id: TurnId) -> bool:
+        turn = await self._store.get_turn(conversation_ref, turn_id)
+        return turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}
 
     async def _abort_with_retry(
         self, token: CoreAuthorityToken, response: StoredResponse, reason: ResponseAbortReason, caller_user_id: UserId

@@ -43,8 +43,10 @@ class StoredResponse:
     segments: Tuple[AgentOutputSegmentCommitted, ...] = ()
     events: Tuple[ResponseEvent, ...] = ()
     attempts: Tuple[ExecutionAttemptSnapshot, ...] = ()
+    abort_reason: Optional["ResponseAbortReason"] = None
 
 
 # Imported at the end to keep ContextEntry's provider-neutral type separate from
 # response state while avoiding an application-layer circular import.
 from yogurt_core.context.models import ContextEntry  # noqa: E402
+from yogurt_contracts.response.lifecycle import ResponseAbortReason  # noqa: E402
