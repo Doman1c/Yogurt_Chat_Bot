@@ -31,6 +31,7 @@ from yogurt_contracts.response.events import (
 from yogurt_contracts.response.lifecycle import ResponseState
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted
 from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
+from yogurt_contracts.foundation.durability import CorePersistenceMode
 
 from yogurt_core.application.results import AdmissionResponseState, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.model.execution import ExecutionAttemptSnapshot, StoredResponse, StoredTurn
@@ -48,7 +49,7 @@ def _turn_key(ref: ConversationRef, turn_id: TurnId) -> str:
 class InMemoryCoreStateStore:
     """Single authoritative state adapter, intentionally ephemeral only."""
 
-    persistence_mode = "EPHEMERAL"
+    persistence_mode = CorePersistenceMode.EPHEMERAL
 
     def __init__(self, store_authority_id: Optional[StoreAuthorityId] = None) -> None:
         self._condition = asyncio.Condition()

@@ -22,6 +22,7 @@ from yogurt_contracts.foundation.identifiers import (
     TurnId,
     UserId,
 )
+from yogurt_contracts.foundation.durability import CorePersistenceMode
 from yogurt_contracts.identity.principal import ExternalPrincipal
 from yogurt_contracts.identity.resolution import IdentityResolution
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted
@@ -200,4 +201,4 @@ def test_replay_after_cursor_has_no_subscribe_gap_and_cross_user_read_is_denied(
 
 
 def test_memory_store_explicitly_declares_ephemeral_without_restart_durability():
-    assert InMemoryCoreStateStore.persistence_mode == "EPHEMERAL"
+    assert InMemoryCoreStateStore.persistence_mode == CorePersistenceMode.EPHEMERAL
