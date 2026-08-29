@@ -1,6 +1,7 @@
 """Application facade for the R2-A process-lifetime reference Core."""
 
 import uuid
+import asyncio
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
@@ -70,13 +71,19 @@ class YogurtCore:
             self._lifecycle = CoreLifecycleState.NOT_SERVING
             raise
 
-    async def stop(self) -> None:
+    async def stop(self, drain_timeout_seconds: float = 5.0) -> None:
         self._lifecycle = CoreLifecycleState.DRAINING
-        await self._scheduler.drain()
-        if self._token is not None:
-            await self._store.release_authority(self._token)
-            self._token = None
-        self._lifecycle = CoreLifecycleState.STOPPED
+        try:
+            await asyncio.wait_for(self._scheduler.drain(), timeout=drain_timeout_seconds)
+        except (asyncio.TimeoutError, Exception):
+            await self._scheduler.cancel_remaining()
+        finally:
+            if self._token is not None:
+                try:
+                    await self._store.release_authority(self._token)
+                finally:
+                    self._token = None
+            self._lifecycle = CoreLifecycleState.STOPPED
 
     async def create_conversation(self, conversation_ref: ConversationRef) -> None:
         self._require_serving()

@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import msvcrt
+import os
 import sqlite3
 import uuid
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Tuple, TypeVar, Union, cast
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Set, Tuple, TypeVar, Union, cast
 
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
 from yogurt_contracts.conversation.input import TurnInput
@@ -34,13 +36,14 @@ from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
 from yogurt_core.application.results import AdmissionResponseState, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.context.models import ContextEntry, ContextRole
 from yogurt_core.model.execution import StoredResponse, StoredTurn
-from yogurt_core.ports.state_store import CoreStateError
+from yogurt_core.ports.state_store import CoreStateError, StateCommit
 
 
 _SCHEMA_VERSION = "1"
 _TERMINAL_TURNS = {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}
 _TERMINAL_RESPONSES = {ResponseState.FINALIZED, ResponseState.ABORTED}
 _WriteResult = TypeVar("_WriteResult")
+_LOCAL_WRITER_LOCKS: Set[str] = set()
 
 
 def _conversation_key(ref: ConversationRef) -> str:
@@ -85,6 +88,8 @@ class SQLiteCoreStateStore:
         self._path = str(database_path)
         self._lock = asyncio.Lock()
         self._unknown_commit_once = False
+        self._semantic_unknown_once = False
+        self._writer_lock: Optional[Any] = None
         self._serving = True
         try:
             self._connection = sqlite3.connect(self._path, isolation_level=None, check_same_thread=False, timeout=2.0)
@@ -108,8 +113,12 @@ class SQLiteCoreStateStore:
 
         self._unknown_commit_once = True
 
+    def simulate_semantic_outcome_unknown_once(self) -> None:
+        self._semantic_unknown_once = True
+
     async def close(self) -> None:
         async with self._lock:
+            self._release_writer_lock()
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None  # type: ignore[assignment]
@@ -117,7 +126,12 @@ class SQLiteCoreStateStore:
 
     async def acquire_authority(self, core_instance_id: CoreInstanceId) -> CoreAuthorityToken:
         async with self._lock:
-            return self._acquire_authority(core_instance_id)
+            self._acquire_writer_lock()
+            try:
+                return self._acquire_authority(core_instance_id)
+            except Exception:
+                self._release_writer_lock()
+                raise
 
     async def release_authority(self, token: CoreAuthorityToken) -> None:
         async with self._lock:
@@ -128,6 +142,7 @@ class SQLiteCoreStateStore:
                 self._set_meta(connection, "active_authority", "")
 
             self._write(write)
+            self._release_writer_lock()
 
     async def recover(self, token: CoreAuthorityToken) -> None:
         """Rebuild local projections then deterministically close old work.
@@ -237,6 +252,11 @@ class SQLiteCoreStateStore:
 
             return self._write(write)
 
+    async def try_admit_turn_commit(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint, snapshot: TurnSnapshot, turn_input: TurnInput) -> StateCommit[TurnAdmissionResult]:
+        identity = "admission:" + _turn_key(conversation_ref, turn_id) + ":" + fingerprint.model_dump_json()
+        value = await self.try_admit_turn(token, conversation_ref, turn_id, fingerprint, snapshot, turn_input)
+        return self._semantic_commit(value, identity)
+
     async def get_turn(self, conversation_ref: ConversationRef, turn_id: TurnId) -> StoredTurn:
         async with self._lock:
             row = self._read_one("SELECT payload FROM turns WHERE turn_key = ?", (_turn_key(conversation_ref, turn_id),), "TURN_NOT_FOUND")
@@ -330,6 +350,10 @@ class SQLiteCoreStateStore:
 
             return self._write(write)
 
+    async def commit_segment_commit(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int, segment: AgentOutputSegmentCommitted) -> StateCommit[StoredResponse]:
+        value = await self.commit_segment(token, response_id, expected_response_revision, segment)
+        return self._semantic_commit(value, "segment:" + response_id.value + ":" + segment.segment_id.value)
+
     async def finalize_response(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int) -> StoredResponse:
         async with self._lock:
             return self._terminal_response(token, response_id, expected_response_revision, None)
@@ -344,10 +368,10 @@ class SQLiteCoreStateStore:
                 self._validate_token(connection, token)
                 key = _turn_key(conversation_ref, turn_id)
                 turn = self._turn_from_connection(connection, key)
-                if turn.revision != expected_turn_revision:
-                    raise CoreStateError("TURN_REVISION_CONFLICT")
                 if turn.state in _TERMINAL_TURNS:
                     return turn
+                if turn.revision != expected_turn_revision:
+                    raise CoreStateError("TURN_REVISION_CONFLICT")
                 if connection.execute("SELECT 1 FROM claims WHERE conversation_key = ? AND turn_key = ?", (_conversation_key(conversation_ref), key)).fetchone() is None:
                     raise CoreStateError("CONVERSATION_CLAIM_MISMATCH")
                 if not validate_turn_transition(turn.state, state):
@@ -363,6 +387,16 @@ class SQLiteCoreStateStore:
                 return turn
 
             return self._write(write)
+
+    async def terminalize_turn_commit(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, expected_turn_revision: int, state: TurnState, abort_reason: Optional[AbortReason] = None) -> StateCommit[StoredTurn]:
+        value = await self.terminalize_turn(token, conversation_ref, turn_id, expected_turn_revision, state, abort_reason)
+        return self._semantic_commit(value, "terminal:" + _turn_key(conversation_ref, turn_id) + ":" + state.value + ":" + ("" if abort_reason is None else abort_reason.value))
+
+    def _semantic_commit(self, value: _WriteResult, identity: str) -> StateCommit[_WriteResult]:
+        if self._semantic_unknown_once:
+            self._semantic_unknown_once = False
+            return StateCommit(value=value, certainty=CommitCertainty.OUTCOME_UNKNOWN, stable_identity=identity)
+        return StateCommit(value=value, certainty=CommitCertainty.COMMITTED, stable_identity=identity)
 
     async def get_conversation_context(self, conversation_ref: ConversationRef, excluding_turn_id: TurnId) -> Tuple[ContextEntry, ...]:
         async with self._lock:
@@ -476,7 +510,7 @@ class SQLiteCoreStateStore:
 
     def _acquire_authority(self, core_instance_id: CoreInstanceId) -> CoreAuthorityToken:
         def write(connection: sqlite3.Connection) -> CoreAuthorityToken:
-            if self._meta(connection, "active_authority"):
+            if self._meta(connection, "active_authority") and self._writer_lock is None:
                 raise CoreStateError("CORE_AUTHORITY_ALREADY_OWNED")
             epoch = int(self._meta(connection, "authority_epoch")) + 1
             token = CoreAuthorityToken(core_instance_id=core_instance_id, store_authority_id=StoreAuthorityId(value=self._meta(connection, "store_authority_id")), authority_epoch=epoch, token_nonce=uuid.uuid4().hex)
@@ -485,6 +519,38 @@ class SQLiteCoreStateStore:
             return token
 
         return self._write(write)
+
+    def _acquire_writer_lock(self) -> None:
+        if self._path == ":memory:" or self._writer_lock is not None:
+            if self._path != ":memory:" and self._writer_lock is not None:
+                raise CoreStateError("CORE_AUTHORITY_ALREADY_OWNED")
+            return
+        lock_path = self._path + ".writer.lock"
+        if lock_path in _LOCAL_WRITER_LOCKS:
+            raise CoreStateError("CORE_AUTHORITY_ALREADY_OWNED")
+        handle = open(lock_path, "a+b")
+        try:
+            handle.seek(0)
+            if os.path.getsize(lock_path) == 0:
+                handle.write(b"0")
+                handle.flush()
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as error:
+            handle.close()
+            raise CoreStateError("CORE_AUTHORITY_ALREADY_OWNED") from error
+        self._writer_lock = handle
+        _LOCAL_WRITER_LOCKS.add(lock_path)
+
+    def _release_writer_lock(self) -> None:
+        if self._writer_lock is None:
+            return
+        try:
+            # Closing a locked Windows handle releases the byte-range lock.
+            pass
+        finally:
+            self._writer_lock.close()
+            _LOCAL_WRITER_LOCKS.discard(self._path + ".writer.lock")
+            self._writer_lock = None
 
     def _terminal_response(self, token: CoreAuthorityToken, response_id: ResponseId, expected_revision: int, abort_reason: Optional[ResponseAbortReason]) -> StoredResponse:
         def write(connection: sqlite3.Connection) -> StoredResponse:

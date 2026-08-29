@@ -158,6 +158,31 @@ async def test_corrupt_store_is_never_reset_or_serving(tmp_path) -> None:
 
 
 @_async_test
+async def test_semantic_commit_unknown_reuses_admission_segment_and_terminal_identities(tmp_path) -> None:
+    store = SQLiteCoreStateStore(tmp_path / "certainty.db")
+    token = await store.acquire_authority(CoreInstanceId(value="core"))
+    await store.create_conversation(token, _ref())
+    turn_id = TurnId(value="certainty-turn")
+    fingerprint = turn_fingerprint(_input(), "binding")
+    store.simulate_semantic_outcome_unknown_once()
+    admission = await store.try_admit_turn_commit(token, _ref(), turn_id, fingerprint, _snapshot(), _input())
+    assert admission.certainty == CommitCertainty.OUTCOME_UNKNOWN
+    assert (await store.try_admit_turn_commit(token, _ref(), turn_id, fingerprint, _snapshot(), _input())).value.status.value == "same_logical_turn"
+    response = await store.commit_response_started(token, _ref(), turn_id, ResponseId(value="certainty-response"))
+    segment = AgentOutputSegmentCommitted(response_id=response.response_id, segment_id=SegmentId(value="certainty-segment"), sequence=1, text="once", language="en")
+    store.simulate_semantic_outcome_unknown_once()
+    committed = await store.commit_segment_commit(token, response.response_id, response.revision, segment)
+    assert committed.certainty == CommitCertainty.OUTCOME_UNKNOWN
+    assert (await store.commit_segment_commit(token, response.response_id, response.revision, segment)).value.segments == (segment,)
+    turn = await store.get_turn(_ref(), turn_id)
+    store.simulate_semantic_outcome_unknown_once()
+    terminal = await store.terminalize_turn_commit(token, _ref(), turn_id, turn.revision, TurnState.CANCELLED)
+    assert terminal.certainty == CommitCertainty.OUTCOME_UNKNOWN
+    assert (await store.terminalize_turn_commit(token, _ref(), turn_id, turn.revision, TurnState.CANCELLED)).value.state == TurnState.CANCELLED
+    assert await store.active_claim(_ref()) is None
+
+
+@_async_test
 async def test_recovery_closes_input_started_and_converges_terminal_response(tmp_path) -> None:
     path = tmp_path / "recovery.db"
     store = SQLiteCoreStateStore(path)
