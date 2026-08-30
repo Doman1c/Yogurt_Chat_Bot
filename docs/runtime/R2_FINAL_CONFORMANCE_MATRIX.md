@@ -26,7 +26,7 @@ does not introduce runtime behavior or alter architecture decisions.
 | R2-D Operations | Capability mismatch and all zero-dispatch guards fail closed | R2-D engine | `test_operation_engine.py::test_operation_engine_rejects_real_provider_capability_mismatch_before_effect`; `test_operation_zero_dispatch_guards_and_ephemeral_boundary` | Green | No provider call/effect. |
 | Architecture | Core has no production/heavy provider import | R1/R2 architecture boundary | `test_r2a_dependency_boundaries.py::test_r2a_core_does_not_import_production_or_conformance_packages` | Green | Includes OpenClaw, WeChat, Whisper, torch, GPT-SoVITS, Live2D and robot roots. |
 | Architecture | Optional provider absence does not break Core/contract import | R1 optionality | `test_r2e_optional_package_absence.py::test_core_and_contracts_import_with_optional_provider_packages_blocked` | Green | Clean subprocess import isolation; no package is uninstalled. |
-| Python compatibility | CI runs runtime/conformance tests on 3.9–3.12 | R2-E final gate | `.github/workflows/ci.yml::test` | Pending GitHub Actions | Local environment supplies one interpreter only. |
+| Python compatibility | CI runs runtime/conformance tests on 3.9–3.12 | R2-E final gate | `.github/workflows/ci.yml::test` | PASS | GitHub Actions PR #26, CI run #278: Python 3.9, 3.10, 3.11, and 3.12 all passed. |
 | Production regressions | Offline-safe mouth, voice-session, orchestration, runtime, TTS, singing suites | R2-E final gate | Final validation command | Green locally | Forbidden live/Native Voice/OpenClaw smoke is excluded. |
 
 ## Failure Simulation Traceability
