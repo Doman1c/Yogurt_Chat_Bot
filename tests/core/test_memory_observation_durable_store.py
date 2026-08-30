@@ -1,0 +1,151 @@
+"""R3-B SQLite durability for the atomic intent-to-causal-sequence association."""
+
+import asyncio
+from datetime import datetime, timezone
+
+import pytest
+
+from yogurt_contracts.capability.binding import CapabilityBinding
+from yogurt_contracts.conversation.refs import ConversationRef, TurnRef
+from yogurt_contracts.execution.authorization_snapshot import OperationAuthorizationSnapshot
+from yogurt_contracts.foundation.durability import DurabilityLevel
+from yogurt_contracts.foundation.identifiers import (
+    BindingId, CapabilityId, ConversationId, CoreInstanceId, InputId, OperationId,
+    PersonaId, RuntimeInstanceId, RuntimeSlotId, TurnId, UserId,
+)
+from yogurt_contracts.foundation.idempotency import RequestFingerprint
+from yogurt_contracts.foundation.time import Deadline, UtcInstant
+from yogurt_contracts.foundation.versioning import ContractVersion
+from yogurt_contracts.identity.authority import AuthorityClaims, DelegatedAuthority
+from yogurt_contracts.memory.causal import MemoryCausalResolution, MemoryObservationOperation, memory_observation_fingerprint
+from yogurt_contracts.memory.observations import UserContentObservation
+from yogurt_contracts.memory.recall import memory_conversation_scope_ref
+from yogurt_contracts.operations.intent import LogicalOperation, OperationIntentCommitted
+from yogurt_contracts.operations.traits import CancellationSupport, EffectKind, IdempotencyKind, OperationTraits, ReversibilityKind
+from yogurt_core.ports.state_store import CoreStateError
+from yogurt_core.operations.models import NotDispatchedReason
+from yogurt_core.operations.models import ProviderDispatchCertainty, ProviderDispatchResult
+from yogurt_core.operations.engine import OperationEngine
+from yogurt_core.memory.observation_operations import MemoryObservationOperationCoordinator
+from yogurt_core_adapters.state_store_sqlite import SQLiteCoreStateStore
+
+
+NOW = UtcInstant(value=datetime(2026, 1, 1, tzinfo=timezone.utc))
+FUTURE = UtcInstant(value=datetime(2026, 2, 1, tzinfo=timezone.utc))
+CAPABILITY = CapabilityId(value="memory.observe")
+CONVERSATION = ConversationRef(persona_id=PersonaId(value="persona"), user_id=UserId(value="user"), conversation_id=ConversationId(value="conversation"))
+
+
+def _semantic(operation: str, domain: str = "legacy-v5") -> MemoryObservationOperation:
+    observation = UserContentObservation(operation_id=OperationId(value=operation), conversation_ref=CONVERSATION, turn_ref=TurnRef(conversation_id=CONVERSATION.conversation_id, turn_id=TurnId(value="turn-" + operation)), input_id=InputId(value="input-" + operation), content="hello-" + operation, observed_at=NOW)
+    return MemoryObservationOperation(operation_id=observation.operation_id, observation=observation, scope_ref=memory_conversation_scope_ref(CONVERSATION), logical_provider_domain=domain, observation_fingerprint=memory_observation_fingerprint(observation))
+
+
+def _intent(operation: str) -> OperationIntentCommitted:
+    claims = AuthorityClaims(actor=RuntimeInstanceId(value="core"), subject=CONVERSATION.user_id, origin="core", audience=RuntimeInstanceId(value="provider"), scope=CAPABILITY, grant_revision="grant", valid_until=FUTURE, authority_reference="authority")
+    logical = LogicalOperation(operation_id=OperationId(value=operation), request_fingerprint=RequestFingerprint(value="fingerprint-" + operation), target_capability=CAPABILITY, authority=DelegatedAuthority(claims=claims, operation_id=OperationId(value=operation)), deadline=Deadline(expires_at=FUTURE), traits=OperationTraits(effect_kind=EffectKind.WRITE, idempotency=IdempotencyKind.KEYED, reversibility=ReversibilityKind.IRREVERSIBLE, cancellation_support=CancellationSupport.BEST_EFFORT), created_at=NOW)
+    authorization = OperationAuthorizationSnapshot(operation_id=logical.operation_id, claims=claims, checked_at=NOW, valid_until=FUTURE)
+    binding = CapabilityBinding(binding_id=BindingId(value="binding"), binding_revision="1", capability_id=CAPABILITY, provider_slot_id=RuntimeSlotId(value="memory-slot"), provider_instance_id=RuntimeInstanceId(value="provider"), provider_generation=1, contract_version=ContractVersion(major=1, minor=0), authority_valid_until=FUTURE)
+    return OperationIntentCommitted(operation=logical, provider_binding=binding, authorization_snapshot=authorization, required_durability=DurabilityLevel.DURABLY_PERSISTED, committed_at=NOW)
+
+
+class _MemoryProvider:
+    def __init__(self, certainty: ProviderDispatchCertainty = ProviderDispatchCertainty.SUCCESS) -> None:
+        self.certainty = certainty
+        self.calls = 0
+
+    @property
+    def capability_id(self) -> CapabilityId:
+        return CAPABILITY
+
+    async def dispatch(self, intent: OperationIntentCommitted) -> ProviderDispatchResult:
+        self.calls += 1
+        return ProviderDispatchResult(certainty=self.certainty)
+
+
+def test_sqlite_binds_operation_intent_and_sequence_atomically_and_persists_restart(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "memory-causal.db"
+        store = SQLiteCoreStateStore(path)
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        one, intent_one = _semantic("one"), _intent("one")
+        results = await asyncio.gather(*[
+            store.commit_memory_observation_intent(token, one, intent_one) for _ in range(4)
+        ])
+        assert {result.value.sequence for result in results if result.value is not None} == {1}
+        assert (await store.get_operation(OperationId(value="one"))).intent == intent_one
+        first_operation = await store.get_operation(OperationId(value="one"))
+        await store.mark_not_dispatched(token, OperationId(value="one"), first_operation.revision, reason=NotDispatchedReason.POLICY_REJECTED)
+        projected = await store.project_memory_operation_outcome(token, one)
+        assert projected.value is not None and not projected.value.state.history_complete
+        two = _semantic("two")
+        assert (await store.commit_memory_observation_intent(token, two, _intent("two"))).value.sequence == 2
+        with pytest.raises(CoreStateError, match="CROSS_DOMAIN_UNCERTAINTY_REJECTED"):
+            await store.commit_memory_observation_intent(token, _semantic("other", domain="other-domain"), _intent("other"))
+        await store.release_authority(token)
+        await store.close()
+
+        restarted = SQLiteCoreStateStore(path)
+        restarted_token = await restarted.acquire_authority(CoreInstanceId(value="core-restarted"))
+        lane = await restarted.get_memory_causal_lane(one)
+        assert lane.state.next_sequence == 3 and tuple(item.sequence for item in lane.operations) == (1, 2)
+        assert not lane.state.history_complete
+        await restarted.release_authority(restarted_token)
+    asyncio.run(run())
+
+
+def test_coordinator_reuses_r2_operation_engine_without_blocking_core_on_memory_lane(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteCoreStateStore(tmp_path / "memory-operation-engine.db")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        semantic, intent = _semantic("coordinated"), _intent("coordinated")
+        result = await MemoryObservationOperationCoordinator(store, OperationEngine(store)).execute(
+            token, semantic, intent, _MemoryProvider(),
+        )
+        assert result.causal_operation.sequence == 1
+        assert result.durable_operation.state.value == "succeeded"
+        assert (await store.get_memory_causal_lane(semantic)).state.applied_through_sequence == 1
+        await store.release_authority(token)
+    asyncio.run(run())
+
+
+def test_uncertain_memory_lane_disables_recall_but_later_core_work_is_not_blocked(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteCoreStateStore(tmp_path / "memory-unknown.db")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        coordinator = MemoryObservationOperationCoordinator(store, OperationEngine(store))
+        unknown_provider = _MemoryProvider(ProviderDispatchCertainty.OUTCOME_UNKNOWN)
+        first = await coordinator.execute(token, _semantic("unknown"), _intent("unknown"), unknown_provider)
+        blocked_provider = _MemoryProvider()
+        second = await coordinator.execute(token, _semantic("later"), _intent("later"), blocked_provider)
+        lane = await store.get_memory_causal_lane(_semantic("unknown"))
+        assert first.durable_operation.state.value == "outcome_unknown" and unknown_provider.calls == 1
+        assert second.durable_operation.state.value == "not_dispatched" and blocked_provider.calls == 0
+        assert lane.state.first_unresolved_sequence == 1 and not lane.state.history_complete
+        await store.release_authority(token)
+    asyncio.run(run())
+
+
+def test_same_domain_restart_reconciliation_releases_unresolved_lane(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "memory-reconcile.db"
+        semantic, intent = _semantic("unknown"), _intent("unknown")
+        first = SQLiteCoreStateStore(path)
+        token = await first.acquire_authority(CoreInstanceId(value="core"))
+        await first.commit_memory_observation_intent(token, semantic, intent)
+        operation = await first.get_operation(semantic.operation_id)
+        await first.mark_dispatch_attempted(token, semantic.operation_id, operation.revision)
+        attempted = await first.get_operation(semantic.operation_id)
+        await first.mark_outcome_unknown(token, semantic.operation_id, attempted.revision)
+        await first.project_memory_operation_outcome(token, semantic)
+        await first.release_authority(token)
+        await first.close()
+
+        restarted = SQLiteCoreStateStore(path)
+        token = await restarted.acquire_authority(CoreInstanceId(value="restarted"))
+        assert (await restarted.get_memory_causal_lane(semantic)).state.first_unresolved_sequence == 1
+        reconciled = await restarted.reconcile_memory_observation(token, semantic, MemoryCausalResolution.APPLIED)
+        assert reconciled.value is not None and reconciled.value.state.first_unresolved_sequence is None
+        assert reconciled.value.state.history_complete
+        await restarted.release_authority(token)
+    asyncio.run(run())

@@ -43,8 +43,12 @@ builtins.__import__ = guarded_import
 import yogurt_contracts
 import yogurt_core
 import yogurt_contracts.memory.recall
+import yogurt_contracts.memory.causal
 import yogurt_core.memory.recall_policy
+import yogurt_core.memory.causal_lane
+import yogurt_core.memory.observation_operations
 import yogurt_core.ports.memory_recall
+import yogurt_core.ports.memory_observation
 """.format(blocked=blocked_imports)
     result = subprocess.run([sys.executable, "-c", program], cwd=str(ROOT), capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
