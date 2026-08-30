@@ -224,6 +224,10 @@ def test_turn_idempotency_uses_only_conversation_ref_and_turn_id() -> None:
     assert assert_turn_retry(first_key, _fingerprint("same"), other_conversation_key, _fingerprint("same")) == TurnRetryDecision.DIFFERENT_TURN
 
 
+def test_trace_correlation_is_not_part_of_logical_turn_deduplication() -> None:
+    assert set(TurnIdempotencyKey.model_fields) == {"conversation_ref", "turn_id"}
+
+
 def test_ledger_accepts_completed_response_and_no_response_turns() -> None:
     turn = _turn()
     facts = append_fact((), _input(turn))

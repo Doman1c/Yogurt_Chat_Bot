@@ -40,7 +40,8 @@ from yogurt_contracts.foundation.durability import CorePersistenceMode
 from yogurt_core.application.results import AdmissionResponseState, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.context.models import ContextEntry, ContextRole
 from yogurt_core.model.execution import StoredResponse, StoredTurn
-from yogurt_core.ports.state_store import CoreStateError
+from yogurt_core.ports.state_store import CoreStateError, StateCommit
+from yogurt_contracts.foundation.facts import CommitCertainty
 
 
 def _conversation_key(ref: ConversationRef) -> str:
@@ -85,6 +86,11 @@ class InMemoryCoreStateStore:
             self._validate_token(token)
             self._authority = None
             self._authority_epoch += 1
+
+    async def recover(self, token: CoreAuthorityToken) -> None:
+        """Ephemeral stores have no prior process state to recover."""
+        async with self._condition:
+            self._validate_token(token)
 
     async def create_conversation(self, token: CoreAuthorityToken, conversation_ref: ConversationRef) -> None:
         async with self._condition:
@@ -144,6 +150,9 @@ class InMemoryCoreStateStore:
             self._claims[conversation_key] = key
             self._turns[key] = turn
             return TurnAdmissionResult(status=TurnAdmissionStatus.NEWLY_ADMITTED, turn_id=turn_id)
+
+    async def try_admit_turn_commit(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint, snapshot: TurnSnapshot, turn_input: TurnInput) -> StateCommit[TurnAdmissionResult]:
+        return StateCommit(value=await self.try_admit_turn(token, conversation_ref, turn_id, fingerprint, snapshot, turn_input), certainty=CommitCertainty.COMMITTED, stable_identity="memory-admission:" + turn_id.value)
 
     async def get_turn(self, conversation_ref: ConversationRef, turn_id: TurnId) -> StoredTurn:
         async with self._condition:
@@ -258,6 +267,9 @@ class InMemoryCoreStateStore:
             self._condition.notify_all()
             return response
 
+    async def commit_segment_commit(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int, segment: AgentOutputSegmentCommitted) -> StateCommit[StoredResponse]:
+        return StateCommit(value=await self.commit_segment(token, response_id, expected_response_revision, segment), certainty=CommitCertainty.COMMITTED, stable_identity="memory-segment:" + segment.segment_id.value)
+
     async def finalize_response(self, token: CoreAuthorityToken, response_id: ResponseId, expected_response_revision: int) -> StoredResponse:
         async with self._condition:
             self._validate_token(token)
@@ -328,6 +340,9 @@ class InMemoryCoreStateStore:
             self._turns[key] = turn
             del self._claims[conversation_key]
             return turn
+
+    async def terminalize_turn_commit(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, expected_turn_revision: int, state: TurnState, abort_reason: Optional[AbortReason] = None) -> StateCommit[StoredTurn]:
+        return StateCommit(value=await self.terminalize_turn(token, conversation_ref, turn_id, expected_turn_revision, state, abort_reason), certainty=CommitCertainty.COMMITTED, stable_identity="memory-terminal:" + turn_id.value + ":" + state.value)
 
     async def get_conversation_context(self, conversation_ref: ConversationRef, excluding_turn_id: TurnId) -> Tuple[ContextEntry, ...]:
         async with self._condition:

@@ -21,6 +21,13 @@ class ConversationScheduler:
         if self._failures:
             raise self._failures.pop(0)
 
+    async def cancel_remaining(self) -> None:
+        tasks = tuple(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     def _record_completion(self, key: str, task: asyncio.Task[None]) -> None:
         self._tasks.pop(key, None)
         if task.cancelled():

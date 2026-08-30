@@ -54,3 +54,4 @@ class GenerationAuthorityId(Identifier): generation_authority = "Management Gene
 class CoreInstanceId(Identifier): generation_authority = "Yogurt Core Instance"
 class StoreAuthorityId(Identifier): generation_authority = "Core State Store"
 class ResponseEventId(Identifier): generation_authority = "Core Response Event Stream"
+class FactId(Identifier): generation_authority = "Core Durable Fact Authority"
