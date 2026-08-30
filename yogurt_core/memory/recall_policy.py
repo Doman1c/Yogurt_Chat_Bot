@@ -9,12 +9,15 @@ from yogurt_contracts.foundation.time import UtcInstant
 from yogurt_contracts.memory.recall import (
     MEMORY_RECALL_CAPABILITY_ID,
     MemoryRecallBindingSnapshot,
+    MemoryRecallCallOutcome,
     MemoryRecallCapabilityState,
     MemoryRecallCandidate,
     MemoryRecallDispatchResult,
+    MemoryRecallDecision,
     MemoryRecallEvidence,
     MemoryRecallQuery,
     RecallEligibility,
+    memory_conversation_scope_ref,
     normalize_memory_text,
 )
 
@@ -35,10 +38,14 @@ class MemoryContextRejectReason(str, Enum):
     MEMORY_SCOPE_MISMATCH = "memory_scope_mismatch"
     PROVIDER_PROVENANCE_MISMATCH = "provider_provenance_mismatch"
     AUTHORIZATION_EXPIRED = "authorization_expired"
+    AUTHORIZATION_INVALID = "authorization_invalid"
     DEADLINE_EXPIRED = "deadline_expired"
     CURRENT_TURN_SELF_RECALL = "current_turn_self_recall"
     SELF_RECALL_FILTERED_EMPTY = "self_recall_filtered_empty"
     CONTEXT_BUDGET_EXHAUSTED = "context_budget_exhausted"
+    SEMANTIC_EMPTY = "semantic_empty"
+    SEMANTIC_SKIPPED = "semantic_skipped"
+    SEMANTIC_BLOCKED = "semantic_blocked"
 
 
 class MemoryTrustBoundary(str, Enum):
@@ -59,6 +66,27 @@ class MemoryContextAdmission:
     status: MemoryContextAdmissionStatus
     reason: Optional[MemoryContextRejectReason]
     candidates: Tuple[AdmittedMemoryCandidate, ...] = ()
+    semantic_decision: Optional[MemoryRecallDecision] = None
+    filtered_reasons: Tuple[MemoryContextRejectReason, ...] = ()
+
+
+def is_memory_recall_authorization_valid(
+    query: MemoryRecallQuery,
+    binding: MemoryRecallBindingSnapshot,
+    authorization: CapabilityAuthorizationSnapshot,
+    at: UtcInstant,
+) -> bool:
+    """One provider-neutral read authorization predicate for dispatch and admission."""
+
+    claims = authorization.claims
+    return (
+        claims.scope.value == MEMORY_RECALL_CAPABILITY_ID
+        and claims.subject == query.conversation_ref.user_id
+        and claims.audience == binding.runtime_instance_id
+        and authorization.checked_at.value <= at.value
+        and at.value <= authorization.valid_until.value
+        and at.value <= claims.valid_until.value
+    )
 
 
 class MemoryRecallDispatcher:
@@ -83,37 +111,28 @@ class MemoryRecallDispatcher:
         state = await self._port.capability_state()
         if state != MemoryRecallCapabilityState.AVAILABLE:
             return MemoryRecallDispatchResult(capability_state=state, eligibility=RecallEligibility.CAPABILITY_UNAVAILABLE)
+        if query.memory_conversation_scope_ref != memory_conversation_scope_ref(query.conversation_ref):
+            return MemoryRecallDispatchResult(capability_state=state, eligibility=RecallEligibility.INVALID_SCOPE)
         if now.value > query.deadline.expires_at.value:
             return MemoryRecallDispatchResult(capability_state=state, eligibility=RecallEligibility.DEADLINE_EXHAUSTED)
-        if not self._authorization_matches(query, expected_binding, authorization, now):
+        if not is_memory_recall_authorization_valid(query, expected_binding, authorization, now):
             return MemoryRecallDispatchResult(capability_state=state, eligibility=RecallEligibility.UNAUTHORIZED)
         current = await self._port.current_binding()
         if current != expected_binding:
             return MemoryRecallDispatchResult(capability_state=state, eligibility=RecallEligibility.STALE_BINDING)
         result = await self._port.recall(query, expected_binding, authorization)
+        if result.evidence is not None and len(result.evidence.candidates) > query.max_items:
+            return MemoryRecallDispatchResult(
+                capability_state=state,
+                eligibility=RecallEligibility.ELIGIBLE,
+                call_outcome=MemoryRecallCallOutcome.INVALID_PROVIDER_RESPONSE,
+            )
         return MemoryRecallDispatchResult(
             capability_state=state,
             eligibility=RecallEligibility.ELIGIBLE,
             call_outcome=result.call_outcome,
             evidence=result.evidence,
         )
-
-    @staticmethod
-    def _authorization_matches(
-        query: MemoryRecallQuery,
-        binding: MemoryRecallBindingSnapshot,
-        authorization: CapabilityAuthorizationSnapshot,
-        now: UtcInstant,
-    ) -> bool:
-        claims = authorization.claims
-        return (
-            claims.scope.value == MEMORY_RECALL_CAPABILITY_ID
-            and claims.subject == query.conversation_ref.user_id
-            and claims.audience == binding.runtime_instance_id
-            and now.value <= authorization.valid_until.value
-            and now.value <= claims.valid_until.value
-        )
-
 
 class MemoryRecallAdmissionPolicy:
     """Correlates historical evidence before exposing bounded untrusted data to context."""
@@ -134,10 +153,19 @@ class MemoryRecallAdmissionPolicy:
         mismatch = self._correlation_mismatch(query, evidence, dispatch_binding)
         if mismatch is not None:
             return MemoryContextAdmission(MemoryContextAdmissionStatus.REJECTED, mismatch)
-        if now.value > authorization.valid_until.value or now.value > authorization.claims.valid_until.value:
-            return MemoryContextAdmission(MemoryContextAdmissionStatus.REJECTED, MemoryContextRejectReason.AUTHORIZATION_EXPIRED)
+        if not is_memory_recall_authorization_valid(query, dispatch_binding, authorization, now):
+            reason = MemoryContextRejectReason.AUTHORIZATION_EXPIRED
+            if now.value <= authorization.valid_until.value and now.value <= authorization.claims.valid_until.value:
+                reason = MemoryContextRejectReason.AUTHORIZATION_INVALID
+            return MemoryContextAdmission(MemoryContextAdmissionStatus.REJECTED, reason)
         if now.value > query.deadline.expires_at.value:
             return MemoryContextAdmission(MemoryContextAdmissionStatus.REJECTED, MemoryContextRejectReason.DEADLINE_EXPIRED)
+        if evidence.decision != MemoryRecallDecision.AVAILABLE:
+            return MemoryContextAdmission(
+                MemoryContextAdmissionStatus.FILTERED_EMPTY,
+                self._semantic_reason(evidence.decision),
+                semantic_decision=evidence.decision,
+            )
 
         remaining = min(self._max_context_characters, query.token_budget * 4)
         admitted = []  # type: list[AdmittedMemoryCandidate]
@@ -151,10 +179,33 @@ class MemoryRecallAdmissionPolicy:
             admitted.append(AdmittedMemoryCandidate(text=candidate.normalized_text, source_ref=candidate.source_ref))
             remaining -= candidate.content_size
         if admitted:
-            return MemoryContextAdmission(MemoryContextAdmissionStatus.ADMITTED, None, tuple(admitted))
+            filtered_reasons = ()  # type: Tuple[MemoryContextRejectReason, ...]
+            if saw_self_recall:
+                filtered_reasons = (MemoryContextRejectReason.CURRENT_TURN_SELF_RECALL,)
+            return MemoryContextAdmission(
+                MemoryContextAdmissionStatus.ADMITTED, None, tuple(admitted),
+                semantic_decision=evidence.decision, filtered_reasons=filtered_reasons,
+            )
         if saw_self_recall:
-            return MemoryContextAdmission(MemoryContextAdmissionStatus.FILTERED_EMPTY, MemoryContextRejectReason.SELF_RECALL_FILTERED_EMPTY)
-        return MemoryContextAdmission(MemoryContextAdmissionStatus.FILTERED_EMPTY, MemoryContextRejectReason.CONTEXT_BUDGET_EXHAUSTED)
+            return MemoryContextAdmission(
+                MemoryContextAdmissionStatus.FILTERED_EMPTY, MemoryContextRejectReason.SELF_RECALL_FILTERED_EMPTY,
+                semantic_decision=evidence.decision,
+                filtered_reasons=(MemoryContextRejectReason.CURRENT_TURN_SELF_RECALL,),
+            )
+        return MemoryContextAdmission(
+            MemoryContextAdmissionStatus.FILTERED_EMPTY, MemoryContextRejectReason.CONTEXT_BUDGET_EXHAUSTED,
+            semantic_decision=evidence.decision,
+        )
+
+    @staticmethod
+    def _semantic_reason(decision: MemoryRecallDecision) -> MemoryContextRejectReason:
+        if decision == MemoryRecallDecision.EMPTY:
+            return MemoryContextRejectReason.SEMANTIC_EMPTY
+        if decision == MemoryRecallDecision.SKIPPED:
+            return MemoryContextRejectReason.SEMANTIC_SKIPPED
+        if decision == MemoryRecallDecision.BLOCKED:
+            return MemoryContextRejectReason.SEMANTIC_BLOCKED
+        raise ValueError("available evidence must not use a semantic empty reason")
 
     @staticmethod
     def _correlation_mismatch(

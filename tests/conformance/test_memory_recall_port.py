@@ -82,6 +82,33 @@ def test_pre_dispatch_failures_are_separate_and_do_not_call_provider(case: str) 
     assert result.eligibility == expected and result.call_outcome is None and fake.call_count == 0
 
 
+def test_core_rejects_forged_scope_for_another_conversation_before_dispatch() -> None:
+    binding = _binding()
+    forged_conversation = ConversationRef(
+        persona_id=CONVERSATION.persona_id, user_id=CONVERSATION.user_id,
+        conversation_id=ConversationId(value="different-conversation"),
+    )
+    query = _query().model_copy(update={"memory_conversation_scope_ref": memory_conversation_scope_ref(forged_conversation)})
+    fake = _fake(binding=binding)
+    result = asyncio.run(MemoryRecallDispatcher(fake).recall(query, binding, _authorization(binding), NOW))
+    assert result.eligibility == RecallEligibility.INVALID_SCOPE
+    assert result.call_outcome is None and fake.call_count == 0
+
+
+def test_provider_over_return_is_invalid_provider_response() -> None:
+    binding, query = _binding(), _query()
+    evidence = _evidence(query, binding).model_copy(
+        update={"candidates": (_evidence(query, binding).candidates[0],) * 3}
+    )
+    fake = _fake(binding=binding, result=MemoryRecallProviderResult(
+        call_outcome=MemoryRecallCallOutcome.SUCCESS, evidence=evidence,
+    ))
+    result = asyncio.run(MemoryRecallDispatcher(fake).recall(query, binding, _authorization(binding), NOW))
+    assert fake.call_count == 1
+    assert result.call_outcome == MemoryRecallCallOutcome.INVALID_PROVIDER_RESPONSE
+    assert result.evidence is None
+
+
 @pytest.mark.parametrize("outcome", [MemoryRecallCallOutcome.UNAVAILABLE, MemoryRecallCallOutcome.DEADLINE_EXCEEDED, MemoryRecallCallOutcome.INVALID_PROVIDER_RESPONSE])
 def test_provider_failures_are_call_outcomes_not_empty_or_blocked(outcome: MemoryRecallCallOutcome) -> None:
     binding = _binding()

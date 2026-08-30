@@ -42,6 +42,9 @@ def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
 builtins.__import__ = guarded_import
 import yogurt_contracts
 import yogurt_core
+import yogurt_contracts.memory.recall
+import yogurt_core.memory.recall_policy
+import yogurt_core.ports.memory_recall
 """.format(blocked=blocked_imports)
     result = subprocess.run([sys.executable, "-c", program], cwd=str(ROOT), capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
