@@ -1,50 +1,62 @@
 # Yogurt Chat Bot（酸奶）
 
-酸奶是一个本地运行的 AI 角色项目。当前仓库同时包含微信文字聊天层、社交与记忆系统、独立语音能力、Daily TTS Runtime 和 Singing Runtime。
+酸奶是一个本地运行、长期演进的 AI 角色与 Runtime 项目。当前仓库同时包含已经封板的 Yogurt Core Foundation、微信文字聊天层、社交与记忆系统、独立语音能力、Daily TTS Runtime 和 Singing Runtime。
 
-**微信只是酸奶的文字交互端。** 它负责文字聊天、表情、多气泡、记忆与社交上下文，不接入 Mouth、TTS 或 Singing，也不会把微信作为语音输出通道。
+**Yogurt 不等于某一个模型、OpenClaw 或微信。** Yogurt 的长期定义是 Identity + Agent Runtime + State + Capabilities；模型、Surface、Memory、Voice、Vision 和 Embodiment 都是可替换能力或载体。
+
+**微信只是酸奶当前的文字交互端。** 它负责文字聊天、表情、多气泡、记忆与社交上下文，不接入 Mouth、TTS 或 Singing，也不会把微信作为语音输出通道。现有微信生产链路尚未迁移到 Yogurt Core，OpenClaw 仍作为当前微信文字端运行时；未来迁移后它只承担 Surface Adapter 角色。
 
 语音能力属于酸奶自身的独立能力层，面向未来的 Native Chat、桌面 Live2D、桌面应用、机器人或其他本地载体。
 
 ## 设计边界
 
-当前架构明确把“微信文字端”和“酸奶本体能力”分开：
+R2 之后，项目的长期结构以 Yogurt Core 为中心，而不是以某个 LLM 或某个聊天渠道为中心：
 
 ```text
-                    Yogurt Brain / Local LLM
-                             │
-              ┌──────────────┴──────────────┐
-              │                             │
-       WeChat Text Surface           Native / Embodiment
-              │                             │
-      Social / Memory / Sticker             ├─ Mouth
-      Multi-bubble / Text Output            ├─ VoiceSession
-              │                             ├─ Daily TTS
-              │                             ├─ Singing
-              │                             └─ future Ears / Eyes / Body
-              │
-      微信文字与表情输出
+                 Surface Adapters
+            WeChat / Native / Desktop
+                       │
+                       ▼
+                 ┌─────────────┐
+                 │ Yogurt Core │
+                 └─────────────┘
+                  │    │     │
+          MemoryPort  Model  Capability / Operation Ports
+                  │    │     │
+                  ▼    ▼     ▼
+             Memory   LLM   Voice / Vision / Embodiment
+             Runtime        / Tools / Presentation
 ```
 
 核心原则：
 
+- Yogurt Core 依赖 contracts / domain / ports，不依赖 provider 实现；
+- OpenClaw、微信 SDK、Whisper、GPT-SoVITS、torch、Memory backend、Live2D 等不得成为 Core 依赖；
+- Supervisor 属于 management plane，不进入正常 Turn hot path；
+- 每个 externally observable side effect 必须先有 crash-durable `OperationIntentCommitted`；
+- Core 的 durable facts 是 authoritative source，projection 必须可重建；
 - 微信保持 **text-first / text-only**，不调用 Mouth；
 - Mouth 不实现微信 Hook，也不依赖微信 Session；
 - Daily TTS 与 Singing 是独立 Runtime；
 - Singing 不进入实时聊天链路；
-- 未来 Live2D、桌面应用和机器人可以直接调用 Mouth / VoiceSession；
-- 语音、视觉或实体化能力失败时，不影响微信文字聊天。
+- 未来 Live2D、桌面应用和机器人通过 typed capability boundary 接入；
+- 任一可选能力故障或被删除时，不应让 Yogurt Core 本体失效。
 
 ## 当前版本
 
 ```text
+Yogurt Runtime Contracts: R1 PASS / MERGED
+Yogurt Core Foundation: R2-A..R2-E PASS / MERGED
 Yogurt Chat Bot: V3
+Yogurt Memory Service: V5
 OpenClaw 插件: yogurt-social-injector 0.5.0-alpha.1
 Sticker Runtime: V2.1
 Catalog Schema: 1.0
 Yogurt Daily TTS: V1
 Yogurt Singing Pipeline: V2.1
 ```
+
+R2 Core Foundation 已完成 Python 3.9 / 3.10 / 3.11 / 3.12 CI conformance，并在 `main` 封板。下一阶段为 **R3 MemoryPort Integration**；R3 的目标是把现有 Memory V5 作为可替换 capability 接到 Core，而不是重写 Memory V5。
 
 当前微信实机环境：
 
@@ -58,6 +70,62 @@ Yogurt Singing Pipeline: V2.1
 当前独立 Voice / Singing Runtime 已在 Windows + RTX 4080 环境完成实际推理验证。模型、参考音频、训练数据、歌曲、Stem、生成音频和本地 Runtime 配置均保持在 Git 之外。
 
 ## 当前项目状态
+
+### Yogurt Runtime Core Foundation
+
+R1 / R2 已封板并合并到 `main`：
+
+```text
+R1 Contract Foundation        PASS / MERGED
+R2-A Ephemeral Core           PASS / MERGED
+R2-B Durable Persistence      PASS / MERGED
+R2-C Recovery / Lifecycle     PASS / MERGED
+R2-D Operation Engine         PASS / MERGED
+R2-E Final Conformance Gate   PASS / MERGED
+```
+
+当前 Core Foundation 已具备：
+
+- typed / versioned runtime contracts；
+- `ConversationRef` / `TurnRef` / `TurnOrigin` 与 authoritative identity boundary；
+- immutable authorization snapshot 与 authority epoch fencing；
+- 1 Turn → 0..1 primary LogicalResponse；
+- deterministic Turn / Response lifecycle；
+- SQLite crash-durable fact ledger；
+- `COMMITTED / NOT_COMMITTED / OUTCOME_UNKNOWN` commit certainty；
+- stable identity reconciliation；
+- append-only facts + rebuildable projections；
+- deterministic restart recovery，不恢复旧的 active execution；
+- bounded shutdown 与 single-writer authority；
+- durable Operation Engine；
+- `OperationIntentCommitted → dispatch-attempt → provider → durable outcome`；
+- non-idempotent uncertainty no-blind-retry；
+- provider-neutral capability validation；
+- Ephemeral Core 外部 side effect fail-closed；
+- optional provider package absence / architecture import conformance；
+- Failure Simulation FS-01..FS-32 executable traceability。
+
+R2 是 Core Foundation，不代表现有微信、Memory、Voice 已经全部迁移到 Core。后续阶段会通过 ports / adapters 逐个接入现有 capability。
+
+### Memory V5 / 当前迁移状态
+
+现有 Memory V5 继续作为独立能力实现运行，不因 R2 封板而重写。
+
+当前 Memory Service 提供本地 API：
+
+```text
+GET  /v1/health
+GET  /v1/ready
+POST /v1/memory/recall
+POST /v1/memory/observe
+GET  /v1/memory/snapshot
+GET  /v1/memory/candidates
+GET  /v1/memory/revisions
+```
+
+默认本地地址为 `http://127.0.0.1:17621`。
+
+当前 R3 尚未开始实现；Core 不应直接 import `social_layer` 或 Memory backend。R3 会增加 typed `MemoryPort` 与 adapter，把现有 Memory Service 放在 Core boundary 外。
 
 ### 微信文字聊天
 
@@ -203,7 +271,7 @@ WeChat outbound adapter
   └── sendMedia：表情图片
 ```
 
-**这里没有 Mouth、Voice Runtime、GPT-SoVITS 或 Seed-VC。**
+**这里没有 Mouth、Voice Runtime、GPT-SoVITS 或 Seed-VC。当前这条生产链也尚未切换到 Yogurt Core。**
 
 实时微信聊天不会调用视觉模型，也不会为了自动记忆或多气泡再调用一次聊天模型。
 
@@ -317,14 +385,16 @@ message_sending priority 70
 
 本仓库负责：
 
+- Yogurt Runtime contracts / Core Foundation；
 - 微信文字聊天；
 - OpenClaw 社交上下文注入；
 - 自动记忆与稳定记忆；
+- Memory V5 Service；
 - 多气泡与表情发送；
 - Mouth / VoiceSession；
 - Daily TTS Runtime 接口；
 - Singing Pipeline；
-- 未来 Native / Live2D / Robot 的能力接口。
+- 未来 Native / Live2D / Robot 的 capability adapters。
 
 ### Yogurt Sticker Tagger
 
@@ -347,18 +417,24 @@ message_sending priority 70
 ```text
 Yogurt_Chat_Bot/
 ├── README.md
-├── workspace/                         # OpenClaw 人格和行为规则
-├── social_layer/                      # 社交、记忆、表情运行时
-├── integrations/openclaw/             # 微信/OpenClaw Hook
+├── yogurt_contracts/                  # typed / versioned runtime contracts
+├── yogurt_core_domain/                # Core domain types / invariants
+├── yogurt_core/                       # provider-neutral Yogurt Core
+├── yogurt_core_adapters/              # local durable/fake adapters
+├── yogurt_conformance/                # reusable conformance profiles
+├── tests/                              # contracts / architecture / Core gates
+├── workspace/                          # OpenClaw 人格和行为规则
+├── social_layer/                       # 当前社交、Memory V5、表情运行时
+├── integrations/openclaw/             # 当前微信/OpenClaw Hook
 ├── capabilities/
-│   ├── mouth/                         # 独立语音合成能力
-│   └── voice_session/                 # 队列、优先级、播放与取消
-├── voice_orchestrator/                # scene → bounded voice plan
-├── voice_runtime/                     # 统一本地 Voice Runtime gateway
+│   ├── mouth/                          # 独立语音合成能力
+│   └── voice_session/                  # 队列、优先级、播放与取消
+├── voice_orchestrator/                 # scene → bounded voice plan
+├── voice_runtime/                      # 统一本地 Voice Runtime gateway
 ├── voice/
-│   ├── tts/                           # Yogurt Daily TTS Runtime
-│   └── singing/                       # Singing Pipeline V2.1
-├── assets/stickers/                   # 本地表情资产
+│   ├── tts/                            # Yogurt Daily TTS Runtime
+│   └── singing/                        # Singing Pipeline V2.1
+├── assets/stickers/                    # 本地表情资产
 ├── scripts/
 └── docs/
 ```
@@ -386,7 +462,7 @@ voice/singing/README.md
 voice_runtime/README.md
 ```
 
-不要把 GPT-SoVITS、Seed-VC、pymss/RoFormer 等依赖混装进微信聊天 Runtime。
+不要把 GPT-SoVITS、Seed-VC、pymss/RoFormer 等依赖混装进微信聊天 Runtime 或 Yogurt Core。
 
 ## 微信首次安装
 
@@ -603,6 +679,18 @@ Catalog 和 `images/` 必须一起同步。
 
 ## 测试
 
+Runtime Core：
+
+```bash
+python -m pytest -q tests/contracts tests/conformance tests/architecture tests/core
+python -m mypy --strict \
+  yogurt_contracts \
+  yogurt_core_domain \
+  yogurt_conformance \
+  yogurt_core \
+  yogurt_core_adapters
+```
+
 微信 / 社交层：
 
 ```bash
@@ -634,6 +722,9 @@ CI 当前覆盖：
 
 ## 安全与隐私边界
 
+- Core 不直接 import OpenClaw、微信 SDK、Whisper、GPT-SoVITS、torch、provider-specific Memory backend、Live2D 或 robot SDK；
+- externally observable side effect 必须先经过 durable operation-intent barrier；
+- Ephemeral Core 禁止外部 side-effect dispatch；
 - 微信不接入 Mouth、TTS 或 Singing；
 - 不把密码、Token、验证码、密钥、身份文件和支付信息写入长期记忆；
 - 不允许助手回复成为用户事实；
@@ -649,6 +740,19 @@ CI 当前覆盖：
 - Voice Runtime 失败不会影响微信文字聊天。
 
 ## 版本演进
+
+Runtime Core：
+
+```text
+R0 / R0.5  Modular Runtime Architecture + Execution Semantics
+R1         Contract Foundation + Conformance Kit
+R2-A       Ephemeral Core
+R2-B       Durable SQLite Core State
+R2-C       Recovery / Lifecycle
+R2-D       Durable Operation Engine
+R2-E       Final Conformance Gate
+R3         MemoryPort Integration（下一阶段）
+```
 
 微信文字端：
 
@@ -673,25 +777,40 @@ Future Eyes        screen / camera / environment vision
 
 ## 下一阶段方向
 
-微信继续保持文字输出，不把语音链路塞进 OpenClaw/微信发送路径。
-
-下一阶段优先围绕酸奶本体能力继续扩展：
+R2 Core Foundation 已封板。下一阶段优先完成 **R3 MemoryPort Integration**，先验证现有 Memory V5 能否作为真正可替换 capability 接入 Core：
 
 ```text
-Native / Desktop host
+R3-A  typed Memory Read Port
   ↓
-Mouth + VoiceSession
+R3-B  durable Observation / Write Port
   ↓
-Live2D lipsync / expression
+R3-C  real Memory Service shadow integration
   ↓
-Ears (STT / VAD / interruption)
+R3-D  recall → ContextComposer integration
+      （只有 Memory production gate 允许后才能开启真实 context injection）
   ↓
-Eyes (screen / camera)
-  ↓
-Robot / physical embodiment
+R3-E  final conformance / optional-removal / failure gate
 ```
 
-Singing V2.1 和 Daily TTS V1 作为相对稳定的独立 Runtime 保留，后续以音质调优为主，而不是继续改变微信架构。
+目标边界：
+
+```text
+Yogurt Core
+    │
+    │ MemoryPort
+    ▼
+Memory Adapter
+    │
+    ▼
+Existing Memory V5 Service
+127.0.0.1:17621
+```
+
+R3 不重写现有 V5 memory policy，也不允许 Core 直接依赖 `social_layer`。Memory Service unavailable 时，Core 的基本 Turn execution 仍必须可以工作。
+
+R3 设计草案见：`docs/R3_MEMORYPORT_INTEGRATION_DESIGN_DRAFT.md`。
+
+R3 完成后再进入 Native Voice → Core、WeChat Core Shadow、Vision 与 Embodiment 等后续阶段。微信在迁移前继续保持现有 text-only 生产链；Singing V2.1 和 Daily TTS V1 继续作为相对稳定的独立 Runtime 保留。
 
 ## License
 
