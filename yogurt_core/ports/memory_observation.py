@@ -6,6 +6,7 @@ from yogurt_contracts.memory.causal import (
     MemoryCausalLaneSnapshot,
     MemoryCausalOperation,
     MemoryCausalResolution,
+    MemoryDispatchAttempt,
     MemoryObservationOperation,
     MemoryReconciliationProof,
 )
@@ -31,6 +32,19 @@ class MemoryCausalStateStore(Protocol):
         ...
 
     async def get_operation(self, operation_id: OperationId) -> StoredOperation:
+        ...
+
+    async def commit_memory_dispatch_attempt(
+        self,
+        token: CoreAuthorityToken,
+        operation: MemoryObservationOperation,
+        intent: OperationIntentCommitted,
+    ) -> StateCommit[MemoryDispatchAttempt]:
+        ...
+
+    async def get_memory_dispatch_attempts(
+        self, operation_id: OperationId,
+    ) -> tuple[MemoryDispatchAttempt, ...]:
         ...
 
     async def project_memory_operation_outcome(

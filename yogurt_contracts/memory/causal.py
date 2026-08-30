@@ -10,8 +10,10 @@ from typing import Optional, Tuple, Union
 from pydantic import field_validator, model_validator
 
 from ..foundation.idempotency import RequestFingerprint
+from ..capability.binding import CapabilityBinding
 from ..foundation.identifiers import BindingId, OperationId, RuntimeInstanceId
 from ..foundation.model import FrozenContract
+from ..operations.attempts import DispatchAttempt
 from ..operations.intent import OperationIntentCommitted
 from .observations import CommittedContentObservation, PresentationObservation, UserContentObservation
 from .recall import MemoryConversationScopeRef, memory_conversation_scope_ref
@@ -122,6 +124,27 @@ class MemoryReconciliationProof(FrozenContract):
         if value < 1:
             raise ValueError("memory reconciliation proof generation must be positive")
         return value
+
+
+class MemoryDispatchAttempt(FrozenContract):
+    """Durable Memory-specific binding provenance for one provider call."""
+
+    dispatch_attempt: DispatchAttempt
+    logical_provider_domain: str
+    provider_binding: CapabilityBinding
+
+    @field_validator("logical_provider_domain")
+    @classmethod
+    def has_bounded_domain(cls, value: str) -> str:
+        if not value or len(value) > 256:
+            raise ValueError("logical_provider_domain must be non-empty and bounded")
+        return value
+
+    @model_validator(mode="after")
+    def binds_dispatch_attempt_to_provider(self) -> "MemoryDispatchAttempt":
+        if self.dispatch_attempt.provider_binding_id != self.provider_binding.binding_id:
+            raise ValueError("memory dispatch attempt binding must match provider binding")
+        return self
 
 
 class MemoryCausalOperation(FrozenContract):

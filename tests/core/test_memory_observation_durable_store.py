@@ -65,6 +65,32 @@ def _non_memory_intent(operation: str) -> OperationIntentCommitted:
     })
 
 
+def _intent_with_binding(
+    operation: str,
+    binding_id: str,
+    runtime_instance_id: str,
+    runtime_generation: int,
+) -> OperationIntentCommitted:
+    intent = _intent(operation)
+    claims = intent.operation.authority.claims.model_copy(update={
+        "audience": RuntimeInstanceId(value=runtime_instance_id),
+    })
+    binding = intent.provider_binding.model_copy(update={
+        "binding_id": BindingId(value=binding_id),
+        "binding_revision": str(runtime_generation),
+        "provider_instance_id": RuntimeInstanceId(value=runtime_instance_id),
+        "provider_generation": runtime_generation,
+    })
+    logical = intent.operation.model_copy(update={
+        "authority": DelegatedAuthority(claims=claims, operation_id=intent.operation.operation_id),
+    })
+    return intent.model_copy(update={
+        "operation": logical,
+        "provider_binding": binding,
+        "authorization_snapshot": intent.authorization_snapshot.model_copy(update={"claims": claims}),
+    })
+
+
 def _proof(operation: str, domain: str = "legacy-v5") -> MemoryReconciliationProof:
     return MemoryReconciliationProof(
         operation_id=OperationId(value=operation), logical_provider_domain=domain,
@@ -77,6 +103,7 @@ class _MemoryProvider:
     def __init__(self, certainty: ProviderDispatchCertainty = ProviderDispatchCertainty.SUCCESS) -> None:
         self.certainty = certainty
         self.calls = 0
+        self.intents = []
 
     @property
     def capability_id(self) -> CapabilityId:
@@ -84,6 +111,7 @@ class _MemoryProvider:
 
     async def dispatch(self, intent: OperationIntentCommitted) -> ProviderDispatchResult:
         self.calls += 1
+        self.intents.append(intent)
         return ProviderDispatchResult(certainty=self.certainty)
 
 
@@ -183,6 +211,63 @@ def test_uncertain_memory_lane_disables_recall_but_later_core_work_is_not_blocke
         retried = await coordinator.execute(token, _semantic("later"), _intent("later"), blocked_provider)
         assert retried.durable_operation.state.value == "succeeded" and blocked_provider.calls == 1
         await store.release_authority(token)
+    asyncio.run(run())
+
+
+def test_retry_durably_commits_restarted_binding_before_memory_provider_dispatch(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteCoreStateStore(tmp_path / "memory-retry-binding.db")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        coordinator = MemoryObservationOperationCoordinator(store, OperationEngine(store))
+        unknown = _semantic("unknown")
+        await coordinator.execute(token, unknown, _intent("unknown"), _MemoryProvider(ProviderDispatchCertainty.OUTCOME_UNKNOWN))
+
+        later = _semantic("later")
+        generation_one = _intent_with_binding("later", "later-binding-1", "provider-generation-1", 1)
+        blocked_provider = _MemoryProvider()
+        blocked = await coordinator.execute(token, later, generation_one, blocked_provider)
+        assert blocked.durable_operation.state.value == "intent_committed" and blocked_provider.calls == 0
+        assert await store.get_memory_dispatch_attempts(later.operation_id) == ()
+
+        await store.reconcile_memory_observation(token, unknown, MemoryCausalResolution.APPLIED, _proof("unknown"))
+        generation_two = _intent_with_binding("later", "later-binding-2", "provider-generation-2", 2)
+        retry_provider = _MemoryProvider()
+        retried = await coordinator.execute(token, later, generation_two, retry_provider)
+        attempts = await store.get_memory_dispatch_attempts(later.operation_id)
+
+        assert retried.durable_operation.state.value == "succeeded"
+        assert len(attempts) == 1 and attempts[0].dispatch_attempt.attempt_number == 1
+        assert attempts[0].provider_binding == generation_two.provider_binding
+        assert retry_provider.intents == [generation_two]
+        assert retry_provider.intents[0].provider_binding == attempts[0].provider_binding
+        assert (await store.get_operation(later.operation_id)).intent.provider_binding == generation_one.provider_binding
+        await store.release_authority(token)
+    asyncio.run(run())
+
+
+def test_attempt_commit_survives_crash_before_memory_provider_call(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "memory-attempt-crash.db"
+        semantic = _semantic("crash")
+        intent = _intent_with_binding("crash", "crash-binding-2", "provider-generation-2", 2)
+        first = SQLiteCoreStateStore(path)
+        token = await first.acquire_authority(CoreInstanceId(value="core"))
+        await first.commit_memory_observation_intent(token, semantic, intent)
+        committed = await first.commit_memory_dispatch_attempt(token, semantic, intent)
+        assert committed.value is not None and committed.certainty.value == "committed"
+        assert (await first.get_operation(semantic.operation_id)).state.value == "intent_committed"
+        await first.release_authority(token)
+        await first.close()
+
+        restarted = SQLiteCoreStateStore(path)
+        token = await restarted.acquire_authority(CoreInstanceId(value="restarted"))
+        await restarted.rebuild_projections(token)
+        attempts = await restarted.get_memory_dispatch_attempts(semantic.operation_id)
+        assert len(attempts) == 1
+        assert attempts[0].provider_binding == intent.provider_binding
+        assert attempts[0].dispatch_attempt.attempt_number == 1
+        assert (await restarted.get_operation(semantic.operation_id)).state.value == "intent_committed"
+        await restarted.release_authority(token)
     asyncio.run(run())
 
 
