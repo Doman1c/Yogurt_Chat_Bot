@@ -64,14 +64,12 @@ def test_resolved_not_applied_continues_lane_but_permanently_marks_history_incom
     assert lane.recall_eligibility() == RecallEligibility.HISTORY_INCOMPLETE
 
 
-def test_unresolved_blocks_later_application_until_same_domain_reconciliation() -> None:
+def test_unresolved_blocks_later_application_and_recall() -> None:
     lane, one, two = _lane(), _semantic("one"), _semantic("two")
     first, second = lane.allocate(one), lane.allocate(two)
     lane.resolve(first.operation_id, MemoryCausalResolution.UNRESOLVED)
     assert not lane.can_dispatch(second.operation_id)
     assert lane.recall_eligibility() == RecallEligibility.HISTORY_INCOMPLETE
-    lane.reconcile_same_domain(one, MemoryCausalResolution.APPLIED)
-    assert lane.can_dispatch(second.operation_id)
 
 
 def test_fake_provider_applies_only_in_causal_order() -> None:
@@ -91,4 +89,4 @@ def test_restart_snapshot_preserves_incomplete_history_and_cross_domain_takeover
     restarted = MemoryCausalLane(lane.snapshot())
     assert not restarted.state.history_complete
     with pytest.raises(MemoryCausalLaneError, match="CROSS_DOMAIN_UNCERTAINTY_REJECTED"):
-        restarted.reconcile_same_domain(_semantic("one", domain="other-domain"), MemoryCausalResolution.APPLIED)
+        restarted.allocate(_semantic("other", domain="other-domain"))

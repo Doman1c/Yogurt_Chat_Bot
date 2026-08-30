@@ -39,14 +39,14 @@ from yogurt_contracts.response.models import AgentOutputSegmentCommitted
 from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
 from yogurt_contracts.operations.intent import OperationIntentCommitted
 from yogurt_contracts.foundation.identifiers import OperationId
-from yogurt_contracts.memory.causal import MemoryCausalLaneSnapshot, MemoryCausalOperation, MemoryCausalResolution, MemoryObservationOperation
+from yogurt_contracts.memory.causal import MemoryCausalLaneSnapshot, MemoryCausalOperation, MemoryCausalResolution, MemoryObservationOperation, MemoryReconciliationProof
 
 from yogurt_core.application.results import AdmissionResponseState, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.context.models import ContextEntry, ContextRole
 from yogurt_core.model.execution import StoredResponse, StoredTurn
 from yogurt_core.ports.state_store import CoreStateError, StateCommit
 from yogurt_core.operations.models import DurableOperationState, NotDispatchedReason, StoredOperation
-from yogurt_core.memory.causal_lane import MemoryCausalLane
+from yogurt_core.memory.causal_lane import MemoryCausalLane, MemoryCausalLaneError
 
 
 _SCHEMA_VERSION = "1"
@@ -174,6 +174,8 @@ class SQLiteCoreStateStore:
                 connection.execute("DELETE FROM turns")
                 connection.execute("DELETE FROM conversations")
                 connection.execute("DELETE FROM operations")
+                connection.execute("DELETE FROM memory_causal_lanes")
+                connection.execute("DELETE FROM memory_observation_operations")
                 for row in facts:
                     self._apply_projection_fact(connection, self._decode_fact(row))
                 rows = connection.execute("SELECT turn_key, payload FROM turns").fetchall()
@@ -389,12 +391,13 @@ class SQLiteCoreStateStore:
         token: CoreAuthorityToken,
         observation: MemoryObservationOperation,
         resolution: MemoryCausalResolution,
+        proof: MemoryReconciliationProof,
     ) -> StateCommit[MemoryCausalLaneSnapshot]:
         identity = "memory-causal-reconcile:" + observation.operation_id.value + ":" + resolution.value
         async with self._lock:
             return self._write_commit(
                 identity,
-                lambda connection: self._reconcile_memory_observation_tx(connection, token, observation, resolution),
+                lambda connection: self._reconcile_memory_observation_tx(connection, token, observation, resolution, proof),
                 lambda: self._memory_causal_lane_from_connection(self._connection, observation),
             )
 
@@ -500,6 +503,8 @@ class SQLiteCoreStateStore:
                 connection.execute("DELETE FROM turns")
                 connection.execute("DELETE FROM conversations")
                 connection.execute("DELETE FROM operations")
+                connection.execute("DELETE FROM memory_causal_lanes")
+                connection.execute("DELETE FROM memory_observation_operations")
                 for row in facts:
                     fact = self._decode_fact(row)
                     self._apply_projection_fact(connection, fact)
@@ -524,6 +529,7 @@ class SQLiteCoreStateStore:
             connection.execute("CREATE TABLE IF NOT EXISTS claims (conversation_key TEXT PRIMARY KEY, turn_key TEXT UNIQUE NOT NULL)")
             connection.execute("CREATE TABLE IF NOT EXISTS operations (operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, payload TEXT NOT NULL)")
             connection.execute("CREATE TABLE IF NOT EXISTS memory_causal_lanes (scope_key TEXT PRIMARY KEY, logical_provider_domain TEXT NOT NULL, payload TEXT NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS memory_observation_operations (operation_id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, logical_provider_domain TEXT NOT NULL, payload TEXT NOT NULL)")
             row = connection.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
             if row is None:
                 authority = requested_id or StoreAuthorityId(value="sqlite-store-" + uuid.uuid4().hex)
@@ -636,6 +642,12 @@ class SQLiteCoreStateStore:
         elif kind == "operation":
             operation = self._decode_operation(fact.payload["operation"])
             connection.execute("INSERT OR REPLACE INTO operations(operation_id, fingerprint, payload) VALUES (?, ?, ?)", (operation.intent.operation.operation_id.value, operation.intent.operation.request_fingerprint.value, _json(self._encode_operation(operation))))
+        elif kind == "memory_causal_lane":
+            snapshot = MemoryCausalLaneSnapshot.model_validate_json(_json(fact.payload["snapshot"]))
+            semantic = None
+            if "semantic_operation" in fact.payload:
+                semantic = MemoryObservationOperation.model_validate_json(_json(fact.payload["semantic_operation"]))
+            self._write_memory_lane_projection(connection, snapshot, semantic)
 
     def _rebuild_claims(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute("SELECT turn_key, conversation_key, payload FROM turns").fetchall()
@@ -664,6 +676,11 @@ class SQLiteCoreStateStore:
         observation: MemoryObservationOperation,
         intent: OperationIntentCommitted,
     ) -> MemoryCausalOperation:
+        try:
+            observation.validate_durable_intent(intent)
+            new_semantic_operation = self._validate_or_record_memory_semantic_operation(connection, observation)
+        except ValueError as error:
+            raise CoreStateError(str(error)) from error
         self._commit_operation_intent_tx(connection, token, intent)
         try:
             lane = MemoryCausalLane(self._memory_causal_lane_from_connection(connection, observation))
@@ -671,13 +688,14 @@ class SQLiteCoreStateStore:
             if error.code != "MEMORY_CAUSAL_LANE_NOT_FOUND":
                 raise
             lane = MemoryCausalLane.empty(observation)
-        causal_operation = lane.allocate(observation)
+        try:
+            causal_operation = lane.allocate(observation)
+        except MemoryCausalLaneError as error:
+            raise CoreStateError(str(error)) from error
         snapshot = lane.snapshot()
-        connection.execute(
-            "INSERT INTO memory_causal_lanes(scope_key, logical_provider_domain, payload) VALUES (?, ?, ?) "
-            "ON CONFLICT(scope_key) DO UPDATE SET logical_provider_domain = excluded.logical_provider_domain, payload = excluded.payload",
-            (observation.scope_ref.scope_id.value, observation.logical_provider_domain, snapshot.model_dump_json()),
-        )
+        self._write_memory_lane_projection(connection, snapshot, observation if new_semantic_operation else None)
+        if new_semantic_operation:
+            self._append_memory_causal_fact(connection, "memory_causal_operation_allocated", snapshot, observation)
         return causal_operation
 
     def _memory_causal_lane_from_connection(
@@ -713,12 +731,15 @@ class SQLiteCoreStateStore:
     ) -> MemoryCausalLaneSnapshot:
         self._validate_token(connection, token)
         lane = MemoryCausalLane(self._memory_causal_lane_from_connection(connection, observation))
-        lane.record_durable_operation(self._operation_from_connection(connection, observation.operation_id))
+        before = lane.snapshot()
+        try:
+            lane.record_durable_operation(self._operation_from_connection(connection, observation.operation_id))
+        except MemoryCausalLaneError as error:
+            raise CoreStateError(str(error)) from error
         snapshot = lane.snapshot()
-        connection.execute(
-            "UPDATE memory_causal_lanes SET payload = ? WHERE scope_key = ?",
-            (snapshot.model_dump_json(), observation.scope_ref.scope_id.value),
-        )
+        if snapshot != before:
+            self._write_memory_lane_projection(connection, snapshot)
+            self._append_memory_causal_fact(connection, "memory_causal_operation_resolved", snapshot)
         return snapshot
 
     def _reconcile_memory_observation_tx(
@@ -727,16 +748,71 @@ class SQLiteCoreStateStore:
         token: CoreAuthorityToken,
         observation: MemoryObservationOperation,
         resolution: MemoryCausalResolution,
+        proof: MemoryReconciliationProof,
     ) -> MemoryCausalLaneSnapshot:
         self._validate_token(connection, token)
         lane = MemoryCausalLane(self._memory_causal_lane_from_connection(connection, observation))
-        lane.reconcile_same_domain(observation, resolution)
+        try:
+            lane.reconcile_same_domain(
+                observation,
+                self._operation_from_connection(connection, observation.operation_id),
+                resolution,
+                proof,
+            )
+        except MemoryCausalLaneError as error:
+            raise CoreStateError(str(error)) from error
         snapshot = lane.snapshot()
-        connection.execute(
-            "UPDATE memory_causal_lanes SET payload = ? WHERE scope_key = ?",
-            (snapshot.model_dump_json(), observation.scope_ref.scope_id.value),
-        )
+        self._write_memory_lane_projection(connection, snapshot)
+        self._append_memory_causal_fact(connection, "memory_causal_operation_reconciled", snapshot)
         return snapshot
+
+    def _validate_or_record_memory_semantic_operation(
+        self, connection: sqlite3.Connection, observation: MemoryObservationOperation,
+    ) -> bool:
+        row = connection.execute(
+            "SELECT payload FROM memory_observation_operations WHERE operation_id = ?", (observation.operation_id.value,)
+        ).fetchone()
+        encoded = observation.model_dump_json()
+        if row is not None:
+            if str(row["payload"]) != encoded:
+                raise CoreStateError("MEMORY_OPERATION_SEMANTIC_CONFLICT")
+            return False
+        connection.execute(
+            "INSERT INTO memory_observation_operations(operation_id, scope_key, logical_provider_domain, payload) VALUES (?, ?, ?, ?)",
+            (observation.operation_id.value, observation.scope_ref.scope_id.value, observation.logical_provider_domain, encoded),
+        )
+        return True
+
+    def _write_memory_lane_projection(
+        self,
+        connection: sqlite3.Connection,
+        snapshot: MemoryCausalLaneSnapshot,
+        semantic_operation: Optional[MemoryObservationOperation] = None,
+    ) -> None:
+        state = snapshot.state
+        connection.execute(
+            "INSERT INTO memory_causal_lanes(scope_key, logical_provider_domain, payload) VALUES (?, ?, ?) "
+            "ON CONFLICT(scope_key) DO UPDATE SET logical_provider_domain = excluded.logical_provider_domain, payload = excluded.payload",
+            (state.scope_ref.scope_id.value, state.logical_provider_domain, snapshot.model_dump_json()),
+        )
+        if semantic_operation is not None:
+            self._validate_or_record_memory_semantic_operation(connection, semantic_operation)
+
+    def _append_memory_causal_fact(
+        self,
+        connection: sqlite3.Connection,
+        fact_type: str,
+        snapshot: MemoryCausalLaneSnapshot,
+        semantic_operation: Optional[MemoryObservationOperation] = None,
+    ) -> None:
+        payload = {"kind": "memory_causal_lane", "snapshot": snapshot.model_dump(mode="json")}
+        if semantic_operation is not None:
+            payload["semantic_operation"] = semantic_operation.model_dump(mode="json")
+        aggregate_id = "memory-causal:" + snapshot.state.scope_ref.scope_id.value
+        self._append_fact(
+            connection,
+            self._projection_fact(fact_type, aggregate_id, snapshot.state.revision - 1, payload),
+        )
 
     def _mark_operation_tx(self, connection: sqlite3.Connection, token: CoreAuthorityToken, operation_id: OperationId, expected_revision: int, state: DurableOperationState, reason: Optional[NotDispatchedReason]) -> StoredOperation:
         self._validate_token(connection, token)

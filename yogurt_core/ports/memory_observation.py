@@ -7,9 +7,12 @@ from yogurt_contracts.memory.causal import (
     MemoryCausalOperation,
     MemoryCausalResolution,
     MemoryObservationOperation,
+    MemoryReconciliationProof,
 )
+from yogurt_contracts.foundation.identifiers import OperationId
 from yogurt_contracts.operations.intent import OperationIntentCommitted
 from yogurt_core.ports.state_store import StateCommit
+from yogurt_core.operations.models import StoredOperation
 from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
 
 
@@ -27,12 +30,19 @@ class MemoryCausalStateStore(Protocol):
     async def get_memory_causal_lane(self, operation: MemoryObservationOperation) -> MemoryCausalLaneSnapshot:
         ...
 
+    async def get_operation(self, operation_id: OperationId) -> StoredOperation:
+        ...
+
     async def project_memory_operation_outcome(
         self, token: CoreAuthorityToken, operation: MemoryObservationOperation
     ) -> StateCommit[MemoryCausalLaneSnapshot]:
         ...
 
     async def reconcile_memory_observation(
-        self, token: CoreAuthorityToken, operation: MemoryObservationOperation, resolution: MemoryCausalResolution
+        self,
+        token: CoreAuthorityToken,
+        operation: MemoryObservationOperation,
+        resolution: MemoryCausalResolution,
+        proof: MemoryReconciliationProof,
     ) -> StateCommit[MemoryCausalLaneSnapshot]:
         ...

@@ -11,6 +11,7 @@ from yogurt_contracts.memory.causal import (
     MemoryObservationOperation,
     MemoryObservationParticipation,
     MemoryObservation,
+    MemoryReconciliationProof,
     memory_observation_participation,
 )
 from yogurt_contracts.memory.recall import RecallEligibility
@@ -111,10 +112,25 @@ class MemoryCausalLane:
         self._reproject()
         return updated
 
-    def reconcile_same_domain(self, operation: MemoryObservationOperation, resolution: MemoryCausalResolution) -> MemoryCausalOperation:
+    def reconcile_same_domain(
+        self,
+        operation: MemoryObservationOperation,
+        durable_operation: StoredOperation,
+        resolution: MemoryCausalResolution,
+        proof: MemoryReconciliationProof,
+    ) -> MemoryCausalOperation:
         """A restart may resolve uncertainty only with proof from the same logical domain."""
 
         self._require_domain_and_scope(operation)
+        if durable_operation.intent.operation.operation_id != operation.operation_id:
+            raise MemoryCausalLaneError("MEMORY_RECONCILIATION_OPERATION_MISMATCH")
+        if durable_operation.state != DurableOperationState.OUTCOME_UNKNOWN:
+            raise MemoryCausalLaneError("MEMORY_RECONCILIATION_REQUIRES_OUTCOME_UNKNOWN")
+        present = self._operations.get(operation.operation_id)
+        if present is None or present.resolution != MemoryCausalResolution.UNRESOLVED:
+            raise MemoryCausalLaneError("MEMORY_RECONCILIATION_REQUIRES_UNRESOLVED")
+        if proof.operation_id != operation.operation_id or proof.logical_provider_domain != self._state.logical_provider_domain:
+            raise MemoryCausalLaneError("MEMORY_RECONCILIATION_PROOF_MISMATCH")
         return self.resolve(operation.operation_id, resolution)
 
     def _require_domain_and_scope(self, operation: MemoryObservationOperation) -> None:

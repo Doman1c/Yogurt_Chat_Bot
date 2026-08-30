@@ -10,13 +10,15 @@ from typing import Optional, Tuple, Union
 from pydantic import field_validator, model_validator
 
 from ..foundation.idempotency import RequestFingerprint
-from ..foundation.identifiers import OperationId
+from ..foundation.identifiers import BindingId, OperationId, RuntimeInstanceId
 from ..foundation.model import FrozenContract
+from ..operations.intent import OperationIntentCommitted
 from .observations import CommittedContentObservation, PresentationObservation, UserContentObservation
 from .recall import MemoryConversationScopeRef, memory_conversation_scope_ref
 
 
 MemoryObservation = Union[UserContentObservation, CommittedContentObservation, PresentationObservation]
+MEMORY_OBSERVE_CAPABILITY_ID = "memory.observe"
 
 
 class MemoryObservationParticipation(str, Enum):
@@ -81,6 +83,46 @@ class MemoryObservationOperation(FrozenContract):
             raise ValueError("memory observation fingerprint must match semantic observation")
         return self
 
+    def validate_durable_intent(self, intent: OperationIntentCommitted) -> None:
+        """Forbid reuse of an R2 operation identity for different Memory semantics."""
+
+        operation = intent.operation
+        if operation.operation_id != self.operation_id:
+            raise ValueError("memory observation and intent operation_id must match")
+        if operation.target_capability.value != MEMORY_OBSERVE_CAPABILITY_ID:
+            raise ValueError("memory observation intent capability must be memory.observe")
+        if operation.request_fingerprint != self.observation_fingerprint:
+            raise ValueError("memory observation intent fingerprint must match semantic observation")
+        if operation.authority.claims.subject != self.observation.conversation_ref.user_id:
+            raise ValueError("memory observation intent subject must match observation user")
+        if operation.turn_ref is not None and operation.turn_ref != self.observation.turn_ref:
+            raise ValueError("memory observation intent turn_ref must match observation turn")
+
+
+class MemoryReconciliationProof(FrozenContract):
+    """Provider-neutral evidence for resolving a genuinely unknown write outcome."""
+
+    operation_id: OperationId
+    logical_provider_domain: str
+    runtime_instance_id: RuntimeInstanceId
+    runtime_generation: int
+    binding_id: BindingId
+    resolution_reference: str
+
+    @field_validator("logical_provider_domain", "resolution_reference")
+    @classmethod
+    def has_bounded_reference(cls, value: str) -> str:
+        if not value or len(value) > 256:
+            raise ValueError("memory reconciliation proof references must be non-empty and bounded")
+        return value
+
+    @field_validator("runtime_generation")
+    @classmethod
+    def has_positive_generation(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("memory reconciliation proof generation must be positive")
+        return value
+
 
 class MemoryCausalOperation(FrozenContract):
     operation_id: OperationId
@@ -140,4 +182,33 @@ class MemoryCausalLaneSnapshot(FrozenContract):
             raise ValueError("memory causal operations must have unique operation IDs and sequences")
         if tuple(sorted(sequences)) != sequences:
             raise ValueError("memory causal operations must be sequence ordered")
+        expected_sequences = tuple(range(1, self.state.next_sequence))
+        if sequences != expected_sequences:
+            raise ValueError("memory causal operations must be contiguous through next_sequence")
+        by_sequence = {operation.sequence: operation for operation in self.operations}
+        resolved = 0
+        applied = 0
+        while True:
+            operation = by_sequence.get(resolved + 1)
+            if operation is None or operation.resolution not in {
+                MemoryCausalResolution.APPLIED, MemoryCausalResolution.RESOLVED_NOT_APPLIED,
+            }:
+                break
+            resolved += 1
+            if operation.resolution == MemoryCausalResolution.APPLIED and applied == resolved - 1:
+                applied = resolved
+        unresolved = tuple(
+            operation.sequence for operation in self.operations
+            if operation.resolution == MemoryCausalResolution.UNRESOLVED
+        )
+        history_complete = not any(
+            operation.resolution == MemoryCausalResolution.RESOLVED_NOT_APPLIED
+            for operation in self.operations
+        )
+        if self.state.resolved_through_sequence != resolved or self.state.applied_through_sequence != applied:
+            raise ValueError("memory causal watermarks must match operation resolutions")
+        if self.state.first_unresolved_sequence != (min(unresolved) if unresolved else None):
+            raise ValueError("memory causal unresolved watermark must match operation resolutions")
+        if self.state.history_complete != history_complete:
+            raise ValueError("memory causal history completeness must match operation resolutions")
         return self

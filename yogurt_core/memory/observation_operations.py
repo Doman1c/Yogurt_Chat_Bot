@@ -8,7 +8,7 @@ from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
 
 from yogurt_core.memory.causal_lane import MemoryCausalLane
 from yogurt_core.operations.engine import OperationEngine
-from yogurt_core.operations.models import NotDispatchedReason, StoredOperation
+from yogurt_core.operations.models import StoredOperation
 from yogurt_core.operations.provider import OperationProviderPort
 from yogurt_core.ports.memory_observation import MemoryCausalStateStore
 from yogurt_core.ports.state_store import CoreStateError
@@ -34,17 +34,20 @@ class MemoryObservationOperationCoordinator:
         intent: OperationIntentCommitted,
         provider: OperationProviderPort,
     ) -> MemoryObservationExecution:
-        if intent.operation.operation_id != observation.operation_id:
-            raise ValueError("memory observation and durable intent operation IDs must match")
+        observation.validate_durable_intent(intent)
         committed = await self._causal_store.commit_memory_observation_intent(token, observation, intent)
         if committed.value is None:
             raise CoreStateError("MEMORY_CAUSAL_STATE_NOT_COMMITTED")
         causal_operation = committed.value
         lane = MemoryCausalLane(await self._causal_store.get_memory_causal_lane(observation))
-        reject_reason = None
         if not lane.can_dispatch(causal_operation.operation_id):
-            reject_reason = NotDispatchedReason.POLICY_REJECTED
-        durable_operation = await self._operation_engine.execute(token, intent, provider, reject_reason)
+            # The durable intent is already committed.  A causal predecessor
+            # being unresolved is not proof of no effect for this operation.
+            return MemoryObservationExecution(
+                causal_operation=causal_operation,
+                durable_operation=await self._causal_store.get_operation(causal_operation.operation_id),
+            )
+        durable_operation = await self._operation_engine.execute(token, intent, provider)
         projected = await self._causal_store.project_memory_operation_outcome(token, observation)
         if projected.value is None:
             raise CoreStateError("MEMORY_CAUSAL_STATE_NOT_COMMITTED")

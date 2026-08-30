@@ -9,7 +9,8 @@ from .recall import (
 )
 from .causal import (
     MemoryCausalLaneSnapshot, MemoryCausalOperation, MemoryCausalResolution, MemoryCausalState,
-    MemoryObservationOperation, MemoryObservationParticipation, memory_observation_fingerprint,
+    MEMORY_OBSERVE_CAPABILITY_ID, MemoryObservationOperation, MemoryObservationParticipation,
+    MemoryReconciliationProof, memory_observation_fingerprint,
     memory_observation_participation,
 )
 
@@ -21,6 +22,7 @@ __all__ = [
     "UserContentObservation", "MEMORY_RECALL_CAPABILITY_ID", "classify_memory_observation_retry",
     "MemoryCausalLaneSnapshot", "MemoryCausalOperation", "MemoryCausalResolution", "MemoryCausalState",
     "MemoryObservationOperation", "MemoryObservationParticipation", "memory_observation_fingerprint",
+    "MEMORY_OBSERVE_CAPABILITY_ID", "MemoryReconciliationProof",
     "memory_observation_participation",
     "memory_conversation_scope_ref", "project_memory_exposure",
 ]

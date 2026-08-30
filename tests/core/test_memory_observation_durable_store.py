@@ -17,7 +17,7 @@ from yogurt_contracts.foundation.idempotency import RequestFingerprint
 from yogurt_contracts.foundation.time import Deadline, UtcInstant
 from yogurt_contracts.foundation.versioning import ContractVersion
 from yogurt_contracts.identity.authority import AuthorityClaims, DelegatedAuthority
-from yogurt_contracts.memory.causal import MemoryCausalResolution, MemoryObservationOperation, memory_observation_fingerprint
+from yogurt_contracts.memory.causal import MemoryCausalResolution, MemoryObservationOperation, MemoryReconciliationProof, memory_observation_fingerprint
 from yogurt_contracts.memory.observations import UserContentObservation
 from yogurt_contracts.memory.recall import memory_conversation_scope_ref
 from yogurt_contracts.operations.intent import LogicalOperation, OperationIntentCommitted
@@ -43,10 +43,18 @@ def _semantic(operation: str, domain: str = "legacy-v5") -> MemoryObservationOpe
 
 def _intent(operation: str) -> OperationIntentCommitted:
     claims = AuthorityClaims(actor=RuntimeInstanceId(value="core"), subject=CONVERSATION.user_id, origin="core", audience=RuntimeInstanceId(value="provider"), scope=CAPABILITY, grant_revision="grant", valid_until=FUTURE, authority_reference="authority")
-    logical = LogicalOperation(operation_id=OperationId(value=operation), request_fingerprint=RequestFingerprint(value="fingerprint-" + operation), target_capability=CAPABILITY, authority=DelegatedAuthority(claims=claims, operation_id=OperationId(value=operation)), deadline=Deadline(expires_at=FUTURE), traits=OperationTraits(effect_kind=EffectKind.WRITE, idempotency=IdempotencyKind.KEYED, reversibility=ReversibilityKind.IRREVERSIBLE, cancellation_support=CancellationSupport.BEST_EFFORT), created_at=NOW)
+    logical = LogicalOperation(operation_id=OperationId(value=operation), request_fingerprint=_semantic(operation).observation_fingerprint, target_capability=CAPABILITY, authority=DelegatedAuthority(claims=claims, operation_id=OperationId(value=operation)), deadline=Deadline(expires_at=FUTURE), traits=OperationTraits(effect_kind=EffectKind.WRITE, idempotency=IdempotencyKind.KEYED, reversibility=ReversibilityKind.IRREVERSIBLE, cancellation_support=CancellationSupport.BEST_EFFORT), created_at=NOW)
     authorization = OperationAuthorizationSnapshot(operation_id=logical.operation_id, claims=claims, checked_at=NOW, valid_until=FUTURE)
     binding = CapabilityBinding(binding_id=BindingId(value="binding"), binding_revision="1", capability_id=CAPABILITY, provider_slot_id=RuntimeSlotId(value="memory-slot"), provider_instance_id=RuntimeInstanceId(value="provider"), provider_generation=1, contract_version=ContractVersion(major=1, minor=0), authority_valid_until=FUTURE)
     return OperationIntentCommitted(operation=logical, provider_binding=binding, authorization_snapshot=authorization, required_durability=DurabilityLevel.DURABLY_PERSISTED, committed_at=NOW)
+
+
+def _proof(operation: str, domain: str = "legacy-v5") -> MemoryReconciliationProof:
+    return MemoryReconciliationProof(
+        operation_id=OperationId(value=operation), logical_provider_domain=domain,
+        runtime_instance_id=RuntimeInstanceId(value="provider-restarted"), runtime_generation=2,
+        binding_id=BindingId(value="binding-restarted"), resolution_reference="provider-reconcile-proof",
+    )
 
 
 class _MemoryProvider:
@@ -74,6 +82,13 @@ def test_sqlite_binds_operation_intent_and_sequence_atomically_and_persists_rest
         ])
         assert {result.value.sequence for result in results if result.value is not None} == {1}
         assert (await store.get_operation(OperationId(value="one"))).intent == intent_one
+        forged_ref = ConversationRef(
+            persona_id=CONVERSATION.persona_id, user_id=CONVERSATION.user_id,
+            conversation_id=ConversationId(value="other-conversation"),
+        )
+        forged_semantic = one.model_copy(update={"scope_ref": memory_conversation_scope_ref(forged_ref)})
+        with pytest.raises(CoreStateError, match="MEMORY_OPERATION_SEMANTIC_CONFLICT"):
+            await store.commit_memory_observation_intent(token, forged_semantic, intent_one)
         first_operation = await store.get_operation(OperationId(value="one"))
         await store.mark_not_dispatched(token, OperationId(value="one"), first_operation.revision, reason=NotDispatchedReason.POLICY_REJECTED)
         projected = await store.project_memory_operation_outcome(token, one)
@@ -87,7 +102,10 @@ def test_sqlite_binds_operation_intent_and_sequence_atomically_and_persists_rest
 
         restarted = SQLiteCoreStateStore(path)
         restarted_token = await restarted.acquire_authority(CoreInstanceId(value="core-restarted"))
+        before_rebuild = await restarted.get_memory_causal_lane(one)
+        await restarted.rebuild_projections(restarted_token)
         lane = await restarted.get_memory_causal_lane(one)
+        assert lane == before_rebuild
         assert lane.state.next_sequence == 3 and tuple(item.sequence for item in lane.operations) == (1, 2)
         assert not lane.state.history_complete
         await restarted.release_authority(restarted_token)
@@ -120,8 +138,11 @@ def test_uncertain_memory_lane_disables_recall_but_later_core_work_is_not_blocke
         second = await coordinator.execute(token, _semantic("later"), _intent("later"), blocked_provider)
         lane = await store.get_memory_causal_lane(_semantic("unknown"))
         assert first.durable_operation.state.value == "outcome_unknown" and unknown_provider.calls == 1
-        assert second.durable_operation.state.value == "not_dispatched" and blocked_provider.calls == 0
-        assert lane.state.first_unresolved_sequence == 1 and not lane.state.history_complete
+        assert second.durable_operation.state.value == "intent_committed" and blocked_provider.calls == 0
+        assert lane.state.first_unresolved_sequence == 1 and lane.state.history_complete
+        await store.reconcile_memory_observation(token, _semantic("unknown"), MemoryCausalResolution.APPLIED, _proof("unknown"))
+        retried = await coordinator.execute(token, _semantic("later"), _intent("later"), blocked_provider)
+        assert retried.durable_operation.state.value == "succeeded" and blocked_provider.calls == 1
         await store.release_authority(token)
     asyncio.run(run())
 
@@ -144,8 +165,50 @@ def test_same_domain_restart_reconciliation_releases_unresolved_lane(tmp_path) -
         restarted = SQLiteCoreStateStore(path)
         token = await restarted.acquire_authority(CoreInstanceId(value="restarted"))
         assert (await restarted.get_memory_causal_lane(semantic)).state.first_unresolved_sequence == 1
-        reconciled = await restarted.reconcile_memory_observation(token, semantic, MemoryCausalResolution.APPLIED)
+        reconciled = await restarted.reconcile_memory_observation(token, semantic, MemoryCausalResolution.APPLIED, _proof("unknown"))
         assert reconciled.value is not None and reconciled.value.state.first_unresolved_sequence is None
         assert reconciled.value.state.history_complete
         await restarted.release_authority(token)
     asyncio.run(run())
+
+
+def test_reconciliation_requires_unknown_state_and_matching_domain_proof(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteCoreStateStore(tmp_path / "memory-proof.db")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        pending = _semantic("pending")
+        await store.commit_memory_observation_intent(token, pending, _intent("pending"))
+        with pytest.raises(CoreStateError, match="REQUIRES_OUTCOME_UNKNOWN"):
+            await store.reconcile_memory_observation(token, pending, MemoryCausalResolution.APPLIED, _proof("pending"))
+
+        unknown = _semantic("unknown")
+        await store.commit_memory_observation_intent(token, unknown, _intent("unknown"))
+        operation = await store.get_operation(unknown.operation_id)
+        await store.mark_dispatch_attempted(token, unknown.operation_id, operation.revision)
+        attempted = await store.get_operation(unknown.operation_id)
+        await store.mark_outcome_unknown(token, unknown.operation_id, attempted.revision)
+        await store.project_memory_operation_outcome(token, unknown)
+        with pytest.raises(CoreStateError, match="PROOF_MISMATCH"):
+            await store.reconcile_memory_observation(token, unknown, MemoryCausalResolution.APPLIED, _proof("unknown", "other-domain"))
+        await store.release_authority(token)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["operation_id", "capability", "fingerprint", "subject", "turn"])
+def test_semantic_observation_rejects_mismatched_durable_intent(case: str) -> None:
+    semantic, intent = _semantic("bound"), _intent("bound")
+    operation = intent.operation
+    if case == "operation_id":
+        operation = operation.model_copy(update={"operation_id": OperationId(value="other")})
+    elif case == "capability":
+        operation = operation.model_copy(update={"target_capability": CapabilityId(value="other.capability")})
+    elif case == "fingerprint":
+        operation = operation.model_copy(update={"request_fingerprint": RequestFingerprint(value="other-fingerprint")})
+    elif case == "subject":
+        claims = operation.authority.claims.model_copy(update={"subject": UserId(value="other-user")})
+        operation = operation.model_copy(update={"authority": DelegatedAuthority(claims=claims, operation_id=operation.operation_id)})
+    else:
+        operation = operation.model_copy(update={"turn_ref": TurnRef(conversation_id=CONVERSATION.conversation_id, turn_id=TurnId(value="other-turn"))})
+    bad = intent.model_copy(update={"operation": operation})
+    with pytest.raises(ValueError):
+        semantic.validate_durable_intent(bad)
