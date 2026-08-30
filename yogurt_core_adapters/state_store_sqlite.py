@@ -681,7 +681,15 @@ class SQLiteCoreStateStore:
             new_semantic_operation = self._validate_or_record_memory_semantic_operation(connection, observation)
         except ValueError as error:
             raise CoreStateError(str(error)) from error
-        self._commit_operation_intent_tx(connection, token, intent)
+        stored = self._commit_operation_intent_tx(connection, token, intent)
+        try:
+            observation.validate_durable_intent(stored.intent)
+        except ValueError as error:
+            # R2 intentionally identifies an existing operation by ID and
+            # fingerprint only.  The Memory bridge has a narrower semantic
+            # contract, so reject a same-fingerprint non-Memory reuse before
+            # allocating a causal sequence.
+            raise CoreStateError("MEMORY_OPERATION_INTENT_CONFLICT") from error
         try:
             lane = MemoryCausalLane(self._memory_causal_lane_from_connection(connection, observation))
         except CoreStateError as error:
@@ -763,7 +771,12 @@ class SQLiteCoreStateStore:
             raise CoreStateError(str(error)) from error
         snapshot = lane.snapshot()
         self._write_memory_lane_projection(connection, snapshot)
-        self._append_memory_causal_fact(connection, "memory_causal_operation_reconciled", snapshot)
+        self._append_memory_causal_fact(
+            connection,
+            "memory_causal_operation_reconciled",
+            snapshot,
+            reconciliation_proof=proof,
+        )
         return snapshot
 
     def _validate_or_record_memory_semantic_operation(
@@ -804,10 +817,13 @@ class SQLiteCoreStateStore:
         fact_type: str,
         snapshot: MemoryCausalLaneSnapshot,
         semantic_operation: Optional[MemoryObservationOperation] = None,
+        reconciliation_proof: Optional[MemoryReconciliationProof] = None,
     ) -> None:
         payload = {"kind": "memory_causal_lane", "snapshot": snapshot.model_dump(mode="json")}
         if semantic_operation is not None:
             payload["semantic_operation"] = semantic_operation.model_dump(mode="json")
+        if reconciliation_proof is not None:
+            payload["reconciliation_proof"] = reconciliation_proof.model_dump(mode="json")
         aggregate_id = "memory-causal:" + snapshot.state.scope_ref.scope_id.value
         self._append_fact(
             connection,

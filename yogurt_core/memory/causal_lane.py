@@ -121,6 +121,11 @@ class MemoryCausalLane:
     ) -> MemoryCausalOperation:
         """A restart may resolve uncertainty only with proof from the same logical domain."""
 
+        if resolution not in {
+            MemoryCausalResolution.APPLIED,
+            MemoryCausalResolution.RESOLVED_NOT_APPLIED,
+        }:
+            raise MemoryCausalLaneError("MEMORY_RECONCILIATION_RESOLUTION_INVALID")
         self._require_domain_and_scope(operation)
         if durable_operation.intent.operation.operation_id != operation.operation_id:
             raise MemoryCausalLaneError("MEMORY_RECONCILIATION_OPERATION_MISMATCH")

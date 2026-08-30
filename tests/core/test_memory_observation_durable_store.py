@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timezone
+import json
 
 import pytest
 
@@ -47,6 +48,21 @@ def _intent(operation: str) -> OperationIntentCommitted:
     authorization = OperationAuthorizationSnapshot(operation_id=logical.operation_id, claims=claims, checked_at=NOW, valid_until=FUTURE)
     binding = CapabilityBinding(binding_id=BindingId(value="binding"), binding_revision="1", capability_id=CAPABILITY, provider_slot_id=RuntimeSlotId(value="memory-slot"), provider_instance_id=RuntimeInstanceId(value="provider"), provider_generation=1, contract_version=ContractVersion(major=1, minor=0), authority_valid_until=FUTURE)
     return OperationIntentCommitted(operation=logical, provider_binding=binding, authorization_snapshot=authorization, required_durability=DurabilityLevel.DURABLY_PERSISTED, committed_at=NOW)
+
+
+def _non_memory_intent(operation: str) -> OperationIntentCommitted:
+    intent = _intent(operation)
+    capability = CapabilityId(value="other.capability")
+    claims = intent.operation.authority.claims.model_copy(update={"scope": capability})
+    logical = intent.operation.model_copy(update={
+        "target_capability": capability,
+        "authority": DelegatedAuthority(claims=claims, operation_id=intent.operation.operation_id),
+    })
+    return intent.model_copy(update={
+        "operation": logical,
+        "provider_binding": intent.provider_binding.model_copy(update={"capability_id": capability}),
+        "authorization_snapshot": intent.authorization_snapshot.model_copy(update={"claims": claims}),
+    })
 
 
 def _proof(operation: str, domain: str = "legacy-v5") -> MemoryReconciliationProof:
@@ -127,6 +143,29 @@ def test_coordinator_reuses_r2_operation_engine_without_blocking_core_on_memory_
     asyncio.run(run())
 
 
+def test_memory_bridge_rejects_same_fingerprint_non_memory_operation_id_collision(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteCoreStateStore(tmp_path / "memory-operation-id-collision.db")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        semantic = _semantic("collision")
+        existing_intent = _non_memory_intent("collision")
+        await store.commit_operation_intent(token, existing_intent)
+        existing = await store.get_operation(semantic.operation_id)
+        await store.mark_dispatch_attempted(token, semantic.operation_id, existing.revision)
+        attempted = await store.get_operation(semantic.operation_id)
+        await store.mark_succeeded(token, semantic.operation_id, attempted.revision)
+        succeeded = await store.get_operation(semantic.operation_id)
+
+        with pytest.raises(CoreStateError, match="MEMORY_OPERATION_INTENT_CONFLICT"):
+            await store.commit_memory_observation_intent(token, semantic, _intent("collision"))
+
+        assert await store.get_operation(semantic.operation_id) == succeeded
+        with pytest.raises(CoreStateError, match="MEMORY_CAUSAL_LANE_NOT_FOUND"):
+            await store.get_memory_causal_lane(semantic)
+        await store.release_authority(token)
+    asyncio.run(run())
+
+
 def test_uncertain_memory_lane_disables_recall_but_later_core_work_is_not_blocked(tmp_path) -> None:
     async def run() -> None:
         store = SQLiteCoreStateStore(tmp_path / "memory-unknown.db")
@@ -168,6 +207,11 @@ def test_same_domain_restart_reconciliation_releases_unresolved_lane(tmp_path) -
         reconciled = await restarted.reconcile_memory_observation(token, semantic, MemoryCausalResolution.APPLIED, _proof("unknown"))
         assert reconciled.value is not None and reconciled.value.state.first_unresolved_sequence is None
         assert reconciled.value.state.history_complete
+        fact = restarted._connection.execute(
+            "SELECT payload FROM facts WHERE fact_type = 'memory_causal_operation_reconciled'"
+        ).fetchone()
+        assert fact is not None
+        assert json.loads(str(fact["payload"]))["reconciliation_proof"] == _proof("unknown").model_dump(mode="json")
         await restarted.release_authority(token)
     asyncio.run(run())
 
@@ -190,6 +234,9 @@ def test_reconciliation_requires_unknown_state_and_matching_domain_proof(tmp_pat
         await store.project_memory_operation_outcome(token, unknown)
         with pytest.raises(CoreStateError, match="PROOF_MISMATCH"):
             await store.reconcile_memory_observation(token, unknown, MemoryCausalResolution.APPLIED, _proof("unknown", "other-domain"))
+        for resolution in (MemoryCausalResolution.UNRESOLVED, MemoryCausalResolution.PENDING):
+            with pytest.raises(CoreStateError, match="RESOLUTION_INVALID"):
+                await store.reconcile_memory_observation(token, unknown, resolution, _proof("unknown"))
         await store.release_authority(token)
     asyncio.run(run())
 
