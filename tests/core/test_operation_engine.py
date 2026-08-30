@@ -1,6 +1,8 @@
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
+
 from yogurt_contracts.capability.binding import CapabilityBinding
 from yogurt_contracts.execution.authorization_snapshot import OperationAuthorizationSnapshot
 from yogurt_contracts.foundation.durability import DurabilityLevel
@@ -65,6 +67,21 @@ def test_operation_engine_durable_ordering_outcomes_and_guards(tmp_path) -> None
         guarded_provider = FakeProvider(store, ProviderDispatchCertainty.SUCCESS)
         guarded = await engine.execute(token, _intent("guard", "four"), guarded_provider, NotDispatchedReason.CANCELLED_BEFORE_DISPATCH)
         assert guarded.state == DurableOperationState.NOT_DISPATCHED and guarded_provider.calls == 0
+    asyncio.run(run())
+
+
+def test_operation_intent_precommit_failure_never_dispatches_provider(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteCoreStateStore(tmp_path / "operation-intent-not-committed.db")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        provider = FakeProvider(store, ProviderDispatchCertainty.SUCCESS)
+        intent = _intent("not-committed-operation", "not-committed")
+        store.simulate_semantic_not_committed_once()
+        with pytest.raises(CoreStateError, match="OPERATION_STATE_NOT_COMMITTED"):
+            await OperationEngine(store).execute(token, intent, provider)
+        assert provider.calls == 0
+        with pytest.raises(CoreStateError, match="OPERATION_NOT_FOUND"):
+            await store.get_operation(intent.operation.operation_id)
     asyncio.run(run())
 
 
