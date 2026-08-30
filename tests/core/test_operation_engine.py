@@ -33,8 +33,13 @@ def _intent(operation_id: str, fingerprint: str, kind: IdempotencyKind = Idempot
 
 
 class FakeProvider:
-    def __init__(self, store: SQLiteCoreStateStore, result: ProviderDispatchCertainty) -> None:
+    def __init__(self, store: SQLiteCoreStateStore, result: ProviderDispatchCertainty, capability_id: CapabilityId = CapabilityId(value="fake.presentation")) -> None:
         self.store, self.result, self.calls, self.visible = store, result, 0, False
+        self._capability_id = capability_id
+
+    @property
+    def capability_id(self) -> CapabilityId:
+        return self._capability_id
 
     async def dispatch(self, intent: OperationIntentCommitted) -> ProviderDispatchResult:
         self.calls += 1
@@ -111,6 +116,48 @@ def test_operation_zero_dispatch_guards_and_ephemeral_boundary(tmp_path) -> None
             assert False, "ephemeral external dispatch must fail closed"
         except CoreStateError as error:
             assert error.code == "DURABLE_OPERATION_REQUIRED"
+    asyncio.run(run())
+
+
+def test_operation_engine_rejects_real_provider_capability_mismatch_before_effect(tmp_path) -> None:
+    class EffectProvider(FakeProvider):
+        def __init__(self, store) -> None:
+            super().__init__(store, ProviderDispatchCertainty.SUCCESS, CapabilityId(value="fake.audio"))
+            self.effects = 0
+
+        async def dispatch(self, intent):
+            self.effects += 1
+            return await super().dispatch(intent)
+
+    async def run() -> None:
+        store = SQLiteCoreStateStore(tmp_path / "capability-mismatch.db")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        provider = EffectProvider(store)
+        result = await OperationEngine(store).execute(token, _intent("capability-mismatch", "capability-mismatch"), provider)
+        durable = await store.get_operation(OperationId(value="capability-mismatch"))
+        assert result.state == DurableOperationState.NOT_DISPATCHED
+        assert result.not_dispatched_reason == NotDispatchedReason.CAPABILITY_UNAVAILABLE
+        assert durable.state == DurableOperationState.NOT_DISPATCHED
+        assert durable.not_dispatched_reason == NotDispatchedReason.CAPABILITY_UNAVAILABLE
+        assert provider.calls == 0 and provider.effects == 0
+    asyncio.run(run())
+
+
+def test_operation_projection_rebuild_removes_facts_less_bogus_row(tmp_path) -> None:
+    async def run() -> None:
+        store = SQLiteCoreStateStore(tmp_path / "operations-rebuild-facts-only.db")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        intent = _intent("real-operation", "real-fingerprint")
+        committed = await store.commit_operation_intent(token, intent)
+        assert committed.value is not None
+        attempted = await store.mark_dispatch_attempted(token, intent.operation.operation_id, committed.value.revision)
+        assert attempted.value is not None
+        store._connection.execute("INSERT INTO operations(operation_id, fingerprint, payload) VALUES (?, ?, ?)", ("bogus-operation", "bogus-fingerprint", "{}"))
+        store._connection.execute("UPDATE operations SET payload = ? WHERE operation_id = ?", ("{}", "real-operation"))
+        await store.rebuild_projections(token)
+        real = await store.get_operation(intent.operation.operation_id)
+        assert real.state == DurableOperationState.DISPATCH_ATTEMPTED and real.revision == attempted.value.revision
+        assert store._connection.execute("SELECT 1 FROM operations WHERE operation_id = ?", ("bogus-operation",)).fetchone() is None
     asyncio.run(run())
 
 

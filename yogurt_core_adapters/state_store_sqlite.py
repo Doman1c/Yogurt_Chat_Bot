@@ -447,6 +447,7 @@ class SQLiteCoreStateStore:
                 connection.execute("DELETE FROM responses")
                 connection.execute("DELETE FROM turns")
                 connection.execute("DELETE FROM conversations")
+                connection.execute("DELETE FROM operations")
                 for row in facts:
                     fact = self._decode_fact(row)
                     self._apply_projection_fact(connection, fact)

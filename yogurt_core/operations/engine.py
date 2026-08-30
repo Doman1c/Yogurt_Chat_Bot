@@ -39,6 +39,8 @@ class OperationEngine:
             return operation
         if reject_reason is not None:
             return self._confirmed(await self._store.mark_not_dispatched(token, intent.operation.operation_id, operation.revision, reject_reason))
+        if provider.capability_id != intent.operation.target_capability:
+            return self._confirmed(await self._store.mark_not_dispatched(token, intent.operation.operation_id, operation.revision, NotDispatchedReason.CAPABILITY_UNAVAILABLE))
         attempted = self._confirmed(await self._store.mark_dispatch_attempted(token, intent.operation.operation_id, operation.revision))
         # This await is intentionally after the durable attempt commit.
         try:
