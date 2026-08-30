@@ -12,16 +12,17 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import uuid
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence, Set, Tuple, TypeVar, Union, cast
 
-if os.name == "nt":
+if sys.platform == "win32":
     import msvcrt
 else:
-    fcntl = cast(Any, __import__("fcntl"))
+    import fcntl
 
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
 from yogurt_contracts.conversation.input import TurnInput
@@ -511,7 +512,7 @@ class SQLiteCoreStateStore:
             if os.path.getsize(lock_path) == 0:
                 handle.write(b"0")
                 handle.flush()
-            if os.name == "nt":
+            if sys.platform == "win32":
                 msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
