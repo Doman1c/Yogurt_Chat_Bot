@@ -5,7 +5,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[2]
-FORBIDDEN = {"openclaw", "integrations", "social_layer", "voice", "voice_runtime", "voice_orchestrator", "torch", "ollama", "yogurt_conformance"}
+FORBIDDEN = {
+    "openclaw", "integrations", "social_layer", "voice", "voice_runtime",
+    "voice_orchestrator", "torch", "ollama", "wechat", "whisper",
+    "gpt_sovits", "live2d", "robot", "yogurt_conformance",
+}
 
 
 def _imports(package: str):

@@ -36,10 +36,10 @@ jobs:
           python -m pip install -r voice_runtime/requirements.txt
           python -m pip install -r requirements-contracts-dev.txt
 
-      - name: Run R1 contract foundation and conformance tests
+      - name: Run R1-R2 Core conformance tests
         run: |
-          python -m pytest -q tests/contracts tests/conformance tests/architecture
-          python -m mypy --strict yogurt_contracts yogurt_core_domain yogurt_conformance
+          python -m pytest -q tests/contracts tests/conformance tests/architecture tests/core
+          python -m mypy --strict yogurt_contracts yogurt_core_domain yogurt_conformance yogurt_core yogurt_core_adapters
 
       - name: Run V3/V4/V5 memory tests
         run: |

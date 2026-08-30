@@ -100,6 +100,28 @@ def test_operation_identity_fencing_restart_and_projection_rebuild(tmp_path) -> 
     asyncio.run(run())
 
 
+def test_recovery_keeps_dispatched_operation_pending_without_provider_redrive(tmp_path) -> None:
+    async def run() -> None:
+        path = tmp_path / "operation-recovery.db"
+        store = SQLiteCoreStateStore(path)
+        token = await store.acquire_authority(CoreInstanceId(value="core-a"))
+        intent = _intent("pending-operation", "pending")
+        committed = await store.commit_operation_intent(token, intent)
+        assert committed.value is not None
+        attempted = await store.mark_dispatch_attempted(token, intent.operation.operation_id, committed.value.revision)
+        assert attempted.value is not None
+        await store.release_authority(token)
+        await store.close()
+
+        restarted = SQLiteCoreStateStore(path)
+        recovery_token = await restarted.acquire_authority(CoreInstanceId(value="core-b"))
+        await restarted.recover(recovery_token)
+        operation = await restarted.get_operation(intent.operation.operation_id)
+        assert operation.state == DurableOperationState.DISPATCH_ATTEMPTED
+        await restarted.release_authority(recovery_token)
+    asyncio.run(run())
+
+
 def test_operation_zero_dispatch_guards_and_ephemeral_boundary(tmp_path) -> None:
     async def run() -> None:
         store = SQLiteCoreStateStore(tmp_path / "guards.db")

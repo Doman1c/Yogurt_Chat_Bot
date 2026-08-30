@@ -9,6 +9,7 @@ from yogurt_contracts.conversation.fingerprint import turn_fingerprint
 from yogurt_contracts.conversation.input import TextInputPart, TurnInput
 from yogurt_contracts.conversation.lifecycle import TurnState
 from yogurt_contracts.conversation.refs import ConversationRef, TurnOrigin
+from yogurt_contracts.execution.persona import PersonaSnapshot
 from yogurt_contracts.execution.turn_snapshot import TurnSnapshot
 from yogurt_contracts.foundation.facts import CommitCertainty, FactEnvelope
 from yogurt_contracts.foundation.identifiers import (
@@ -54,6 +55,10 @@ def _snapshot() -> TurnSnapshot:
     return TurnSnapshot(identity_revision="identity", core_config_revision="config", turn_origin=_input().origin, conversation_context_revision="context", principal_binding_reference="binding")
 
 
+def _persona_snapshot(revision: str) -> PersonaSnapshot:
+    return PersonaSnapshot(persona_id=PersonaId(value="persona"), persona_revision=revision, soul_revision="soul-" + revision, identity_revision="identity-" + revision, relationship_context_revision="relationship-" + revision, model_context_material="frozen-" + revision)
+
+
 @_async_test
 async def test_sqlite_store_persists_atomic_turn_and_terminal_claim_release(tmp_path) -> None:
     path = tmp_path / "core.db"
@@ -81,6 +86,26 @@ async def test_sqlite_store_persists_atomic_turn_and_terminal_claim_release(tmp_
     assert (await restarted.get_response(response.response_id)).segments[0].text == "hi"
     await restarted.rebuild_projections(token_b)
     assert (await restarted.get_turn(_ref(), turn_id)).state == TurnState.COMPLETED
+
+
+@_async_test
+async def test_persona_snapshot_is_admission_frozen_and_restart_reconstructible(tmp_path) -> None:
+    path = tmp_path / "persona-snapshot.db"
+    snapshot = _snapshot().model_copy(update={"persona_snapshot": _persona_snapshot("p1")})
+    store = SQLiteCoreStateStore(path)
+    token = await store.acquire_authority(CoreInstanceId(value="core-a"))
+    await store.create_conversation(token, _ref())
+    turn_id = TurnId(value="persona-turn")
+    await store.try_admit_turn(token, _ref(), turn_id, turn_fingerprint(_input(), "binding"), snapshot, _input())
+    assert (await store.get_turn(_ref(), turn_id)).snapshot.persona_snapshot == _persona_snapshot("p1")
+    await store.release_authority(token)
+    await store.close()
+
+    restarted = SQLiteCoreStateStore(path)
+    token_b = await restarted.acquire_authority(CoreInstanceId(value="core-b"))
+    reconstructed = await restarted.get_turn(_ref(), turn_id)
+    assert reconstructed.snapshot.persona_snapshot == _persona_snapshot("p1")
+    await restarted.release_authority(token_b)
 
 
 @_async_test
@@ -216,9 +241,13 @@ async def test_recovery_closes_input_started_and_converges_terminal_response(tmp
     store = SQLiteCoreStateStore(path)
     token = await store.acquire_authority(CoreInstanceId(value="core-a"))
     await store.create_conversation(token, _ref())
+    input_only_turn = TurnId(value="input-only-recovery")
+    await store.try_admit_turn(token, _ref(), input_only_turn, turn_fingerprint(_input(), "binding"), _snapshot(), _input())
+    started_ref = ConversationRef(persona_id=PersonaId(value="persona"), user_id=UserId(value="user"), conversation_id=ConversationId(value="started-conversation"))
+    await store.create_conversation(token, started_ref)
     started_turn = TurnId(value="started")
-    await store.try_admit_turn(token, _ref(), started_turn, turn_fingerprint(_input(), "binding"), _snapshot(), _input())
-    await store.commit_response_started(token, _ref(), started_turn, ResponseId(value="response-started"))
+    await store.try_admit_turn(token, started_ref, started_turn, turn_fingerprint(_input(), "binding"), _snapshot(), _input())
+    await store.commit_response_started(token, started_ref, started_turn, ResponseId(value="response-started"))
     await store.release_authority(token)
     recovered = SQLiteCoreStateStore(path)
     token_b = await recovered.acquire_authority(CoreInstanceId(value="core-b"))
@@ -226,7 +255,11 @@ async def test_recovery_closes_input_started_and_converges_terminal_response(tmp
     started_response = await recovered.get_response(ResponseId(value="response-started"))
     assert started_response.state == ResponseState.ABORTED
     assert started_response.abort_reason == ResponseAbortReason.RECOVERY
-    assert (await recovered.get_turn(_ref(), started_turn)).state == TurnState.ABORTED
+    assert (await recovered.get_turn(started_ref, started_turn)).state == TurnState.ABORTED
+    assert (await recovered.get_turn(_ref(), input_only_turn)).state == TurnState.ABORTED
     assert await recovered.active_claim(_ref()) is None
+    fact_count = recovered._connection.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
     await recovered.recover(token_b)
-    assert (await recovered.get_turn(_ref(), started_turn)).state == TurnState.ABORTED
+    assert (await recovered.get_turn(started_ref, started_turn)).state == TurnState.ABORTED
+    assert (await recovered.get_turn(_ref(), input_only_turn)).state == TurnState.ABORTED
+    assert recovered._connection.execute("SELECT COUNT(*) FROM facts").fetchone()[0] == fact_count

@@ -194,6 +194,49 @@ def test_fingerprint_and_origin_are_verified_before_admission():
     asyncio.run(scenario())
 
 
+def test_authenticated_principal_and_response_absence_are_fail_closed():
+    async def scenario():
+        core, store = await _core()
+        command = _command()
+        forged_caller = command.model_copy(update={"caller_context": CallerContext(logical_user_id=UserId(value="other-user"))})
+        rejected = await core.submit_turn(forged_caller)
+        assert rejected.status == TurnAdmissionStatus.REJECTED and rejected.reason == "CALLER_IDENTITY_MISMATCH"
+        assert await store.active_claim(_ref()) is None
+
+        admitted = await core.submit_turn(command)
+        assert admitted.response_id is None
+        watcher = core.watch_response(WatchResponseCommand(caller_context=command.caller_context, response_id=ResponseId(value="not-started")))
+        with pytest.raises(CoreStateError, match="RESPONSE_NOT_FOUND"):
+            await watcher.__anext__()
+        assert (await store.get_turn(_ref(), command.turn_id)).response_id is None
+    asyncio.run(scenario())
+
+
+def test_stop_is_bounded_and_releases_authority_after_timeout_or_drain_failure():
+    class HangingScheduler:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        async def drain(self) -> None:
+            await asyncio.Event().wait()
+
+        async def cancel_remaining(self) -> None:
+            self.cancelled = True
+
+    class FailingScheduler(HangingScheduler):
+        async def drain(self) -> None:
+            raise RuntimeError("drain failed")
+
+    async def scenario():
+        for scheduler in (HangingScheduler(), FailingScheduler()):
+            core, store = await _core(scheduler=scheduler)
+            await core.stop(drain_timeout_seconds=0.01)
+            assert scheduler.cancelled
+            replacement = await store.acquire_authority(CoreInstanceId(value="replacement"))
+            await store.release_authority(replacement)
+    asyncio.run(scenario())
+
+
 def test_context_is_ordered_and_current_input_is_not_duplicated():
     async def scenario():
         model = FakeModelAdapter(((VisibleTextDelta(text="A1"),), (VisibleTextDelta(text="A2"),), (VisibleTextDelta(text="A3"),)))
