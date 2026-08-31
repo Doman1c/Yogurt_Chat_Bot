@@ -17,6 +17,9 @@ from yogurt_contracts.memory.causal import (
     MemoryReconciliationProof,
 )
 
+
+_OBSERVE_CAPABILITY_ID = "memory.observe"
+
 from .adapters import memory_v5_turn_correlation_key
 from .shadow import MemoryV5ShadowEndpoint
 
@@ -43,11 +46,21 @@ class MemoryV5ShadowReconciler:
     ) -> Optional[MemoryV5ShadowReconciliation]:
         if observation.logical_provider_domain != self._endpoint.logical_provider_domain:
             raise ValueError("CROSS_DOMAIN_UNCERTAINTY_REJECTED")
-        if not attempts or attempts[-1].dispatch_attempt.operation_id != observation.operation_id:
+        if not attempts:
             raise ValueError("MEMORY_DISPATCH_ATTEMPT_NOT_FOUND")
+        latest_attempt = attempts[-1]
+        if (
+            latest_attempt.logical_provider_domain != observation.logical_provider_domain
+            or latest_attempt.logical_provider_domain != self._endpoint.logical_provider_domain
+            or latest_attempt.provider_binding.capability_id.value != _OBSERVE_CAPABILITY_ID
+            or latest_attempt.dispatch_attempt.operation_id != observation.operation_id
+        ):
+            # Completion evidence is untrusted until the durable attempt proves
+            # that it was an observe call for this semantic observation/domain.
+            raise ValueError("MEMORY_DISPATCH_ATTEMPT_PROVENANCE_MISMATCH")
         return await asyncio.get_running_loop().run_in_executor(
             None,
-            lambda: self._read_completed_observation(observation, attempts[-1]),
+            lambda: self._read_completed_observation(observation, latest_attempt),
         )
 
     def _read_completed_observation(

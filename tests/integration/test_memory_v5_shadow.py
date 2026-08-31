@@ -23,6 +23,7 @@ from integrations.memory_v5 import (
     MemoryV5ShadowEndpoint, MemoryV5ShadowRecallFlow, ShadowAuditStream,
     MemoryV5ShadowReconciler, copy_isolated_memory_database, memory_v5_turn_correlation_key,
 )
+from integrations.memory_v5.adapters import _post_json
 from yogurt_contracts.capability.binding import CapabilityBinding
 from yogurt_contracts.conversation.refs import ConversationRef, TurnRef
 from yogurt_contracts.execution import CapabilityAuthorizationSnapshot, OperationAuthorizationSnapshot
@@ -107,7 +108,7 @@ def shadow_v5(tmp_path):
 
 
 def test_real_isolated_v5_observe_restart_idempotency_and_audit(shadow_v5, tmp_path) -> None:
-    endpoint, shadow_db, audit, source_db, protected_audit, _ = shadow_v5
+    endpoint, shadow_db, audit, source_db, protected_audit, process_six = shadow_v5
 
     async def run() -> None:
         semantic, intent = _semantic("observe"), _intent("observe", endpoint)
@@ -121,16 +122,58 @@ def test_real_isolated_v5_observe_restart_idempotency_and_audit(shadow_v5, tmp_p
         assert lane.operations[0].resolution == MemoryCausalResolution.APPLIED
         await store.release_authority(token)
         await store.close()
-        restarted = SQLiteCoreStateStore(tmp_path / "core.sqlite3")
-        token = await restarted.acquire_authority(CoreInstanceId(value="restarted"))
-        repeated = await MemoryObservationOperationCoordinator(restarted, OperationEngine(restarted)).execute(token, semantic, intent, provider)
-        assert repeated.durable_operation.state.value == "succeeded"
-        await restarted.release_authority(token)
 
     asyncio.run(run())
     with sqlite3.connect(shadow_db) as connection:
         assert connection.execute("SELECT COUNT(*) FROM memory_observe_requests WHERE operation = 'observe_user'").fetchone()[0] == 1
         assert connection.execute("SELECT idempotency_key FROM memory_observe_requests WHERE operation = 'observe_user'").fetchone()[0] == memory_v5_turn_correlation_key(_semantic("observe"))
+        before_state_version = connection.execute(
+            "SELECT state_version FROM conversation_states WHERE user_id = ? AND conversation_key = ?",
+            ("persona:shadow-user", "r3c-shadow:" + _semantic("observe").scope_ref.scope_id.value),
+        ).fetchone()[0]
+    process_six.stop()
+    endpoint_seven = MemoryV5ShadowEndpoint(
+        base_url="http://127.0.0.1:" + str(IsolatedMemoryV5Process.unused_local_port()),
+        logical_provider_domain=endpoint.logical_provider_domain,
+        runtime_instance_id=RuntimeInstanceId(value="shadow-runtime-7"),
+        runtime_generation=7,
+        audit=audit,
+    )
+    process_seven = IsolatedMemoryV5Process(endpoint_seven, shadow_db, SOCIAL_SRC)
+    process_seven.start()
+    try:
+        async def retry_directly_against_generation_seven() -> None:
+            semantic = _semantic("observe")
+            payload = {
+                "persona_id": semantic.observation.conversation_ref.persona_id.value,
+                "user_id": semantic.observation.conversation_ref.user_id.value,
+                "surface": "r3c-shadow",
+                "conversation_key": semantic.scope_ref.scope_id.value,
+                "phase": "user",
+                "user_message": semantic.observation.content,
+                "idempotency_key": memory_v5_turn_correlation_key(semantic),
+            }
+            status, body = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: _post_json(endpoint_seven.base_url, "/v1/memory/observe", payload, 0.8),
+            )
+            assert status == 200 and body is not None
+            assert body["ok"] is True and body["idempotent"] is True
+
+        asyncio.run(retry_directly_against_generation_seven())
+    finally:
+        process_seven.stop()
+    with sqlite3.connect(shadow_db) as connection:
+        request = connection.execute(
+            "SELECT status, result_json FROM memory_observe_requests WHERE operation = 'observe_user'"
+        ).fetchone()
+        after_state_version = connection.execute(
+            "SELECT state_version FROM conversation_states WHERE user_id = ? AND conversation_key = ?",
+            ("persona:shadow-user", "r3c-shadow:" + _semantic("observe").scope_ref.scope_id.value),
+        ).fetchone()[0]
+        assert connection.execute("SELECT COUNT(*) FROM memory_observe_requests WHERE operation = 'observe_user'").fetchone()[0] == 1
+    assert request[0] == "completed" and json.loads(request[1])["ok"] is True
+    assert after_state_version == before_state_version
     assert source_db != shadow_db and protected_audit.read_text(encoding="utf-8") == "protected-audit\n"
     assert "gpu=RTX 4080" not in audit.path.read_text(encoding="utf-8")
 
@@ -280,14 +323,32 @@ def test_real_same_domain_restart_reconciler_uses_v5_completion_state(shadow_v5,
             store = SQLiteCoreStateStore(tmp_path / "core.sqlite3")
             token = await store.acquire_authority(CoreInstanceId(value="restarted"))
             reconciler = MemoryV5ShadowReconciler(endpoint_seven, shadow_db)
-            evidence = await reconciler.reconcile(semantic, await store.get_memory_dispatch_attempts(semantic.operation_id))
+            attempts = await store.get_memory_dispatch_attempts(semantic.operation_id)
+            latest = attempts[-1]
+            invalid_attempts = (
+                latest.model_copy(update={"logical_provider_domain": "other-domain"}),
+                latest.model_copy(update={
+                    "provider_binding": latest.provider_binding.model_copy(update={
+                        "capability_id": CapabilityId(value="not-memory-observe"),
+                    }),
+                }),
+                latest.model_copy(update={
+                    "dispatch_attempt": latest.dispatch_attempt.model_copy(update={
+                        "operation_id": OperationId(value="wrong-operation"),
+                    }),
+                }),
+            )
+            for invalid in invalid_attempts:
+                with pytest.raises(ValueError, match="PROVENANCE_MISMATCH"):
+                    await reconciler.reconcile(semantic, (invalid,))
+            evidence = await reconciler.reconcile(semantic, attempts)
             assert evidence is not None and evidence.resolution == MemoryCausalResolution.APPLIED
             assert evidence.proof.runtime_generation == 7
             reconciled = await store.reconcile_memory_observation(token, semantic, evidence.resolution, evidence.proof)
             assert reconciled.value is not None and reconciled.value.operations[0].resolution == MemoryCausalResolution.APPLIED
             other = MemoryV5ShadowEndpoint(base_url="http://127.0.0.1:" + str(IsolatedMemoryV5Process.unused_local_port()), logical_provider_domain="other-domain", runtime_instance_id=RuntimeInstanceId(value="other-runtime"), runtime_generation=7, audit=audit)
             with pytest.raises(ValueError, match="CROSS_DOMAIN"):
-                await MemoryV5ShadowReconciler(other, shadow_db).reconcile(semantic, await store.get_memory_dispatch_attempts(semantic.operation_id))
+                await MemoryV5ShadowReconciler(other, shadow_db).reconcile(semantic, attempts)
             await store.release_authority(token)
 
         asyncio.run(reconcile())
