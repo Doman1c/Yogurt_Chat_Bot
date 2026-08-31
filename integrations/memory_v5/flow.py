@@ -74,6 +74,7 @@ class MemoryV5ShadowRecallFlow:
         eligibility = memory_v5_recall_precondition(snapshot, current_observation)
         result = await self._dispatcher.recall(query, binding, authorization, now, eligibility)
         evidence = result.evidence
+        stage = "provider" if result.eligibility == RecallEligibility.ELIGIBLE and evidence is not None else "final"
         self._audit.record_recall(
             scope_reference=query.memory_conversation_scope_ref.scope_id.value,
             logical_provider_domain=binding.logical_provider_id,
@@ -85,6 +86,7 @@ class MemoryV5ShadowRecallFlow:
             candidate_count=0 if evidence is None else len(evidence.candidates),
             self_recall_filtered_count=0,
             latency_ms=int((time.monotonic() - started) * 1000),
+            stage=stage,
         )
         return result
 
@@ -112,6 +114,7 @@ class MemoryV5ShadowRecallFlow:
             candidate_count=0 if result.evidence is None else len(result.evidence.candidates),
             self_recall_filtered_count=filtered,
             latency_ms=0,
+            stage="final",
         )
 
 

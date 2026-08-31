@@ -126,6 +126,7 @@ class ShadowAuditStream:
         candidate_count: int,
         self_recall_filtered_count: int,
         latency_ms: int,
+        stage: str,
     ) -> None:
         self.append("memory_recall", {
             "scope_hash": _scope_hash(scope_reference),
@@ -138,6 +139,7 @@ class ShadowAuditStream:
             "candidate_count": candidate_count,
             "self_recall_filtered_count": self_recall_filtered_count,
             "latency_ms": latency_ms,
+            "stage": stage,
         })
 
 

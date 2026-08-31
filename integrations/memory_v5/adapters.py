@@ -43,6 +43,14 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def memory_v5_turn_correlation_key(observation: MemoryObservationOperation) -> str:
+    """The one V5 key shared by user-observe idempotency and later recall."""
+
+    return "r3c-v5-turn-" + _digest(
+        observation.operation_id.value + ":" + observation.observation_fingerprint.value
+    )
+
+
 def _post_json(base_url: str, path: str, payload: Dict[str, Any], timeout_seconds: float) -> Tuple[int, Optional[Dict[str, Any]]]:
     request = Request(
         base_url + path,
@@ -85,6 +93,7 @@ class MemoryV5RecallAdapter:
         self,
         endpoint: MemoryV5ShadowEndpoint,
         binding: MemoryRecallBindingSnapshot,
+        current_observation: MemoryObservationOperation,
         timeout_seconds: float = 0.8,
     ) -> None:
         if (
@@ -94,8 +103,11 @@ class MemoryV5RecallAdapter:
             or binding.capability_id.value != MEMORY_RECALL_CAPABILITY_ID
         ):
             raise ValueError("Memory V5 recall binding must match its isolated runtime")
+        if current_observation.logical_provider_domain != endpoint.logical_provider_domain:
+            raise ValueError("Memory V5 recall observation must match isolated runtime domain")
         self._endpoint = endpoint
         self._binding = binding
+        self._current_observation = current_observation
         self._timeout_seconds = timeout_seconds
 
     async def capability_state(self) -> MemoryRecallCapabilityState:
@@ -116,9 +128,17 @@ class MemoryV5RecallAdapter:
         authorization: CapabilityAuthorizationSnapshot,
     ) -> MemoryRecallProviderResult:
         del authorization
-        if binding != self._binding:
+        if (
+            binding != self._binding
+            or query.current_input_fingerprint != self._current_observation.observation_fingerprint
+            or query.turn_id != self._current_observation.observation.turn_ref.turn_id
+            or query.memory_conversation_scope_ref != self._current_observation.scope_ref
+        ):
             return MemoryRecallProviderResult(call_outcome=MemoryRecallCallOutcome.UNAVAILABLE)
-        started = time.monotonic()
+        remaining_seconds = (query.deadline.expires_at.value - datetime.now(timezone.utc)).total_seconds()
+        if remaining_seconds <= 0:
+            return MemoryRecallProviderResult(call_outcome=MemoryRecallCallOutcome.DEADLINE_EXCEEDED)
+        timeout_seconds = min(self._timeout_seconds, remaining_seconds)
         payload = {
             "persona_id": query.conversation_ref.persona_id.value,
             "user_id": query.conversation_ref.user_id.value,
@@ -127,17 +147,16 @@ class MemoryV5RecallAdapter:
             "message": query.normalized_user_message,
             "max_tokens": query.token_budget,
             "max_items": query.max_items,
-            "turn_id": "r3c-recall-" + _digest(query.recall_query_id.value)[:32],
+            "turn_id": memory_v5_turn_correlation_key(self._current_observation),
         }
         status, body = await _in_executor(
-            lambda: _post_json(self._endpoint.base_url, "/v1/memory/recall", payload, self._timeout_seconds)
+            lambda: _post_json(self._endpoint.base_url, "/v1/memory/recall", payload, timeout_seconds)
         )
-        latency_ms = int((time.monotonic() - started) * 1000)
         if status == 0:
-            self._audit_recall(query, None, None, 0, latency_ms)
+            if datetime.now(timezone.utc) >= query.deadline.expires_at.value:
+                return MemoryRecallProviderResult(call_outcome=MemoryRecallCallOutcome.DEADLINE_EXCEEDED)
             return MemoryRecallProviderResult(call_outcome=MemoryRecallCallOutcome.UNAVAILABLE)
         if status != 200 or body is None:
-            self._audit_recall(query, MemoryRecallCallOutcome.INVALID_PROVIDER_RESPONSE, None, 0, latency_ms)
             return MemoryRecallProviderResult(call_outcome=MemoryRecallCallOutcome.INVALID_PROVIDER_RESPONSE)
         try:
             decision, candidates = self._translate_recall(body, query)
@@ -158,31 +177,8 @@ class MemoryV5RecallAdapter:
                 bounded_provider_metadata=(MemoryProviderMetadata(key="v5_mode", value=str(body.get("mode", "unknown"))),),
             )
         except (TypeError, ValueError):
-            self._audit_recall(query, MemoryRecallCallOutcome.INVALID_PROVIDER_RESPONSE, None, 0, latency_ms)
             return MemoryRecallProviderResult(call_outcome=MemoryRecallCallOutcome.INVALID_PROVIDER_RESPONSE)
-        self._audit_recall(query, MemoryRecallCallOutcome.SUCCESS, decision, len(candidates), latency_ms)
         return MemoryRecallProviderResult(call_outcome=MemoryRecallCallOutcome.SUCCESS, evidence=evidence)
-
-    def _audit_recall(
-        self,
-        query: MemoryRecallQuery,
-        outcome: Optional[MemoryRecallCallOutcome],
-        decision: Optional[MemoryRecallDecision],
-        candidate_count: int,
-        latency_ms: int,
-    ) -> None:
-        self._endpoint.audit.record_recall(
-            scope_reference=query.memory_conversation_scope_ref.scope_id.value,
-            logical_provider_domain=self._endpoint.logical_provider_domain,
-            binding_id=self._binding.binding_id.value,
-            runtime_generation=self._binding.runtime_generation,
-            recall_eligibility="eligible",
-            provider_call_outcome=None if outcome is None else outcome.value,
-            semantic_recall_decision=None if decision is None else decision.value,
-            candidate_count=candidate_count,
-            self_recall_filtered_count=0,
-            latency_ms=latency_ms,
-        )
 
     @staticmethod
     def _translate_recall(
@@ -193,8 +189,10 @@ class MemoryV5RecallAdapter:
             raw_memories = payload.get("memories")
             if not isinstance(raw_memories, list) or not raw_memories:
                 raise ValueError("allow recall requires memory candidates")
+            if len(raw_memories) > query.max_items:
+                raise ValueError("V5 returned more candidates than requested")
             candidates = []  # type: list[MemoryRecallCandidate]
-            for index, raw in enumerate(raw_memories[:query.max_items]):
+            for index, raw in enumerate(raw_memories):
                 if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
                     raise ValueError("invalid V5 memory candidate")
                 text = normalize_memory_text(raw["text"])
@@ -240,6 +238,15 @@ class MemoryV5ObservationProvider:
             self._observation.validate_durable_intent(intent)
         except ValueError:
             return ProviderDispatchResult(certainty=ProviderDispatchCertainty.DEFINITE_FAILURE)
+        binding = intent.provider_binding
+        if (
+            intent.operation.target_capability != _OBSERVE_CAPABILITY
+            or binding.capability_id != _OBSERVE_CAPABILITY
+            or binding.provider_instance_id != self._endpoint.runtime_instance_id
+            or binding.provider_generation != self._endpoint.runtime_generation
+            or self._observation.logical_provider_domain != self._endpoint.logical_provider_domain
+        ):
+            return ProviderDispatchResult(certainty=ProviderDispatchCertainty.DEFINITE_FAILURE)
         payload = {
             "persona_id": self._observation.observation.conversation_ref.persona_id.value,
             "user_id": self._observation.observation.conversation_ref.user_id.value,
@@ -247,9 +254,7 @@ class MemoryV5ObservationProvider:
             "conversation_key": self._observation.scope_ref.scope_id.value,
             "phase": "user",
             "user_message": self._observation.observation.content,
-            "idempotency_key": "r3c-observe-" + _digest(
-                self._observation.operation_id.value + ":" + self._observation.observation_fingerprint.value
-            ),
+            "idempotency_key": memory_v5_turn_correlation_key(self._observation),
         }
         status, body = await _in_executor(
             lambda: _post_json(self._endpoint.base_url, "/v1/memory/observe", payload, self._timeout_seconds)
@@ -258,6 +263,8 @@ class MemoryV5ObservationProvider:
             return ProviderDispatchResult(certainty=ProviderDispatchCertainty.OUTCOME_UNKNOWN)
         if status != 200 or body is None or body.get("ok") is not True:
             return ProviderDispatchResult(certainty=ProviderDispatchCertainty.DEFINITE_FAILURE)
+        if body.get("in_progress") is True:
+            return ProviderDispatchResult(certainty=ProviderDispatchCertainty.OUTCOME_UNKNOWN)
         return ProviderDispatchResult(
             certainty=ProviderDispatchCertainty.SUCCESS,
             provider_reference="v5-observe-" + _digest(self._observation.operation_id.value),

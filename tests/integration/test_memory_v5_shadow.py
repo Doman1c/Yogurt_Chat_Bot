@@ -21,7 +21,7 @@ from integrations.memory_v5 import (
     IsolatedMemoryV5Process, MemoryV5ObservationProvider, MemoryV5RecallAdapter,
     MemoryV5ShadowObservationFlow,
     MemoryV5ShadowEndpoint, MemoryV5ShadowRecallFlow, ShadowAuditStream,
-    copy_isolated_memory_database,
+    MemoryV5ShadowReconciler, copy_isolated_memory_database, memory_v5_turn_correlation_key,
 )
 from yogurt_contracts.capability.binding import CapabilityBinding
 from yogurt_contracts.conversation.refs import ConversationRef, TurnRef
@@ -37,13 +37,14 @@ from yogurt_contracts.foundation.versioning import ContractVersion
 from yogurt_contracts.identity.authority import AuthorityClaims, DelegatedAuthority
 from yogurt_contracts.memory.causal import MemoryCausalResolution, MemoryObservationOperation, MemoryReconciliationProof, memory_observation_fingerprint
 from yogurt_contracts.memory.observations import UserContentObservation
-from yogurt_contracts.memory.recall import MEMORY_RECALL_CAPABILITY_ID, MemoryRecallBindingSnapshot, MemoryRecallQuery, RecallEligibility, memory_conversation_scope_ref
+from yogurt_contracts.memory.recall import MEMORY_RECALL_CAPABILITY_ID, MemoryRecallBindingSnapshot, MemoryRecallCallOutcome, MemoryRecallQuery, RecallEligibility, memory_conversation_scope_ref
 from yogurt_contracts.operations.intent import LogicalOperation, OperationIntentCommitted
 from yogurt_contracts.operations.traits import CancellationSupport, EffectKind, IdempotencyKind, OperationTraits, ReversibilityKind
 from yogurt_core.memory.observation_operations import MemoryObservationOperationCoordinator
 from yogurt_core.memory.causal_lane import MemoryCausalLane
 from yogurt_core.memory.recall_policy import MemoryContextAdmissionStatus, MemoryRecallAdmissionPolicy, MemoryRecallDispatcher
 from yogurt_core.operations.engine import OperationEngine
+from yogurt_core.operations.models import ProviderDispatchCertainty
 from yogurt_core.ports.state_store import CoreStateError
 from yogurt_core_adapters.state_store_sqlite import SQLiteCoreStateStore
 
@@ -75,7 +76,8 @@ def _binding(endpoint: MemoryV5ShadowEndpoint) -> MemoryRecallBindingSnapshot:
 
 
 def _query(semantic: MemoryObservationOperation) -> MemoryRecallQuery:
-    return MemoryRecallQuery(recall_query_id=MemoryRecallQueryId(value="query-" + semantic.operation_id.value), conversation_ref=CONVERSATION, turn_id=semantic.observation.turn_ref.turn_id, memory_conversation_scope_ref=semantic.scope_ref, normalized_user_message=semantic.observation.content, current_input_fingerprint=semantic.observation_fingerprint, max_items=3, token_budget=64, deadline=Deadline(expires_at=FUTURE), query_fingerprint=RequestFingerprint(value="query-fingerprint-" + semantic.operation_id.value))
+    deadline = UtcInstant(value=datetime.now(timezone.utc) + timedelta(minutes=5))
+    return MemoryRecallQuery(recall_query_id=MemoryRecallQueryId(value="query-" + semantic.operation_id.value), conversation_ref=CONVERSATION, turn_id=semantic.observation.turn_ref.turn_id, memory_conversation_scope_ref=semantic.scope_ref, normalized_user_message=semantic.observation.content, current_input_fingerprint=semantic.observation_fingerprint, max_items=3, token_budget=64, deadline=Deadline(expires_at=deadline), query_fingerprint=RequestFingerprint(value="query-fingerprint-" + semantic.operation_id.value))
 
 
 def _authorization(binding: MemoryRecallBindingSnapshot) -> CapabilityAuthorizationSnapshot:
@@ -97,7 +99,7 @@ def shadow_v5(tmp_path):
     process = IsolatedMemoryV5Process(endpoint, shadow_db, SOCIAL_SRC)
     process.start()
     try:
-        yield endpoint, shadow_db, audit, source_db, protected_audit
+        yield endpoint, shadow_db, audit, source_db, protected_audit, process
     finally:
         process.stop()
         assert _sha(source_db) == source_hash
@@ -105,7 +107,7 @@ def shadow_v5(tmp_path):
 
 
 def test_real_isolated_v5_observe_restart_idempotency_and_audit(shadow_v5, tmp_path) -> None:
-    endpoint, shadow_db, audit, source_db, protected_audit = shadow_v5
+    endpoint, shadow_db, audit, source_db, protected_audit, _ = shadow_v5
 
     async def run() -> None:
         semantic, intent = _semantic("observe"), _intent("observe", endpoint)
@@ -128,12 +130,13 @@ def test_real_isolated_v5_observe_restart_idempotency_and_audit(shadow_v5, tmp_p
     asyncio.run(run())
     with sqlite3.connect(shadow_db) as connection:
         assert connection.execute("SELECT COUNT(*) FROM memory_observe_requests WHERE operation = 'observe_user'").fetchone()[0] == 1
+        assert connection.execute("SELECT idempotency_key FROM memory_observe_requests WHERE operation = 'observe_user'").fetchone()[0] == memory_v5_turn_correlation_key(_semantic("observe"))
     assert source_db != shadow_db and protected_audit.read_text(encoding="utf-8") == "protected-audit\n"
     assert "gpu=RTX 4080" not in audit.path.read_text(encoding="utf-8")
 
 
 def test_real_v5_recall_requires_causal_apply_and_filters_current_content(shadow_v5, tmp_path) -> None:
-    endpoint, _, audit, _, _ = shadow_v5
+    endpoint, shadow_db, audit, _, _, _ = shadow_v5
 
     async def run() -> None:
         semantic, intent = _semantic("recall"), _intent("recall", endpoint)
@@ -141,7 +144,12 @@ def test_real_v5_recall_requires_causal_apply_and_filters_current_content(shadow
         token = await store.acquire_authority(CoreInstanceId(value="core"))
         await MemoryObservationOperationCoordinator(store, OperationEngine(store)).execute(token, semantic, intent, MemoryV5ObservationProvider(endpoint, semantic))
         binding, query = _binding(endpoint), _query(semantic)
-        flow = MemoryV5ShadowRecallFlow(MemoryRecallDispatcher(MemoryV5RecallAdapter(endpoint, binding)), audit)
+        flow = MemoryV5ShadowRecallFlow(MemoryRecallDispatcher(MemoryV5RecallAdapter(endpoint, binding, semantic)), audit)
+        with sqlite3.connect(shadow_db) as connection:
+            before_state_version = connection.execute(
+                "SELECT state_version FROM conversation_states WHERE user_id = ? AND conversation_key = ?",
+                ("persona:shadow-user", "r3c-shadow:" + semantic.scope_ref.scope_id.value),
+            ).fetchone()[0]
         result = await flow.recall(query, binding, _authorization(binding), NOW, await store.get_memory_causal_lane(semantic), semantic)
         assert result.eligibility == RecallEligibility.ELIGIBLE and result.evidence is not None
         current_candidate = result.evidence.candidates[0].model_copy(update={"source_turn_id": query.turn_id})
@@ -150,6 +158,12 @@ def test_real_v5_recall_requires_causal_apply_and_filters_current_content(shadow
         assert admission.status == MemoryContextAdmissionStatus.FILTERED_EMPTY
         assert admission.reason.value == "self_recall_filtered_empty"
         flow.record_admission(query, binding, result, admission)
+        with sqlite3.connect(shadow_db) as connection:
+            after_state_version = connection.execute(
+                "SELECT state_version FROM conversation_states WHERE user_id = ? AND conversation_key = ?",
+                ("persona:shadow-user", "r3c-shadow:" + semantic.scope_ref.scope_id.value),
+            ).fetchone()[0]
+        assert before_state_version == after_state_version
         pending = _semantic("pending")
         await store.commit_memory_observation_intent(token, pending, _intent("pending", endpoint))
         blocked = await flow.recall(_query(pending), binding, _authorization(binding), NOW, await store.get_memory_causal_lane(pending), pending)
@@ -166,6 +180,8 @@ def test_real_v5_recall_requires_causal_apply_and_filters_current_content(shadow
     assert any(item["event_type"] == "memory_recall" and item["recall_eligibility"] == "eligible" for item in events)
     assert any(item["recall_eligibility"] == "prior_causal_observation_pending" for item in events)
     assert any(item["self_recall_filtered_count"] == 1 for item in events)
+    assert any(item["stage"] == "provider" for item in events)
+    assert any(item["stage"] == "final" and item["self_recall_filtered_count"] == 1 for item in events)
 
 
 def test_transport_uncertainty_blocks_lane_and_proof_rejects_cross_domain(tmp_path) -> None:
@@ -185,5 +201,118 @@ def test_transport_uncertainty_blocks_lane_and_proof_rejects_cross_domain(tmp_pa
             await store.reconcile_memory_observation(token, first, MemoryCausalResolution.APPLIED, proof.model_copy(update={"logical_provider_domain": "other-domain"}))
         await store.reconcile_memory_observation(token, first, MemoryCausalResolution.APPLIED, proof)
         await store.release_authority(token)
+
+    asyncio.run(run())
+
+
+def test_observation_runtime_binding_mismatch_is_definite_and_never_calls_v5(shadow_v5) -> None:
+    endpoint, shadow_db, _, _, _, _ = shadow_v5
+
+    async def run() -> None:
+        semantic, intent = _semantic("binding-mismatch"), _intent("binding-mismatch", endpoint)
+        provider = MemoryV5ObservationProvider(endpoint, semantic)
+        for update in (
+            {"provider_generation": endpoint.runtime_generation + 1},
+            {"provider_instance_id": RuntimeInstanceId(value="wrong-runtime")},
+        ):
+            mismatched = intent.model_copy(update={"provider_binding": intent.provider_binding.model_copy(update=update)})
+            result = await provider.dispatch(mismatched)
+            assert result.certainty == ProviderDispatchCertainty.DEFINITE_FAILURE
+
+    with sqlite3.connect(shadow_db) as connection:
+        before = connection.execute("SELECT COUNT(*) FROM memory_observe_requests").fetchone()[0]
+    asyncio.run(run())
+    with sqlite3.connect(shadow_db) as connection:
+        after = connection.execute("SELECT COUNT(*) FROM memory_observe_requests").fetchone()[0]
+    assert before == after
+
+
+def test_v5_processing_idempotency_row_maps_to_unknown_and_unresolved(shadow_v5, tmp_path) -> None:
+    endpoint, shadow_db, _, _, _, _ = shadow_v5
+    semantic, intent = _semantic("processing"), _intent("processing", endpoint)
+    with sqlite3.connect(shadow_db) as connection:
+        connection.execute(
+            "INSERT INTO memory_observe_requests(idempotency_key, operation, canonical_user_id, conversation_key, result_json, status, created_at) VALUES (?, 'observe_user', ?, ?, '{}', 'processing', '2026-08-31T00:00:00+00:00')",
+            (memory_v5_turn_correlation_key(semantic), "persona:shadow-user", "r3c-shadow:" + semantic.scope_ref.scope_id.value),
+        )
+        connection.commit()
+
+    async def run() -> None:
+        store = SQLiteCoreStateStore(tmp_path / "core.sqlite3")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        result = await MemoryObservationOperationCoordinator(store, OperationEngine(store)).execute(token, semantic, intent, MemoryV5ObservationProvider(endpoint, semantic))
+        lane = await store.get_memory_causal_lane(semantic)
+        assert result.durable_operation.state.value == "outcome_unknown"
+        assert lane.operations[0].resolution == MemoryCausalResolution.UNRESOLVED
+        await store.release_authority(token)
+
+    asyncio.run(run())
+
+
+def test_real_same_domain_restart_reconciler_uses_v5_completion_state(shadow_v5, tmp_path) -> None:
+    endpoint_six, shadow_db, audit, _, _, process_six = shadow_v5
+
+    async def prepare_unknown() -> None:
+        semantic, intent = _semantic("reconcile"), _intent("reconcile", endpoint_six)
+        store = SQLiteCoreStateStore(tmp_path / "core.sqlite3")
+        token = await store.acquire_authority(CoreInstanceId(value="core"))
+        await store.commit_memory_observation_intent(token, semantic, intent)
+        await store.commit_memory_dispatch_attempt(token, semantic, intent)
+        operation = await store.get_operation(semantic.operation_id)
+        attempted = await store.mark_dispatch_attempted(token, semantic.operation_id, operation.revision)
+        assert attempted.value is not None
+        result = await MemoryV5ObservationProvider(endpoint_six, semantic).dispatch(intent)
+        assert result.certainty == ProviderDispatchCertainty.SUCCESS
+        unknown = await store.mark_outcome_unknown(token, semantic.operation_id, attempted.value.revision)
+        assert unknown.value is not None
+        await store.project_memory_operation_outcome(token, semantic)
+        await store.release_authority(token)
+        await store.close()
+
+    asyncio.run(prepare_unknown())
+    process_six.stop()
+    endpoint_seven = MemoryV5ShadowEndpoint(base_url="http://127.0.0.1:" + str(IsolatedMemoryV5Process.unused_local_port()), logical_provider_domain="memory-v5-shadow", runtime_instance_id=RuntimeInstanceId(value="shadow-runtime-7"), runtime_generation=7, audit=audit)
+    process_seven = IsolatedMemoryV5Process(endpoint_seven, shadow_db, SOCIAL_SRC)
+    process_seven.start()
+    try:
+        async def reconcile() -> None:
+            semantic = _semantic("reconcile")
+            store = SQLiteCoreStateStore(tmp_path / "core.sqlite3")
+            token = await store.acquire_authority(CoreInstanceId(value="restarted"))
+            reconciler = MemoryV5ShadowReconciler(endpoint_seven, shadow_db)
+            evidence = await reconciler.reconcile(semantic, await store.get_memory_dispatch_attempts(semantic.operation_id))
+            assert evidence is not None and evidence.resolution == MemoryCausalResolution.APPLIED
+            assert evidence.proof.runtime_generation == 7
+            reconciled = await store.reconcile_memory_observation(token, semantic, evidence.resolution, evidence.proof)
+            assert reconciled.value is not None and reconciled.value.operations[0].resolution == MemoryCausalResolution.APPLIED
+            other = MemoryV5ShadowEndpoint(base_url="http://127.0.0.1:" + str(IsolatedMemoryV5Process.unused_local_port()), logical_provider_domain="other-domain", runtime_instance_id=RuntimeInstanceId(value="other-runtime"), runtime_generation=7, audit=audit)
+            with pytest.raises(ValueError, match="CROSS_DOMAIN"):
+                await MemoryV5ShadowReconciler(other, shadow_db).reconcile(semantic, await store.get_memory_dispatch_attempts(semantic.operation_id))
+            await store.release_authority(token)
+
+        asyncio.run(reconcile())
+    finally:
+        process_seven.stop()
+
+
+def test_recall_over_return_and_elapsed_deadline_are_typed_failures(shadow_v5) -> None:
+    endpoint, _, _, _, _, _ = shadow_v5
+    semantic, binding = _semantic("recall-contract"), _binding(endpoint)
+    adapter = MemoryV5RecallAdapter(endpoint, binding, semantic)
+    query = _query(semantic).model_copy(update={"max_items": 1})
+    over_return = {
+        "decision": "allow",
+        "memories": [
+            {"text": "one", "kind": "memory", "source_id": "one", "score": 0.8},
+            {"text": "two", "kind": "memory", "source_id": "two", "score": 0.7},
+        ],
+    }
+    with pytest.raises(ValueError, match="more candidates"):
+        adapter._translate_recall(over_return, query)
+
+    async def run() -> None:
+        expired = query.model_copy(update={"deadline": Deadline(expires_at=UtcInstant(value=datetime.now(timezone.utc) - timedelta(seconds=1)))})
+        result = await adapter.recall(expired, binding, _authorization(binding))
+        assert result.call_outcome == MemoryRecallCallOutcome.DEADLINE_EXCEEDED
 
     asyncio.run(run())
