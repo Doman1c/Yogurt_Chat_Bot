@@ -25,7 +25,7 @@ else:
     import fcntl
 
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
-from yogurt_contracts.conversation.input import TurnInput
+from yogurt_contracts.conversation.input import TextInputPart, TurnInput
 from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState, validate_turn_transition
 from yogurt_contracts.conversation.refs import ConversationRef, TurnRef
 from yogurt_contracts.execution import ExecutionAttemptSnapshot
@@ -44,6 +44,7 @@ from yogurt_contracts.operations.attempts import DispatchAttempt
 
 from yogurt_core.application.results import AdmissionResponseState, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.context.models import ContextEntry, ContextRole
+from yogurt_core.context.working_state import WorkingStateTurnSource
 from yogurt_core.model.execution import StoredResponse, StoredTurn
 from yogurt_core.ports.state_store import CoreStateError, StateCommit
 from yogurt_core.operations.models import DurableOperationState, NotDispatchedReason, StoredOperation
@@ -275,6 +276,61 @@ class SQLiteCoreStateStore:
         async with self._lock:
             row = self._read_one("SELECT payload FROM turns WHERE turn_key = ?", (_turn_key(conversation_ref, turn_id),), "TURN_NOT_FOUND")
             return self._decode_turn(_load_json(str(row["payload"])))
+
+    async def working_state_sources(
+        self, conversation_ref: ConversationRef, through_turn_ref: Optional[TurnRef],
+    ) -> Tuple[WorkingStateTurnSource, ...]:
+        """Read committed facts at one conversation admission boundary.
+
+        The ledger's append order defines admission order; physical row numbers
+        never become revisions/IDs. Stop BEFORE the next conversation admission,
+        including for late response facts. No WorkingState materialization exists.
+        While the boundary is the last admitted turn, its lifecycle may progress.
+        """
+        async with self._lock:
+            self._require_serving()
+            if through_turn_ref is not None and through_turn_ref.conversation_id != conversation_ref.conversation_id:
+                raise CoreStateError("WORKING_STATE_BOUNDARY_MISMATCH")
+            turns: Dict[str, StoredTurn] = {}
+            finalized: Set[str] = set()
+            found_boundary = False
+            found_conversation = False
+            rows = self._connection.execute(
+                "SELECT fact_type, payload FROM facts WHERE fact_type IN "
+                "('conversation_created', 'turn_input_committed', 'turn_processing', 'response_finalized') ORDER BY rowid"
+            )
+            for row in rows:
+                payload = _load_json(str(row["payload"]))
+                fact_type = str(row["fact_type"])
+                if fact_type == "conversation_created":
+                    if ConversationRef.model_validate(payload["conversation"]) == conversation_ref:
+                        found_conversation = True
+                elif fact_type in {"turn_input_committed", "turn_processing"}:
+                    turn = self._decode_turn(payload["turn"])
+                    if turn.conversation_ref != conversation_ref:
+                        continue
+                    if fact_type == "turn_input_committed":
+                        if through_turn_ref is None:
+                            raise CoreStateError("WORKING_STATE_BOUNDARY_REQUIRED")
+                        if found_boundary:
+                            break
+                        turns[turn.turn_ref.turn_id.value] = turn
+                        found_boundary = turn.turn_ref == through_turn_ref
+                    elif turn.turn_ref.turn_id.value in turns:
+                        turns[turn.turn_ref.turn_id.value] = turn
+                else:
+                    response = self._decode_response(payload["response"])
+                    if response.state == ResponseState.FINALIZED:
+                        finalized.add(response.response_id.value)
+            if not found_conversation:
+                raise CoreStateError("CONVERSATION_NOT_FOUND")
+            if through_turn_ref is not None and not found_boundary:
+                raise CoreStateError("WORKING_STATE_BOUNDARY_NOT_FOUND")
+            return tuple(WorkingStateTurnSource(
+                turn_ref=turn.turn_ref,
+                text="\n".join(part.text for part in turn.turn_input.parts if isinstance(part, TextInputPart)),
+                primary_response_finalized=turn.response_id is not None and turn.response_id.value in finalized,
+            ) for turn in turns.values())
 
     async def get_response(self, response_id: ResponseId) -> StoredResponse:
         async with self._lock:
