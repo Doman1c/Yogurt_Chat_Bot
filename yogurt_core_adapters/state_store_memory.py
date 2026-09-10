@@ -101,6 +101,16 @@ class InMemoryCoreStateStore:
                 raise CoreStateError("CONVERSATION_CONFLICT")
             self._conversations[key] = conversation_ref
 
+    async def list_conversations(self, user_id: UserId) -> Tuple[ConversationRef, ...]:
+        async with self._condition:
+            return tuple(ref for ref in self._conversations.values() if ref.user_id == user_id)
+
+    async def conversation_turns(self, conversation_ref: ConversationRef, user_id: UserId) -> Tuple[StoredTurn, ...]:
+        if not await self.validate_conversation_owner(conversation_ref, user_id):
+            raise CoreStateError("READ_NOT_AUTHORIZED")
+        async with self._condition:
+            return tuple(turn for turn in self._turns.values() if turn.conversation_ref == conversation_ref)
+
     async def resolve_conversation(self, conversation_ref: ConversationRef) -> ConversationRef:
         async with self._condition:
             found = self._conversations.get(_conversation_key(conversation_ref))

@@ -3,7 +3,7 @@
 import uuid
 import asyncio
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional, TypeVar
+from typing import AsyncIterator, Optional, Tuple, TypeVar
 
 from yogurt_contracts.conversation.fingerprint import turn_fingerprint
 from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
@@ -19,16 +19,18 @@ from yogurt_contracts.response.models import AgentOutputSegmentCommitted
 from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
 from yogurt_contracts.foundation.durability import CorePersistenceMode
 
-from yogurt_core.application.commands import CancelTurnCommand, GetResponseCommand, GetTurnCommand, SubmitTurnCommand, WatchResponseCommand
+from yogurt_core.application.commands import CallerContext, CancelTurnCommand, GetResponseCommand, GetTurnCommand, SubmitTurnCommand, WatchResponseCommand
 from yogurt_core.application.results import CancelTurnResult, CancelTurnStatus, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.authority.conversation_authority import ConversationAuthority
 from yogurt_core.context.policy import ContextBudgetPolicy
 from yogurt_core.context.projection import ContextProjectionService
 from yogurt_core.model.events import AttemptTerminal, AttemptTerminalKind, VisibleTextDelta
-from yogurt_core.model.execution import StoredResponse, StoredTurn
+from yogurt_core.model.execution import ModelContext, StoredResponse, StoredTurn
 from yogurt_core.lifecycle import CoreLifecycleState
 from yogurt_core.ports.identity import IdentityResolver
 from yogurt_core.ports.model import ModelPort
+from yogurt_core.ports.telemetry import TurnObserver
+from yogurt_core.model.events import ModelDraftEvent
 from yogurt_core.ports.persona import PersonaSnapshotPort
 from yogurt_core.ports.state_store import CoreStateError, CoreStateStore, StateCommit
 from yogurt_core.response.terminal import consequence_from_response_terminal
@@ -47,7 +49,9 @@ class YogurtCore:
         core_instance_id: CoreInstanceId,
         context_policy: Optional[ContextBudgetPolicy] = None,
         scheduler: Optional[ConversationScheduler] = None,
+        observer: Optional[TurnObserver] = None,
     ) -> None:
+        self._observer = observer
         self._store = store
         self._identity_resolver = identity_resolver
         self._persona_snapshots = persona_snapshots
@@ -118,11 +122,13 @@ class YogurtCore:
             principal_binding_reference=command.principal_binding_reference,
             persona_snapshot=persona,
         )
+        self._checkpoint(command.conversation_ref, command.turn_id, "core_admission_started")
         commit = await self._store.try_admit_turn_commit(
             token, command.conversation_ref, command.turn_id, expected_fingerprint, snapshot, command.input
         )
         result = self._commit_value(commit)
         if result.status == TurnAdmissionStatus.NEWLY_ADMITTED:
+            self._checkpoint(command.conversation_ref, command.turn_id, "core_admitted")
             self._scheduler.schedule(self._scheduler_key(command.conversation_ref, command.turn_id), self._run_turn(command.conversation_ref, command.turn_id))
         return result
 
@@ -158,6 +164,10 @@ class YogurtCore:
     async def get_response(self, command: GetResponseCommand) -> StoredResponse:
         return await self._store.get_authorized_response(command.response_id, command.caller_context.logical_user_id)
 
+    async def response_conversation(self, command: GetResponseCommand) -> ConversationRef:
+        await self.get_response(command)
+        return (await self._store.get_turn_by_response(command.response_id)).conversation_ref
+
     async def watch_response(self, command: WatchResponseCommand) -> AsyncIterator[ResponseEvent]:
         await self._store.get_authorized_response(command.response_id, command.caller_context.logical_user_id)
         async for event in self._store.watch_response_events(command.response_id, command.after_event_sequence):
@@ -173,6 +183,8 @@ class YogurtCore:
             turn = await self._store.get_turn(conversation_ref, turn_id)
             response_id = ResponseId(value="response-" + uuid.uuid4().hex)
             response = await self._store.commit_response_started(token, conversation_ref, turn.turn_ref.turn_id, response_id)
+            # Yield after durable response creation so ingress can return acceptance.
+            await asyncio.sleep(0)
             projection = await self._projection.project(turn)
             context = self._context_policy.compose(projection, turn)
             saw_committed_prefix = False
@@ -186,7 +198,7 @@ class YogurtCore:
                 )
                 response = await self._store.add_execution_attempt(token, response_id, attempt)
                 terminal = AttemptTerminal(kind=AttemptTerminalKind.SUCCEEDED)
-                async for draft in self._model.run(context, attempt):
+                async for draft in self._observed_model(conversation_ref, turn_id, context, attempt):
                     if isinstance(draft, VisibleTextDelta):
                         text = draft.text.strip()
                         if not text:
@@ -226,6 +238,42 @@ class YogurtCore:
                 raise original_error from cleanup_error
             raise
 
+        finally:
+            # Read the authoritative terminal fact, never infer terminal from transport.
+            if response is not None and self._observer is not None:
+                try:
+                    latest = await self._store.get_response(response.response_id)
+                    if latest.state in {ResponseState.FINALIZED, ResponseState.ABORTED}:
+                        self._checkpoint(conversation_ref, turn_id, "response_terminal")
+                except Exception:
+                    pass
+
+    def _checkpoint(self, ref: ConversationRef, turn_id: TurnId, name: str) -> None:
+        if self._observer is not None:
+            try:
+                self._observer.checkpoint(ref, turn_id, name)
+            except Exception:
+                pass  # Telemetry never changes admission/execution outcomes.
+
+    async def _observed_model(self, ref: ConversationRef, turn_id: TurnId,
+                              context: ModelContext, attempt: ExecutionAttemptSnapshot) -> AsyncIterator[ModelDraftEvent]:
+        self._checkpoint(ref, turn_id, "model_started")
+        try:
+            async for event in self._model.run(context, attempt):
+                if isinstance(event, VisibleTextDelta):
+                    self._checkpoint(ref, turn_id, "first_model_output")
+                yield event
+        finally:
+            self._checkpoint(ref, turn_id, "model_finished")
+
+    async def list_conversations(self, caller: "CallerContext") -> Tuple[ConversationRef, ...]:
+        self._require_serving()
+        return await self._store.list_conversations(caller.logical_user_id)
+
+    async def conversation_turns(self, ref: ConversationRef, caller: "CallerContext") -> Tuple[StoredTurn, ...]:
+        self._require_serving()
+        return await self._store.conversation_turns(ref, caller.logical_user_id)
+
     async def _converge_execution_failure(
         self, conversation_ref: ConversationRef, turn_id: TurnId, response: Optional[StoredResponse]
     ) -> None:
@@ -247,6 +295,7 @@ class YogurtCore:
     async def _converge_turn_from_response_terminal(
         self, conversation_ref: ConversationRef, turn_id: TurnId, response: StoredResponse
     ) -> None:
+        self._checkpoint(conversation_ref, turn_id, "response_terminal")
         consequence = consequence_from_response_terminal(response.state, response.abort_reason)
         turn = await self._store.get_turn(conversation_ref, turn_id)
         if turn.state in {TurnState.COMPLETED, TurnState.CANCELLED, TurnState.ABORTED}:
