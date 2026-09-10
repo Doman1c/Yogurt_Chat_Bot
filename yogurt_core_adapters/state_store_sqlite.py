@@ -227,6 +227,24 @@ class SQLiteCoreStateStore:
 
             self._write(write)
 
+    async def list_conversations(self, user_id: UserId) -> Tuple[ConversationRef, ...]:
+        async with self._lock:
+            self._require_serving()
+            refs = tuple(ConversationRef.model_validate(_load_json(str(row["payload"])))
+                         for row in self._connection.execute("SELECT payload FROM conversations ORDER BY rowid"))
+            return tuple(ref for ref in refs if ref.user_id == user_id)
+
+    async def conversation_turns(self, conversation_ref: ConversationRef, user_id: UserId) -> Tuple[StoredTurn, ...]:
+        async with self._lock:
+            self._require_serving()
+            if conversation_ref.user_id != user_id:
+                raise CoreStateError("READ_NOT_AUTHORIZED")
+            self._read_one("SELECT payload FROM conversations WHERE conversation_key = ?",
+                           (_conversation_key(conversation_ref),), "READ_NOT_AUTHORIZED")
+            rows = self._connection.execute("SELECT payload FROM turns WHERE conversation_key = ? ORDER BY rowid",
+                                            (_conversation_key(conversation_ref),)).fetchall()
+            return tuple(self._decode_turn(_load_json(str(row["payload"]))) for row in rows)
+
     async def resolve_conversation(self, conversation_ref: ConversationRef) -> ConversationRef:
         async with self._lock:
             row = self._read_one("SELECT payload FROM conversations WHERE conversation_key = ?", (_conversation_key(conversation_ref),), "CONVERSATION_NOT_FOUND")
