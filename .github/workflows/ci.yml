@@ -36,11 +36,10 @@ jobs:
           python -m pip install -r voice_runtime/requirements.txt
           python -m pip install -r requirements-native-dev.txt
 
-      - name: Run R1-R2 Core conformance tests
+      - name: Run R1-R3-C Core conformance tests
         run: |
-          python -m pytest -q tests/native
-          python -m pytest -q tests/contracts tests/conformance tests/architecture tests/core
-          python -m mypy --strict yogurt_contracts yogurt_core_domain yogurt_conformance yogurt_core yogurt_core_adapters yogurt_native
+          python -m pytest -q tests/native tests/contracts tests/conformance tests/architecture tests/core tests/integration/test_memory_v5_shadow.py
+          python -m mypy --strict yogurt_contracts yogurt_core_domain yogurt_conformance yogurt_core yogurt_core_adapters yogurt_native integrations
 
       - name: Run V3/V4/V5 memory tests
         run: |
