@@ -23,3 +23,7 @@ from .conformance_adapters import (
     StaleGenerationProviderFake,
     WrongAuthorityIgnoringProviderFake,
 )
+from .memory_recall import FakeMemoryRecallPort
+from .memory_observation import FakeOrderedMemoryProvider
+
+__all__ = ["FakeMemoryRecallPort", "FakeOrderedMemoryProvider"]
