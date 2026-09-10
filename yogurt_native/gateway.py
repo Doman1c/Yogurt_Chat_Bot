@@ -77,8 +77,8 @@ class NativeGateway:
                 if turn.response_id is not None:
                     return turn.response_id
                 if turn.state.value in {"cancelled", "aborted", "completed"}:
-                    raise SurfaceFailure("RESPONSE_UNAVAILABLE", 503)
-                await asyncio.sleep(0)
+                    raise SurfaceFailure("TURN_TERMINATED_BEFORE_RESPONSE", 409)
+                await asyncio.sleep(0.005)
         try:
             rid = await asyncio.wait_for(response_ready(), timeout=2.0)
         except asyncio.TimeoutError:

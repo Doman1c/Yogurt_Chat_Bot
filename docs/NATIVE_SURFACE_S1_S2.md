@@ -5,7 +5,7 @@ No R3 stack dependency. Memory B.7/B.8 gates remain untouched.
 
 ## Run locally
 
-Python 3.9¨C3.12; install `requirements-native.txt`. For tests install
+Python 3.9â€“3.12; install `requirements-native.txt`. For tests install
 `requirements-native-dev.txt`. HTTP dependencies are separate from Core requirements.
 
 Supply these environment variables in the server process:
@@ -58,7 +58,12 @@ A 202 returns `conversation_id`, opaque server `turn_ref`, Core `response_id`,
 `event_stream_url`, and `admission` (`NEWLY_ADMITTED` or `SAME_LOGICAL_TURN`).
 The gateway waits only for durable Core response creation (bounded to two seconds),
 not model completion. A response-start timeout returns retryable 503 without
-cancelling the admitted turn; retry the identical request.
+cancelling the admitted turn; retry the identical request. Polling uses a 5 ms
+interval within the existing two-second bound. If the authoritative Turn is already
+terminal without a Response (including recovery after a crash before ResponseStarted),
+the same request deterministically returns non-retryable HTTP 409
+`TURN_TERMINATED_BEFORE_RESPONSE`. No new Turn, synthetic Response, or model execution
+is created. Only an intentional new user send should use a new client_message_id.
 
 - `GET /v1/native/responses/{response_id}/events`: SSE projection of Core events.
 - `GET /v1/native/conversations`: owned conversations for the configured persona.
@@ -114,7 +119,9 @@ while model_finished tracks the last attempt finish. Missing stages remain absen
 
 `LatencyTelemetry.summaries()` exports at most 1024 summaries by default:
 `surface_to_core_ms`, `core_pre_model_ms`, `model_ttft_ms`, `model_generation_ms`,
-`total_ms`. Values are clamped to [0, 86400000] ms, or null for unobserved pairs.
+`total_ms`, plus `turn_correlation` (SHA256 of the opaque Core TurnId).
+No raw TurnId or conversation/user/persona identity is exported. Timing values are
+clamped to [0, 86400000] ms, or null for unobserved pairs.
 Records contain only opaque hashed Turn correlation and monotonic numbers, never
 raw input, prompts, memory or private identity. No latency audit is persisted.
 Capacity eviction and restart may lose timings, never Core facts. Observer failure
@@ -163,3 +170,9 @@ and persona; deterministic tests do not claim real-model latency measurements.
 - No live Ollama model invocation/performance result is claimed. The adapter's
   local endpoint, final-only behavior, and output bound are tested with a controlled
   HTTP opener; real Core admission and durable SSE behavior use a controlled ModelPort.
+
+Final hardening validation: 31 Native tests and 140 Core-related regression tests
+passed on each of Python 3.9/3.10/3.11/3.12; strict mypy passed for 137 source files.
+The crash-window test exits a subprocess after durable admission and before
+ResponseStarted, then uses standard R2 recovery. Three identical retries return
+409 with the same terminal Turn, zero model invocations and zero Responses.

@@ -1,5 +1,9 @@
 """Native S1/S2 behavioral gates against the durable Core, without social packages."""
 import asyncio
+import hashlib
+import subprocess
+import sys
+import time
 import json
 from pathlib import Path
 
@@ -227,13 +231,15 @@ def test_telemetry_monotonic_bounded_private_and_true_delta_seam(tmp_path):
         row = next(iter(gateway.telemetry.records.values()))
         assert len(row) == 7 and list(row.values()) == sorted(row.values())
         serialized = json.dumps(gateway.telemetry.summaries())
-        assert all(value is not None and 0 <= value <= 86400000 for value in gateway.telemetry.summaries()[0].values())
-        for private in ("private user text", "owner", "test persona", TOKEN):
+        assert all(value is not None and 0 <= value <= 86400000 for name, value in gateway.telemetry.summaries()[0].items() if name != "turn_correlation")
+        assert gateway.telemetry.summaries()[0]["turn_correlation"] == hashlib.sha256(a["turn_ref"].encode()).hexdigest()
+        for private in (a["turn_ref"], a["conversation_id"], "yogurt", "private user text", "owner", "test persona", TOKEN):
             assert private not in serialized and private not in repr(gateway.telemetry.records)
         small = LatencyTelemetry(capacity=2)
         for i in range(5):
             small.checkpoint(gateway.ref(profile, a["conversation_id"]), TurnId(value=str(i)), "surface_received")
-        assert len(small.records) == 2
+        assert len(small.records) == len(small.summaries()) == 2
+        assert {row["turn_correlation"] for row in small.summaries()} == set(small.records)
         await close(core, store, client)
     asyncio.run(scenario())
 
@@ -318,4 +324,90 @@ def test_ollama_final_adapter_is_bounded_local_and_has_no_fake_deltas(monkeypatc
         output = [event async for event in model.run(context, None)]
         assert len(output) == 1 and output[0].text == "one final output"
         assert len(observed) == 1
+    asyncio.run(scenario())
+
+
+def test_crash_before_response_started_has_deterministic_terminal_retry(tmp_path):
+    path = tmp_path / "core.db"
+    marker = tmp_path / "admitted-turn.txt"
+    script = r'''
+import asyncio, os, sys
+from pathlib import Path
+from tests.native.test_gateway import setup, post
+from yogurt_core_adapters.state_store_sqlite import SQLiteCoreStateStore
+from yogurt_contracts.conversation.lifecycle import TurnState
+async def crash_before_response(self, token, ref, turn_id, response_id):
+    turn = await self.get_turn(ref, turn_id)
+    assert turn.state == TurnState.INPUT_COMMITTED and turn.response_id is None
+    Path(sys.argv[2]).write_text(turn_id.value, encoding="utf-8")
+    os._exit(73)
+SQLiteCoreStateStore.commit_response_started = crash_before_response
+async def run():
+    core, store, gateway, profile, client, model, app = await setup(Path(sys.argv[1]))
+    await post(client)
+    raise AssertionError("crash window was not reached")
+asyncio.run(run())
+'''
+    crashed = subprocess.run([sys.executable, "-c", script, str(path), str(marker)],
+                             cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=10)
+    assert crashed.returncode == 73, crashed.stderr
+    admitted_id = marker.read_text(encoding="utf-8")
+
+    async def scenario():
+        from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
+        core, store, gateway, profile, client, model, app = await setup(path)
+        conversations = await gateway.conversations(profile)
+        assert len(conversations) == 1
+        ref = gateway.ref(profile, conversations[0].conversation_id)
+        recovered = await store.conversation_turns(ref, profile.user_id)
+        assert len(recovered) == 1
+        turn = recovered[0]
+        assert turn.turn_ref.turn_id.value == admitted_id
+        assert turn.state == TurnState.ABORTED and turn.abort_reason == AbortReason.RECOVERY
+        assert turn.response_id is None
+        for _ in range(3):
+            result = await client.post("/v1/native/turns", json=payload())
+            assert result.status_code == 409
+            assert result.json() == {"code": "TURN_TERMINATED_BEFORE_RESPONSE"}
+        await core.drain()
+        assert await store.conversation_turns(ref, profile.user_id) == recovered
+        assert model.contexts == []
+        # Read-only checks of real durable projections; no synthetic Response or Turn.
+        assert store._connection.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 1
+        assert store._connection.execute("SELECT COUNT(*) FROM responses").fetchone()[0] == 0
+        await close(core, store, client)
+    asyncio.run(scenario())
+
+
+def test_active_response_start_wait_is_bounded_and_low_frequency(tmp_path, monkeypatch):
+    async def scenario():
+        core, store, gateway, profile, client, model, app = await setup(tmp_path / "core.db", Model(block=True))
+        release_response = asyncio.Event()
+        original_start = store.commit_response_started
+        original_get = core.get_turn
+        reads = 0
+        async def delayed_start(*args):
+            await release_response.wait()
+            return await original_start(*args)
+        async def counted_get(command):
+            nonlocal reads
+            reads += 1
+            return await original_get(command)
+        monkeypatch.setattr(store, "commit_response_started", delayed_start)
+        monkeypatch.setattr(core, "get_turn", counted_get)
+        start = time.monotonic()
+        result = await client.post("/v1/native/turns", json=payload())
+        elapsed = time.monotonic() - start
+        assert result.status_code == 503 and result.json() == {"code": "CORE_UNAVAILABLE"}
+        assert 1.9 <= elapsed < 3.0  # Two-second wait plus scheduling/HTTP overhead.
+        assert 1 < reads <= 410  # 5 ms polling, not a sleep(0) hot loop.
+        assert not model.contexts
+        release_response.set()
+        accepted = await post(client)
+        assert accepted["admission"] == "SAME_LOGICAL_TURN"
+        assert not model.release.is_set()  # Acceptance still precedes completion.
+        model.release.set()
+        await core.drain()
+        assert len(model.contexts) == 1
+        await close(core, store, client)
     asyncio.run(scenario())

@@ -2,7 +2,7 @@
 import hashlib
 import time
 from collections import OrderedDict
-from typing import Dict, Optional
+from typing import Dict, Union
 from yogurt_contracts.conversation.refs import ConversationRef
 from yogurt_contracts.foundation.identifiers import TurnId
 
@@ -34,12 +34,12 @@ class LatencyTelemetry:
         while len(self.records) > self.capacity:
             self.records.popitem(last=False)
 
-    def summaries(self) -> tuple[Dict[str, Optional[float]], ...]:
+    def summaries(self) -> tuple[Dict[str, Union[str, float, None]], ...]:
         pairs = {"surface_to_core_ms": ("surface_received", "core_admission_started"),
                  "core_pre_model_ms": ("core_admission_started", "model_started"),
                  "model_ttft_ms": ("model_started", "first_model_output"),
                  "model_generation_ms": ("model_started", "model_finished"),
                  "total_ms": ("surface_received", "response_terminal")}
-        return tuple({name: min(86400000.0, max(0.0, (row[end] - row[start]) * 1000))
+        return tuple({"turn_correlation": correlation, **{name: min(86400000.0, max(0.0, (row[end] - row[start]) * 1000))
                       if start in row and end in row else None
-                      for name, (start, end) in pairs.items()} for row in self.records.values())
+                      for name, (start, end) in pairs.items()}} for correlation, row in self.records.items())
