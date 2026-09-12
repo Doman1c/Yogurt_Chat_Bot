@@ -9,7 +9,11 @@ from .conversation_state import ConversationState, ConversationStateStore
 
 
 class ConversationStateRuntimeStore(ConversationStateStore):
-    """Runtime reducer with completion-first and V4 phase-aware semantics."""
+    """Legacy-only reducer; retained unchanged for OpenClaw/WeChat compatibility.
+
+    Its topic/thread values are not Core cognition or a Core context source.
+    Production migration and removal require separate authorization after W4.
+    """
 
     _V40_SUPERSEDED_THREADS = frozenset(
         {

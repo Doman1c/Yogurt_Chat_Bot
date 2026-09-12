@@ -1,3 +1,13 @@
+"""Legacy V4 compatibility/provider-internal state (R3-W4).
+
+Core ConversationWorkingState alone owns current conversational cognition.
+current_topic/open_threads are deprecated structural compatibility fields, not
+Core inputs or authority. Keep their storage and legacy behavior until an
+explicit production migration; never merge them into Core state or ModelContext.
+dialogue_act/user_mood/interaction_mode/recent_actions/last_response_pattern
+remain operational legacy-only fields. See docs/runtime-r3w4-legacy-state-downgrade.md.
+"""
+
 from __future__ import annotations
 
 import json
@@ -86,7 +96,7 @@ class ConversationState:
 
 
 class ConversationStateStore:
-    """V4.0 structured conversation state without raw transcript storage."""
+    """Legacy-only compatibility store; not a source for Core cognition."""
 
     def __init__(
         self,

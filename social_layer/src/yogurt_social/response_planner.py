@@ -6,6 +6,10 @@ from typing import Any, Iterable, Optional
 
 from .conversation_state import ConversationState
 
+# R3-W4: this planner is legacy-only. Structural continuity below deliberately
+# remains for current WeChat/OpenClaw compatibility, not as Core authority.
+# Do not reuse this plan/state to populate Core WorkingState or ModelContext.
+
 
 @dataclass(frozen=True)
 class ResponsePlan:
