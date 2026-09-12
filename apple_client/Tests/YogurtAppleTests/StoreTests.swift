@@ -133,6 +133,54 @@ import XCTest
             await store.stopConsumers()
         }
     }
+    func testSemanticCacheMismatchRejectsSequence12AndReplaysFromZero() async throws {
+        let disk = file(), api = FakeAPI()
+        var projection = ResponseProjection(responseID: "r1")
+        try projection.apply(event(1, .started))
+        try projection.apply(event(2, .delta, "wrong local cache"))
+        for n in 3...12 { try projection.apply(event(n, .delta, "")) }
+        XCTAssertTrue(projection.isResumable(for: "r1"))
+        var snapshot = ChatSnapshot(); snapshot.selectedID = "c1"
+        snapshot.conversations = [ChatConversation(id: "c1", turns: [ChatTurn(id: "t1", userText: "hello", response: projection, historyText: "", state: "processing")])]
+        try disk.save(snapshot)
+        api.histories["c1"] = ConversationHistory(conversationID: "c1", turns: [HistoryTurn(turnRef: "t1", text: "hello", responseID: "r1", responseText: "real authoritative prefix", state: "processing")])
+        let restored = ChatStore(api: api, disk: disk, pause: {})
+        api.eventHandler = { _, after, receive in
+            XCTAssertEqual(after, 0)
+            XCTAssertEqual(restored.selected?.turns.first?.assistantText, "")
+            try await receive(event(1, .started))
+            try await receive(event(2, .delta, "real authoritative "))
+            try await receive(event(3, .delta, "prefix"))
+            try await receive(event(4, .completed))
+        }
+        await restored.launch(); await settle { restored.selected?.turns.first?.terminal == true }
+        XCTAssertEqual(api.cursors, [0])
+        XCTAssertEqual(restored.selected?.turns.first?.assistantText, "real authoritative prefix")
+        XCTAssertFalse(restored.selected?.turns.first?.assistantText.contains("wrong local cache") ?? true)
+        await restored.stopConsumers(); api.eventHandler = nil
+    }
+    func testEmptyCachedPrefixResumesAfterStartedWithoutFabricatingHistoryText() async throws {
+        let disk = file(), api = FakeAPI()
+        var projection = ResponseProjection(responseID: "r1")
+        try projection.apply(event(1, .started))
+        var snapshot = ChatSnapshot(); snapshot.selectedID = "c1"
+        snapshot.conversations = [ChatConversation(id: "c1", turns: [ChatTurn(id: "t1", userText: "hello", response: projection, historyText: "", state: "processing")])]
+        try disk.save(snapshot)
+        api.histories["c1"] = ConversationHistory(conversationID: "c1", turns: [HistoryTurn(turnRef: "t1", text: "hello", responseID: "r1", responseText: "some committed server prefix", state: "processing")])
+        let restored = ChatStore(api: api, disk: disk, pause: {})
+        api.eventHandler = { _, after, receive in
+            XCTAssertEqual(after, 1)
+            XCTAssertEqual(restored.selected?.turns.first?.response, projection)
+            XCTAssertEqual(restored.selected?.turns.first?.assistantText, "")
+            try await receive(event(2, .delta, "some committed server prefix"))
+            try await receive(event(2, .delta, "some committed server prefix"))
+            try await receive(event(3, .completed))
+        }
+        await restored.launch(); await settle { restored.selected?.turns.first?.terminal == true }
+        XCTAssertEqual(api.cursors, [1])
+        XCTAssertEqual(restored.selected?.turns.first?.assistantText, "some committed server prefix")
+        await restored.stopConsumers(); api.eventHandler = nil
+    }
     func testCredentialReloadWithoutActiveStreamReplacesNoticeAndHistory() async throws {
         let api = FakeAPI(); api.conversationFailure = .credentials
         let disk = file(), store = ChatStore(api: api, disk: file(), pause: {})

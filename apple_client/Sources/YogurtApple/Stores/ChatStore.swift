@@ -66,7 +66,12 @@ public struct ChatSnapshot: Codable, Equatable {
         let turns = history.turns.map { turn -> ChatTurn in
             if let rid = turn.responseID, !["completed", "aborted", "cancelled"].contains(turn.state) {
                 let prior = cached?.turns.first { $0.id == turn.turnRef }?.response
-                let response = prior?.isResumable(for: rid) == true ? prior! : ResponseProjection(responseID: rid)
+                let response: ResponseProjection
+                if let prior, prior.isResumable(for: rid), turn.responseText.hasPrefix(prior.text) {
+                    response = prior
+                } else {
+                    response = ResponseProjection(responseID: rid)
+                }
                 return ChatTurn(id: turn.turnRef, userText: turn.text, response: response, historyText: "", state: turn.state)
             }
             return ChatTurn(id: turn.turnRef, userText: turn.text, response: nil, historyText: turn.responseText, state: turn.state)
