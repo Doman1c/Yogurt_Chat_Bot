@@ -94,6 +94,8 @@ public struct ChatSnapshot: Codable, Equatable {
         guard !sending, let pending = snapshot.pending else { return }
         sending = true; defer { sending = false }
         notice = nil
+        do { try pending.validate(); try disk.save(snapshot) }
+        catch { notice = ClientError.safe(error).localizedDescription; return }
         for index in 0..<3 {
             do {
                 let accepted = try await api.send(pending)

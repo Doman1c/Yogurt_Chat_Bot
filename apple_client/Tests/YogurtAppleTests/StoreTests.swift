@@ -75,4 +75,16 @@ import XCTest
         XCTAssertEqual(store.snapshot.conversations[0].turns[0].assistantText, "authoritative final  ")
         XCTAssertNil(store.snapshot.conversations[0].turns[0].response)
     }
+    func testStorageFailureCannotSendUnpersistedRetry() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data("file blocks directory".utf8).write(to: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let api = FakeAPI()
+        let store = ChatStore(api: api, disk: JSONFile(directory.appendingPathComponent("projection.json")), pause: {})
+        let sent = await store.send("keep this draft", surface: .mac)
+        XCTAssertFalse(sent)
+        await store.retrySend()
+        XCTAssertTrue(api.sends.isEmpty)
+        XCTAssertNotNil(store.snapshot.pending)
+    }
 }

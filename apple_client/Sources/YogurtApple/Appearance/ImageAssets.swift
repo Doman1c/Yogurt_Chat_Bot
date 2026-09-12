@@ -14,7 +14,11 @@ public actor ImageAssets {
         guard ["originals", "avatars", "cache"].contains(folder),
               name.range(of: "^[A-Fa-f0-9-]{36}\\.(source|jpg)$", options: .regularExpression) != nil,
               UUID(uuidString: String(name.prefix(36))) != nil else { throw ClientError.image }
-        let url = root.appendingPathComponent(folder).appendingPathComponent(name).standardizedFileURL.resolvingSymlinksInPath()
+        // Resolve the existing parent separately: Foundation may leave symlinks
+        // unresolved when resolving a path whose final file does not yet exist.
+        let parent = root.appendingPathComponent(folder).standardizedFileURL.resolvingSymlinksInPath()
+        guard parent.path.hasPrefix(root.path + "/") else { throw ClientError.image }
+        let url = parent.appendingPathComponent(name).standardizedFileURL.resolvingSymlinksInPath()
         guard url.path.hasPrefix(root.path + "/") else { throw ClientError.image }
         return url
     }

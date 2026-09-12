@@ -70,8 +70,7 @@ final class NetworkTests: XCTestCase {
         XCTAssertThrowsError(try value.apply(event(0, .started)))
     }
     func testResumeHeaderAndReplayHasNoDuplicates() async throws {
-        let transport = MockTransport(), api = NativeGateway(token: MemoryToken(), transport: MockTransport())
-        _ = api
+        let transport = MockTransport()
         transport.fragments = try [event(2, .delta, "already"), event(3, .delta, " tail"), event(4, .completed)].map(frame)
         var projection = ResponseProjection(responseID: "r1")
         try projection.apply(event(1, .started)); try projection.apply(event(2, .delta, "already"))
@@ -100,6 +99,18 @@ final class NetworkTests: XCTestCase {
         let pending = try PendingSend(TurnRequest(conversationID: nil, text: "same\n payload", surface: .ipad))
         let restored = try JSONDecoder().decode(PendingSend.self, from: JSONEncoder().encode(pending))
         try restored.validate(); XCTAssertEqual(restored, pending)
+    }
+    func testTypedHistoryHealthAndInvalidHistory() async throws {
+        let transport = MockTransport(); transport.status = 200
+        let api = NativeGateway(token: MemoryToken(), transport: transport)
+        transport.response = Data("[{\"conversation_id\":\"c1\"}]".utf8)
+        let refs = try await api.conversations(); XCTAssertEqual(refs.map(\.id), ["c1"])
+        transport.response = Data("{\"status\":\"ok\",\"model_token_streaming\":true}".utf8)
+        let health = try await api.health(); XCTAssertEqual(health.status, "ok"); XCTAssertTrue(health.model_token_streaming)
+        let history = ConversationHistory(conversationID: "c1", turns: [HistoryTurn(turnRef: "t1", text: "user", responseID: "r1", responseText: " exact  \n", state: "completed")])
+        transport.response = try JSONEncoder().encode(history)
+        let fetched = try await api.history("c1"); XCTAssertEqual(fetched, history)
+        do { _ = try await api.history("c2"); XCTFail() } catch { XCTAssertEqual(error as? ClientError, .invalidPayload) }
     }
     func testAppleURLSessionActualLoopbackSSE() async throws {
         guard ProcessInfo.processInfo.environment["YOGURT_RUN_LOOPBACK_TESTS"] == "1" else { throw XCTSkip("Start the local fixture to enable URLSession integration") }
