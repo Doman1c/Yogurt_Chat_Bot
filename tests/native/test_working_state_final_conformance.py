@@ -49,7 +49,9 @@ def test_legacy_mutation_cannot_influence_any_core_or_native_output(tmp_path):
 
 
 def test_sqlite_inmemory_equivalence_and_through_turn_rebuild(tmp_path):
-    async def run(store, durable):
+    async def run(durable):
+        # Python 3.9 binds asyncio primitives during construction.
+        store = SQLiteCoreStateStore(tmp_path / "equivalent.sqlite3") if durable else InMemoryCoreStateStore()
         token = await store.acquire_authority(CoreInstanceId(value="core"))
         try:
             await store.create_conversation(token, REF)
@@ -74,5 +76,4 @@ def test_sqlite_inmemory_equivalence_and_through_turn_rebuild(tmp_path):
             await store.release_authority(token)
             if durable:
                 await store.close()
-    assert asyncio.run(run(InMemoryCoreStateStore(), False)) == asyncio.run(
-        run(SQLiteCoreStateStore(tmp_path / "equivalent.sqlite3"), True))
+    assert asyncio.run(run(False)) == asyncio.run(run(True))

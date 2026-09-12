@@ -32,7 +32,7 @@ def assert_no_legacy_inputs(source):
             values.append(node.module or "")
         if isinstance(node, ast.alias):
             values.extend((node.name, node.asname or ""))
-        assert not any(term in value for value in values for term in FORBIDDEN), (node.lineno, values)
+        assert not any(term in value for value in values for term in FORBIDDEN), (getattr(node, "lineno", None), values)
 
 
 def test_core_and_native_have_no_legacy_authority_inputs():
