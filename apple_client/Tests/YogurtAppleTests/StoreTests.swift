@@ -23,7 +23,7 @@ import XCTest
 }
 @MainActor final class StoreTests: XCTestCase {
     func file() -> JSONFile<ChatSnapshot> { JSONFile(FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("projection.json")) }
-    func settle(_ predicate: () -> Bool) async {
+    func settle(_ predicate: @escaping @MainActor () -> Bool) async {
         for _ in 0..<100 {
             if predicate() { return }
             try? await Task.sleep(nanoseconds: 10_000_000)

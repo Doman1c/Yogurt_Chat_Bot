@@ -10,16 +10,21 @@ public struct YogurtRootView: View {
     @State private var settingsOpen = false
     @State private var composer = ""
     @State private var discardConfirm = false
+    @State private var navigationSelection: String?
     @Environment(\.scenePhase) private var scenePhase
     public init(chat: ChatStore, appearance: AppearanceStore, assets: ImageAssets, tokens: TokenStore) {
         self.chat = chat; self.appearance = appearance; self.assets = assets; self.tokens = tokens
     }
     public var body: some View {
         NavigationSplitView {
-            List {
-                Button { chat.newConversation() } label: { Label("New conversation", systemImage: "square.and.pencil") }
+            List(selection: Binding<String?>(get: { navigationSelection }, set: { value in
+                navigationSelection = value
+                if value == "new" { chat.newConversation() }
+                else if let value { Task { await chat.select(value) } }
+            })) {
+                NavigationLink(value: "new") { Label("New conversation", systemImage: "square.and.pencil") }
                 ForEach(chat.snapshot.conversations) { conversation in
-                    Button { Task { await chat.select(conversation.id) } } label: {
+                    NavigationLink(value: conversation.id) {
                         HStack { Text(conversation.title).lineLimit(2); if chat.snapshot.selectedID == conversation.id { Image(systemName: "checkmark") } }
                     }
                 }
@@ -67,10 +72,10 @@ public struct YogurtRootView: View {
                 HStack(alignment: .bottom) {
                     TextField("Message", text: $composer, axis: .vertical).lineLimit(1...6).textFieldStyle(.roundedBorder)
                     Button("Send") {
-                        let text = composer; composer = ""
-                        Task { await chat.send(text, surface: surface) }
+                        let text = composer
+                        Task { if await chat.send(text, surface: surface), composer == text { composer = "" } }
                     }.buttonStyle(.borderedProminent)
-                        .disabled(!chat.canSend || composer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!chat.canSend || composer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || composer.unicodeScalars.count > 16000)
                 }.padding()
             }.navigationTitle(appearance.settings.yogurtDisplayName)
         }

@@ -80,14 +80,15 @@ public struct ChatSnapshot: Codable, Equatable {
             }
         } catch { notice = ClientError.safe(error).localizedDescription }
     }
-    public func send(_ text: String, surface: SurfaceType) async {
-        guard canSend else { return }
+    @discardableResult public func send(_ text: String, surface: SurfaceType) async -> Bool {
+        guard canSend else { return false }
         do {
             let pending = try PendingSend(TurnRequest(conversationID: snapshot.selectedID, text: text, surface: surface))
             snapshot.pending = pending
             try disk.save(snapshot) // Persist exact payload before crossing the network boundary.
             await retrySend()
-        } catch { notice = ClientError.safe(error).localizedDescription }
+            return true
+        } catch { notice = ClientError.safe(error).localizedDescription; return false }
     }
     public func retrySend() async {
         guard !sending, let pending = snapshot.pending else { return }
