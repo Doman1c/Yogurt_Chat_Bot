@@ -1,0 +1,42 @@
+name: Apple Client
+on:
+  push:
+    branches: [feat/native-s3a-apple-client-foundation]
+    paths: ["apple_client/**", ".github/workflows/apple-client.yml"]
+  pull_request:
+    paths: ["apple_client/**", ".github/workflows/apple-client.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  apple:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift tests with loopback HTTP/SSE fixture
+        run: |
+          python3 apple_client/Tests/Fixtures/gateway.py &
+          fixture=$!
+          trap 'kill "$fixture"' EXIT
+          sleep 1
+          cd apple_client
+          YOGURT_RUN_LOOPBACK_TESTS=1 swift test
+      - name: Generate Xcode app targets
+        run: |
+          brew install xcodegen
+          cd apple_client
+          xcodegen generate
+      - name: Build macOS and universal iPhone/iPad simulator app
+        run: |
+          cd apple_client
+          xcodebuild -project YogurtNative.xcodeproj -scheme YogurtMac -destination 'platform=macOS' -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build
+          xcodebuild -project YogurtNative.xcodeproj -scheme YogurtSimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build
+      - name: Launch iPhone and iPad simulators and capture default UI
+        run: python3 apple_client/Tests/Fixtures/simulator_smoke.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: apple-simulator-previews
+          path: apple_client/Generated/*.png
+          if-no-files-found: ignore

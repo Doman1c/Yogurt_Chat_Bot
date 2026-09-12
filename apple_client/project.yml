@@ -1,0 +1,49 @@
+name: YogurtNative
+options:
+  bundleIdPrefix: org.yogurt
+  deploymentTarget:
+    iOS: "16.0"
+    macOS: "13.0"
+packages:
+  YogurtApple:
+    path: .
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGNING_ALLOWED: NO
+targets:
+  YogurtMac:
+    type: application
+    platform: macOS
+    sources: [App]
+    dependencies:
+      - package: YogurtApple
+    info:
+      path: Generated/Mac-Info.plist
+      properties:
+        CFBundleDisplayName: Yogurt
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.yogurt.native.mac
+  YogurtSimulator:
+    type: application
+    platform: iOS
+    sources: [App]
+    dependencies:
+      - package: YogurtApple
+    info:
+      path: Generated/iOS-Info.plist
+      properties:
+        CFBundleDisplayName: Yogurt
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.yogurt.native.simulator
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: iphonesimulator
