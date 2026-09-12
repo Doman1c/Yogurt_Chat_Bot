@@ -10,6 +10,7 @@ from yogurt_contracts.foundation.identifiers import ResponseId
 from yogurt_contracts.response.lifecycle import ResponseState
 from yogurt_contracts.response.models import AgentOutputSegmentCommitted
 from yogurt_contracts.response.events import ResponseEvent
+from yogurt_core.context.material import WorkingStateContextMaterial
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class ModelContext:
     user_input: str
     turn_origin_surface: str
     context_budget: int
+    working_state: Optional[WorkingStateContextMaterial] = None
 
 
 @dataclass(frozen=True)

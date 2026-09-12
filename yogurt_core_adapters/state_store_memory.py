@@ -9,7 +9,7 @@ import uuid
 from dataclasses import replace
 from typing import AsyncIterator, Dict, List, Optional, Tuple
 
-from yogurt_contracts.conversation.input import TurnInput
+from yogurt_contracts.conversation.input import TextInputPart, TurnInput
 from yogurt_contracts.conversation.fingerprint import TurnFingerprint
 from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
 from yogurt_contracts.conversation.lifecycle import validate_turn_transition
@@ -39,6 +39,7 @@ from yogurt_contracts.foundation.durability import CorePersistenceMode
 
 from yogurt_core.application.results import AdmissionResponseState, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.context.models import ContextEntry, ContextRole
+from yogurt_core.context.working_state import WorkingStateTurnSource
 from yogurt_core.model.execution import StoredResponse, StoredTurn
 from yogurt_core.ports.state_store import CoreStateError, StateCommit
 from yogurt_contracts.foundation.facts import CommitCertainty
@@ -67,6 +68,12 @@ class InMemoryCoreStateStore:
         self._claims: Dict[str, str] = {}
         self._responses: Dict[str, StoredResponse] = {}
         self._response_turns: Dict[str, str] = {}
+        # Mutation-order metadata on authoritative ephemeral records. These are
+        # not cognition/materialized WorkingState; they preserve W1's boundary
+        # before the next admission even when an older response finalizes late.
+        self._source_order = 0
+        self._admission_order: Dict[str, int] = {}
+        self._finalization_order: Dict[str, int] = {}
 
     async def acquire_authority(self, core_instance_id: CoreInstanceId) -> CoreAuthorityToken:
         async with self._condition:
@@ -159,6 +166,8 @@ class InMemoryCoreStateStore:
             )
             self._claims[conversation_key] = key
             self._turns[key] = turn
+            self._source_order += 1
+            self._admission_order[key] = self._source_order
             return TurnAdmissionResult(status=TurnAdmissionStatus.NEWLY_ADMITTED, turn_id=turn_id)
 
     async def try_admit_turn_commit(self, token: CoreAuthorityToken, conversation_ref: ConversationRef, turn_id: TurnId, fingerprint: TurnFingerprint, snapshot: TurnSnapshot, turn_input: TurnInput) -> StateCommit[TurnAdmissionResult]:
@@ -170,6 +179,32 @@ class InMemoryCoreStateStore:
             if found is None:
                 raise CoreStateError("TURN_NOT_FOUND")
             return found
+
+    async def working_state_sources(
+        self, conversation_ref: ConversationRef, through_turn_ref: Optional[TurnRef],
+    ) -> Tuple[WorkingStateTurnSource, ...]:
+        async with self._condition:
+            if through_turn_ref is not None and through_turn_ref.conversation_id != conversation_ref.conversation_id:
+                raise CoreStateError("WORKING_STATE_BOUNDARY_MISMATCH")
+            if self._conversations.get(_conversation_key(conversation_ref)) != conversation_ref:
+                raise CoreStateError("CONVERSATION_NOT_FOUND")
+            turns = tuple((key, turn) for key, turn in self._turns.items() if turn.conversation_ref == conversation_ref)
+            if through_turn_ref is None:
+                if turns:
+                    raise CoreStateError("WORKING_STATE_BOUNDARY_REQUIRED")
+                return ()
+            boundary = next((index for index, (_, turn) in enumerate(turns) if turn.turn_ref == through_turn_ref), None)
+            if boundary is None:
+                raise CoreStateError("WORKING_STATE_BOUNDARY_NOT_FOUND")
+            cutoff = (self._admission_order[turns[boundary + 1][0]]
+                      if boundary + 1 < len(turns) else self._source_order + 1)
+            return tuple(WorkingStateTurnSource(
+                turn.turn_ref,
+                "\n".join(part.text for part in turn.turn_input.parts if isinstance(part, TextInputPart)),
+                turn.response_id is not None
+                and turn.response_id.value in self._finalization_order
+                and self._finalization_order[turn.response_id.value] < cutoff,
+            ) for _, turn in turns[:boundary + 1])
 
     async def get_response(self, response_id: ResponseId) -> StoredResponse:
         async with self._condition:
@@ -292,6 +327,8 @@ class InMemoryCoreStateStore:
             )
             response = replace(response, state=ResponseState.FINALIZED, events=response.events + (event,), revision=response.revision + 1)
             self._responses[response_id.value] = response
+            self._source_order += 1
+            self._finalization_order[response_id.value] = self._source_order
             self._condition.notify_all()
             return response
 

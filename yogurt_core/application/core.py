@@ -23,7 +23,7 @@ from yogurt_core.application.commands import CallerContext, CancelTurnCommand, G
 from yogurt_core.application.results import CancelTurnResult, CancelTurnStatus, TurnAdmissionResult, TurnAdmissionStatus
 from yogurt_core.authority.conversation_authority import ConversationAuthority
 from yogurt_core.context.policy import ContextBudgetPolicy
-from yogurt_core.context.projection import ContextProjectionService
+from yogurt_core.context.composition import ContextComposer
 from yogurt_core.model.events import AttemptTerminal, AttemptTerminalKind, VisibleTextDelta
 from yogurt_core.model.execution import ModelContext, StoredResponse, StoredTurn
 from yogurt_core.lifecycle import CoreLifecycleState
@@ -59,7 +59,7 @@ class YogurtCore:
         self._core_instance_id = core_instance_id
         self._context_policy = context_policy or ContextBudgetPolicy()
         self._scheduler = scheduler or ConversationScheduler()
-        self._projection = ContextProjectionService(store)
+        self._composer = ContextComposer(store, self._context_policy)
         self._token: Optional[CoreAuthorityToken] = None
         self._lifecycle = CoreLifecycleState.STOPPED
 
@@ -185,8 +185,7 @@ class YogurtCore:
             response = await self._store.commit_response_started(token, conversation_ref, turn.turn_ref.turn_id, response_id)
             # Yield after durable response creation so ingress can return acceptance.
             await asyncio.sleep(0)
-            projection = await self._projection.project(turn)
-            context = self._context_policy.compose(projection, turn)
+            context = await self._composer.compose(turn)
             saw_committed_prefix = False
             for _ in (1, 2):
                 attempt = ExecutionAttemptSnapshot(
