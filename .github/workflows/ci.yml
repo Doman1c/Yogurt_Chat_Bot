@@ -38,7 +38,7 @@ jobs:
 
       - name: Run R1-R3-C Core conformance tests
         run: |
-          python -m pytest -q tests/native tests/contracts tests/conformance tests/architecture tests/core tests/integration/test_memory_v5_shadow.py
+          python -m pytest -q tests/native tests/contracts tests/conformance tests/architecture tests/core tests/integration/test_memory_v5_shadow.py tests/integration/test_working_state_shadow.py
           python -m mypy --strict yogurt_contracts yogurt_core_domain yogurt_conformance yogurt_core yogurt_core_adapters yogurt_native integrations
 
       - name: Run V3/V4/V5 memory tests

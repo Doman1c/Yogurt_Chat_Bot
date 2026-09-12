@@ -1,0 +1,22 @@
+{
+  "schema_version": "working-state-shadow-v1",
+  "core_derivation_version": "working-state-v1",
+  "cases": [
+    {"case_id": "statement", "turns": [{"user_text": "今天继续学习。"}]},
+    {"case_id": "question-finalized", "turns": [{"user_text": "下一步做什么？", "assistant_text": "先写测试。", "assistant_outcome": "finalized"}]},
+    {"case_id": "question-pending", "turns": [{"user_text": "下一步做什么？"}]},
+    {"case_id": "question-aborted", "turns": [{"user_text": "下一步做什么？", "assistant_text": "未完成片段", "assistant_outcome": "aborted"}]},
+    {"case_id": "repeat", "turns": [{"user_text": "实现 V4 代码"}, {"user_text": "实现 V4 代码"}, {"user_text": "实现 V4 代码"}, {"user_text": "实现 V4 代码"}]},
+    {"case_id": "legacy-ttl", "turns": [{"user_text": "实现 V4 代码", "sample_delay_seconds": 90000}]},
+    {"case_id": "core-distance", "turns": [{"user_text": "实现 V4 代码"}, {"user_text": " "}, {"user_text": " "}, {"user_text": " "}, {"user_text": " "}]},
+    {"case_id": "mood", "turns": [{"user_text": "今天很难过"}]},
+    {"case_id": "mode", "turns": [{"user_text": "我们一起继续"}]},
+    {"case_id": "empty", "turns": []},
+    {"case_id": "rapid", "turns": [{"user_text": "开始"}, {"user_text": "继续"}, {"user_text": "好了？", "assistant_text": "测试通过。", "assistant_outcome": "finalized"}]},
+    {"case_id": "unicode", "turns": [{"user_text": "  中文？\r\n café  🍦 "}]},
+    {"case_id": "long", "turns": [{"user_text": "很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。很长的合成输入。"}]},
+    {"case_id": "isolation-a", "turns": [{"user_text": "开始实现 V4 代码"}]},
+    {"case_id": "isolation-b", "turns": [{"user_text": "完全独立的内容"}]},
+    {"case_id": "whitespace", "turns": [{"user_text": " \r\n "}]}
+  ]
+}
