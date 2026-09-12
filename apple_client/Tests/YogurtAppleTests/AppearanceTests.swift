@@ -52,7 +52,7 @@ final class AppearanceTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: directory.appendingPathComponent("escape/originals"), withDestinationURL: FileManager.default.temporaryDirectory)
         do { _ = try await escaped.managedURL(reference.original, folder: "originals"); XCTFail() } catch {}
     }
-    @MainActor func testSettingsRoundTripNeverChangesWireIdentity() throws {
+    @MainActor func testSettingsRoundTripNeverChangesWireIdentity() async throws {
         let request = try PendingSend(TurnRequest(conversationID: "c1", text: "hello", surface: .mac))
         let store = AppearanceStore(disk: JSONFile(FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("appearance.json")))
         store.update { $0.yogurtDisplayName = "酸奶"; $0.userDisplayName = "My display name"; $0.chatBackground = AssetReference(original: UUID().uuidString + ".source") }

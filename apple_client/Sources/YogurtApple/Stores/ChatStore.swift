@@ -147,7 +147,8 @@ public struct ChatSnapshot: Codable, Equatable {
                 guard let projection = self.projection(id), !projection.phase.terminal else { return }
                 do {
                     try await self.api.events(id, after: projection.lastEventID) { [weak self] event in
-                        try await self?.receive(event)
+                        try Task.checkCancellation()
+                        try self?.receive(event)
                     }
                     if self.projection(id)?.phase.terminal == true { return }
                     throw ClientError.disconnected

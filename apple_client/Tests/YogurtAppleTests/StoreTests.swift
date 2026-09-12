@@ -24,7 +24,10 @@ import XCTest
 @MainActor final class StoreTests: XCTestCase {
     func file() -> JSONFile<ChatSnapshot> { JSONFile(FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("projection.json")) }
     func settle(_ predicate: () -> Bool) async {
-        for _ in 0..<100 where !predicate() { try? await Task.sleep(nanoseconds: 10_000_000) }
+        for _ in 0..<100 {
+            if predicate() { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
     func test503AndUnknownOutcomeKeepOneIDAndBody() async throws {
         let api = FakeAPI(); api.failures = [.server(503, "CORE_UNAVAILABLE"), .disconnected]

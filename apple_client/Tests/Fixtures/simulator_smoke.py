@@ -11,7 +11,8 @@ listing = json.loads(run("xcrun", "simctl", "list", "-j"))
 runtime = next(r["identifier"] for r in reversed(listing["runtimes"]) if r.get("isAvailable") and "iOS" in r["name"])
 app = Path("apple_client/DerivedData/Build/Products/Debug-iphonesimulator/YogurtSimulator.app").resolve()
 for family in ("iPhone", "iPad"):
-    device = next(d["identifier"] for d in listing["devicetypes"] if family in d["name"])
+    available = next(d for d in listing["devices"][runtime] if d.get("isAvailable") and family in d["name"])
+    device = available["deviceTypeIdentifier"]
     identifier = run("xcrun", "simctl", "create", "Yogurt S3-A " + family, device, runtime).strip()
     try:
         run("xcrun", "simctl", "boot", identifier)
