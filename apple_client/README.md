@@ -21,7 +21,8 @@ supported; the networking implementation also rejects physical iOS devices.
 The server must run on the Mac hosting the simulator at `127.0.0.1:17622`.
 Run the existing Gateway with its server-side configuration, then save its bearer
 token using the client's Settings > Gateway credential > Save to Keychain.
-No credential is shipped with the app. PhotosPicker needs no full photo-library
+Saving a new token immediately reloads authoritative conversations/history, even
+when no response stream is active. No credential is shipped with the app. PhotosPicker needs no full photo-library
 permission. All custom images stay in the client's Application Support directory.
 
 The optional actual URLSession integration test uses a loopback fixture:
@@ -41,6 +42,11 @@ and launches iPhone/iPad simulators. The existing Python version matrix is uncha
 Intentional sends create one client_message_id and a frozen JSON body persisted
 before transmission. Automatic transport/503 retries and the Retry same send button
 reuse both. Conflict and terminated-before-response are not automatically retried.
+New sends also carry one opaque installation UUID from device-instance.json in
+Application Support. Atomic persistence precedes its use; restarts, conversation
+changes and appearance edits preserve it. Corrupt metadata regenerates a UUID or
+fails with a sanitized storage error. This ID is metadata, never Core identity or
+authentication authority. Previously pending payloads remain byte-for-byte frozen.
 Dismiss pending send affects only the local projection and explicitly warns that an
 unknown send may already have reached Core. Display names/assets never enter requests.
 
@@ -53,9 +59,10 @@ controls available rather than generating another message.
 
 On launch the cached conversation list is reconciled with the server; selecting a
 conversation loads authoritative history. Terminal history replaces local text.
-For active responses, history has no event sequence, so the client discards its
-assembled prefix and replays from zero into a fresh accumulator. It never concatenates
-a history prefix with the same replayed prefix. Unknown pending sends retry their
+For active responses with the same turn/response ID and a valid cached projection,
+the client preserves assembled text and Last-Event-ID across restart. Invalid,
+mismatched or terminal cached projections rebuild from sequence zero. It never
+concatenates a history prefix with cached or replayed text. Unknown pending sends retry their
 original body after launch. User/Persona/Memory identity remains entirely server-side.
 
 ## Appearance and assets
@@ -83,7 +90,8 @@ local support data is excluded from device backup.
 Tokens are Keychain generic-password entries with ThisDeviceOnly accessibility and
 synchronization disabled. Networking is fixed to the development loopback endpoint,
 uses ephemeral URLSession without cookies/cache/proxies, and refuses redirects.
-Errors expose only sanitized categories/known server codes. ATS is not globally
+Errors expose only sanitized categories/known server codes; SSE errors read at most
+4 KB of body before rejecting oversized content. ATS is not globally
 disabled: generated Info.plists use only NSAllowsLocalNetworking. See Apple's
 [local networking ATS documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking).
 

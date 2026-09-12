@@ -51,6 +51,14 @@ public struct ResponseProjection: Codable, Equatable {
     public private(set) var text = ""
     public private(set) var phase: Phase = .waiting
     public init(responseID: String) { self.responseID = responseID }
+    func isResumable(for id: String) -> Bool {
+        guard responseID == id, validID(id), text.utf8.count <= 8_000_000 else { return false }
+        switch phase {
+        case .waiting: return lastEventID == 0 && text.isEmpty
+        case .streaming: return lastEventID > 0 && lastEventID < Int.max && (lastEventID > 1 || text.isEmpty)
+        default: return false
+        }
+    }
     public mutating func apply(_ event: ResponseEvent) throws {
         guard event.responseID == responseID, event.sequence > 0 else { throw ClientError.invalidSequence }
         if event.sequence <= lastEventID { return }

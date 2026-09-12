@@ -27,7 +27,15 @@ public final class AppleTransport: HTTPTransport {
     public func stream(_ request: URLRequest, receive: @escaping (Data) async throws -> Void) async throws {
         let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw ClientError.invalidPayload }
-        guard http.statusCode == 200 else { throw NativeGateway.serverError(http.statusCode, Data()) }
+        guard http.statusCode == 200 else {
+            var body = Data()
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                guard body.count < 4096 else { throw NativeGateway.serverError(http.statusCode, Data()) }
+                body.append(byte)
+            }
+            throw NativeGateway.serverError(http.statusCode, body)
+        }
         guard http.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("text/event-stream") == true
         else { throw ClientError.invalidPayload }
         var line = Data()

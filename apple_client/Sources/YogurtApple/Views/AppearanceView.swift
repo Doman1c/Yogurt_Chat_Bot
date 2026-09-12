@@ -10,6 +10,7 @@ public struct AppearanceView: View {
     @ObservedObject var appearance: AppearanceStore
     let assets: ImageAssets
     let tokens: TokenStore
+    let credentialsSaved: () async -> Void
     @State private var userPhoto: PhotosPickerItem?
     @State private var yogurtPhoto: PhotosPickerItem?
     @State private var backgroundPhoto: PhotosPickerItem?
@@ -19,8 +20,9 @@ public struct AppearanceView: View {
     @State private var token = ""
     @State private var savedToken = false
     @State private var importing = false
-    public init(appearance: AppearanceStore, assets: ImageAssets, tokens: TokenStore) {
+    public init(appearance: AppearanceStore, assets: ImageAssets, tokens: TokenStore, credentialsSaved: @escaping () async -> Void) {
         self.appearance = appearance; self.assets = assets; self.tokens = tokens
+        self.credentialsSaved = credentialsSaved
     }
     private func binding<T>(_ path: WritableKeyPath<AppearanceSettings, T>) -> Binding<T> {
         Binding(get: { appearance.settings[keyPath: path] }, set: { value in appearance.update { $0[keyPath: path] = value } })
@@ -109,10 +111,13 @@ public struct AppearanceView: View {
                 Section("Gateway credential") {
                     SecureField("Bearer token", text: $token)
                     Button("Save to Keychain") {
-                        do { try tokens.save(token); token = ""; savedToken = true; error = nil }
+                        do {
+                            try tokens.save(token); token = ""; savedToken = true; error = nil
+                            Task { await credentialsSaved() }
+                        }
                         catch { self.error = ClientError.credentials.localizedDescription }
                     }
-                    if savedToken { Text("Saved locally. Return to chat and reconnect.").font(.caption) }
+                    if savedToken { Text("Saved to Keychain. Reloading conversations.").font(.caption) }
                     Text("Development: 127.0.0.1:17622 · Mac and simulators only").font(.caption)
                 }
     }

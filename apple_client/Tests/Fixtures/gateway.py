@@ -21,6 +21,13 @@ class Handler(BaseHTTPRequestHandler):
         self.json(dict(conversation_id="c1", turn_ref="t1", response_id="r1", event_stream_url="/v1/native/responses/r1/events", admission="NEWLY_ADMITTED"), 202)
     def do_GET(self):
         if not self.authorized(): return
+        errors = {
+            "/v1/native/responses/unauthorized/events": {"code": "UNAUTHORIZED"},
+            "/v1/native/responses/rawerror/events": {"code": "TEST_ONLY_NOT_A_REAL_CREDENTIAL_000000"},
+            "/v1/native/responses/oversize/events": {"code": "UNAUTHORIZED", "padding": "x" * 5000},
+        }
+        if self.path in errors:
+            self.json(errors[self.path], 401); return
         if self.path == "/v1/native/health":
             self.json(dict(status="ok", model_token_streaming=True)); return
         if self.path == "/v1/native/conversations":

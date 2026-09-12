@@ -26,11 +26,13 @@ public struct ChatSnapshot: Codable, Equatable {
     @Published public private(set) var notice: String?
     @Published public private(set) var sending = false
     private let api: GatewayAPI, disk: JSONFile<ChatSnapshot>
+    private let device: DeviceInstanceStore
     private var streams: [String: Task<Void, Never>] = [:]
     private let pause: () async throws -> Void
     public init(api: GatewayAPI, disk: JSONFile<ChatSnapshot> = JSONFile(AppPaths.root.appendingPathComponent("chat-projection.json")),
+                device: DeviceInstanceStore = DeviceInstanceStore(),
                 pause: @escaping () async throws -> Void = { try await Task.sleep(nanoseconds: 700_000_000) }) {
-        self.api = api; self.disk = disk; self.pause = pause
+        self.api = api; self.disk = disk; self.device = device; self.pause = pause
         snapshot = disk.load() ?? ChatSnapshot()
     }
     public var selected: ChatConversation? { snapshot.conversations.first { $0.id == snapshot.selectedID } }
@@ -39,6 +41,7 @@ public struct ChatSnapshot: Codable, Equatable {
     public func newConversation() { snapshot.selectedID = nil; notice = nil; save() }
     public func select(_ id: String) async { snapshot.selectedID = id; save(); await recover(id) }
     public func launch() async {
+        notice = nil
         do {
             let refs = try await api.conversations()
             let allowed = Set(refs.map(\.id))
@@ -52,12 +55,19 @@ public struct ChatSnapshot: Codable, Equatable {
             if snapshot.pending != nil { await retrySend() }
         } catch { notice = ClientError.safe(error).localizedDescription }
     }
-    /// History has no event cursor. For active responses rebuild from sequence zero,
-    /// never append a replay to the history prefix. Terminal history is authoritative.
+    public func credentialsDidChange() async {
+        await stopConsumers()
+        await launch()
+    }
+    /// Preserve a usable cursor only for the same server turn/response. History
+    /// prefixes never get concatenated with cached text. Terminal history wins.
     public func reconcile(_ history: ConversationHistory) {
+        let cached = snapshot.conversations.first { $0.id == history.conversationID }
         let turns = history.turns.map { turn -> ChatTurn in
             if let rid = turn.responseID, !["completed", "aborted", "cancelled"].contains(turn.state) {
-                return ChatTurn(id: turn.turnRef, userText: turn.text, response: ResponseProjection(responseID: rid), historyText: "", state: turn.state)
+                let prior = cached?.turns.first { $0.id == turn.turnRef }?.response
+                let response = prior?.isResumable(for: rid) == true ? prior! : ResponseProjection(responseID: rid)
+                return ChatTurn(id: turn.turnRef, userText: turn.text, response: response, historyText: "", state: turn.state)
             }
             return ChatTurn(id: turn.turnRef, userText: turn.text, response: nil, historyText: turn.responseText, state: turn.state)
         }
@@ -83,7 +93,7 @@ public struct ChatSnapshot: Codable, Equatable {
     @discardableResult public func send(_ text: String, surface: SurfaceType) async -> Bool {
         guard canSend else { return false }
         do {
-            let pending = try PendingSend(TurnRequest(conversationID: snapshot.selectedID, text: text, surface: surface))
+            let pending = try PendingSend(TurnRequest(conversationID: snapshot.selectedID, text: text, surface: surface, device: device.loadOrCreate()))
             snapshot.pending = pending
             try disk.save(snapshot) // Persist exact payload before crossing the network boundary.
             await retrySend()

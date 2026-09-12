@@ -80,7 +80,7 @@ public struct YogurtRootView: View {
             }.navigationTitle(appearance.settings.yogurtDisplayName)
         }
         .preferredColorScheme(appearance.settings.theme == .system ? nil : appearance.settings.theme == .dark ? .dark : .light)
-        .sheet(isPresented: $settingsOpen) { AppearanceView(appearance: appearance, assets: assets, tokens: tokens).frame(minWidth: 320, idealWidth: 560, minHeight: 500) }
+        .sheet(isPresented: $settingsOpen) { AppearanceView(appearance: appearance, assets: assets, tokens: tokens, credentialsSaved: { await chat.credentialsDidChange() }).frame(minWidth: 320, idealWidth: 560, minHeight: 500) }
         .task { await chat.launch() }
         .onChange(of: scenePhase) { phase in
             if phase == .active { chat.reconnect() }

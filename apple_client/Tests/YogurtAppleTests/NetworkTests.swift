@@ -42,7 +42,7 @@ final class NetworkTests: XCTestCase {
         XCTAssertEqual(transport.requests[0].httpBody, pending.body)
         XCTAssertEqual(transport.requests[0].url?.absoluteString, "http://127.0.0.1:17622/v1/native/turns")
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: pending.body) as? [String: Any])
-        XCTAssertEqual(Set(body.keys), ["client_message_id", "text", "surface_type"])
+        XCTAssertEqual(Set(body.keys), ["client_message_id", "text", "surface_type", "device_instance_id"])
         XCTAssertEqual(body["text"] as? String, " hi  \n🙂")
         XCTAssertFalse(String(decoding: pending.body, as: UTF8.self).contains(MemoryToken().value))
     }
@@ -128,6 +128,18 @@ final class NetworkTests: XCTestCase {
         var resumed: [Int] = []
         try await api.events("r1", after: 2) { resumed.append($0.sequence) }
         XCTAssertEqual(resumed, [3, 4])
+    }
+    func testAppleSSEErrorsAreBoundedAndSanitized() async throws {
+        guard ProcessInfo.processInfo.environment["YOGURT_RUN_LOOPBACK_TESTS"] == "1" else { throw XCTSkip("Requires loopback fixture") }
+        let api = NativeGateway(token: MemoryToken())
+        for (id, expected) in [("unauthorized", ClientError.server(401, "UNAUTHORIZED")),
+                               ("rawerror", .server(401, "UNKNOWN")), ("oversize", .server(401, "UNKNOWN"))] {
+            do { try await api.events(id, after: 0) { _ in XCTFail("Error body is not an event") }; XCTFail() }
+            catch {
+                XCTAssertEqual(error as? ClientError, expected)
+                XCTAssertFalse(error.localizedDescription.contains(MemoryToken().value))
+            }
+        }
     }
 
 }

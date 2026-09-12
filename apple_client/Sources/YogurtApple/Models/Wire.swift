@@ -39,7 +39,8 @@ public struct TurnRequest: Codable, Equatable {
               text.unicodeScalars.count <= 16000, (device?.count ?? 0) <= 128,
               conversationID.map(validID) ?? true else { throw ClientError.invalidPayload }
         self.conversationID = conversationID; self.text = text; self.surfaceType = surface
-        self.deviceInstanceID = device; self.clientMessageID = UUID().uuidString
+        self.deviceInstanceID = try device ?? DeviceInstanceStore().loadOrCreate()
+        self.clientMessageID = UUID().uuidString
     }
 }
 func validID(_ value: String) -> Bool {
