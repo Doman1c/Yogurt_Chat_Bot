@@ -24,7 +24,7 @@ public struct YogurtRootView: View {
                     }
                 }
             }.navigationTitle("Conversations")
-                .toolbar { Button { settingsOpen = true } label: { Image(systemName: "gearshape") }.accessibilityLabel("Settings") }
+                .toolbar { ToolbarItem { Button { settingsOpen = true } label: { Image(systemName: "gearshape") }.accessibilityLabel("Settings") } }
         } detail: {
             VStack(spacing: 0) {
                 ZStack {

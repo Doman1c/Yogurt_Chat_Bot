@@ -3,3 +3,7 @@
 /Generated/
 /*.xcodeproj/
 /DerivedData/
+
+# Repository-wide model-weight ignores must not hide Swift wire models.
+!Sources/YogurtApple/Models/
+!Sources/YogurtApple/Models/*.swift

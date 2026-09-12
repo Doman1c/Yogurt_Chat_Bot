@@ -10,7 +10,9 @@ public struct AppearanceView: View {
     @ObservedObject var appearance: AppearanceStore
     let assets: ImageAssets
     let tokens: TokenStore
-    @State private var userPhoto: PhotosPickerItem?, yogurtPhoto: PhotosPickerItem?, backgroundPhoto: PhotosPickerItem?
+    @State private var userPhoto: PhotosPickerItem?
+    @State private var yogurtPhoto: PhotosPickerItem?
+    @State private var backgroundPhoto: PhotosPickerItem?
     @State private var draft: ImageDraft?
     @State private var error: String?
     @Environment(\.dismiss) private var dismiss
@@ -26,53 +28,10 @@ public struct AppearanceView: View {
     public var body: some View {
         NavigationStack {
             Form {
-                Section("Profile") {
-                    TextField("My Display Name", text: binding(\.userDisplayName))
-                    HStack { LocalAvatar(reference: appearance.settings.userAvatar, symbol: "person.fill", assets: assets)
-                        PhotosPicker("My Avatar", selection: $userPhoto, matching: .images) }
-                    Button("Re-crop original") { edit(appearance.settings.userAvatar, .user) }.disabled(appearance.settings.userAvatar == nil)
-                    Button("Use default avatar") { appearance.update { $0.userAvatar = nil } }
-                }
-                Section("Yogurt") {
-                    TextField("Display Name", text: binding(\.yogurtDisplayName))
-                    HStack { LocalAvatar(reference: appearance.settings.yogurtAvatar, symbol: "sparkle", assets: assets)
-                        PhotosPicker("Avatar", selection: $yogurtPhoto, matching: .images) }
-                    Button("Re-crop original") { edit(appearance.settings.yogurtAvatar, .yogurt) }.disabled(appearance.settings.yogurtAvatar == nil)
-                    Button("Use default avatar") { appearance.update { $0.yogurtAvatar = nil } }
-                }
-                Section("Appearance") {
-                    PhotosPicker("Chat Background", selection: $backgroundPhoto, matching: .images)
-                    Button("Background Position") { edit(appearance.settings.chatBackground, .background) }.disabled(appearance.settings.chatBackground == nil)
-                    Button("Use default background") { appearance.update { $0.chatBackground = nil } }
-                    labelledSlider("Blur", binding(\.backgroundBlur), 0...24)
-                    labelledSlider("Dim", binding(\.backgroundDim), 0...0.8)
-                    Picker("Bubble Style", selection: binding(\.bubbleStyle)) {
-                        ForEach(AppearanceSettings.BubbleStyle.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
-                    }
-                    labelledSlider("Bubble Opacity", binding(\.bubbleOpacity), 0.2...1)
-                    labelledSlider("Corner Radius", binding(\.bubbleCornerRadius), 0...32)
-                    labelledSlider("Font Size", binding(\.fontScale), 0.8...1.6)
-                    Picker("Theme", selection: binding(\.theme)) {
-                        ForEach(AppearanceSettings.Theme.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
-                    }
-                    ZStack {
-                        ChatBackground(settings: appearance.settings, assets: assets)
-                        VStack(alignment: .leading) {
-                            Text(appearance.settings.yogurtDisplayName).font(.caption)
-                            Text("A local preview of your conversation.").padding(12)
-                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: appearance.settings.bubbleCornerRadius))
-                        }.font(.system(size: 16 * appearance.settings.fontScale)).padding()
-                    }.frame(height: 150)
-                }
-                Section("Gateway credential") {
-                    SecureField("Bearer token", text: $token)
-                    Button("Save to Keychain") {
-                        do { try tokens.save(token); token = ""; savedToken = true; error = nil }
-                        catch { error = ClientError.credentials.localizedDescription }
-                    }
-                    if savedToken { Text("Saved locally. Return to chat and reconnect.").font(.caption) }
-                    Text("Development: 127.0.0.1:17622 · Mac and simulators only").font(.caption)
-                }
+                profileSection
+                yogurtSection
+                appearanceSection
+                credentialSection
                 if importing { ProgressView("Preparing image") }
                 if let error = error ?? appearance.error { Text(error).foregroundStyle(.red) }
             }.formStyle(.grouped).navigationTitle("Settings")
@@ -102,6 +61,61 @@ public struct AppearanceView: View {
                 }
         }
     }
+    private var profileSection: some View {
+                Section("Profile") {
+                    TextField("My Display Name", text: binding(\.userDisplayName))
+                    HStack { LocalAvatar(reference: appearance.settings.userAvatar, symbol: "person.fill", assets: assets)
+                        PhotosPicker("My Avatar", selection: $userPhoto, matching: .images) }
+                    Button("Re-crop original") { edit(appearance.settings.userAvatar, .user) }.disabled(appearance.settings.userAvatar == nil)
+                    Button("Use default avatar") { appearance.update { $0.userAvatar = nil } }
+                }
+    }
+    private var yogurtSection: some View {
+                Section("Yogurt") {
+                    TextField("Display Name", text: binding(\.yogurtDisplayName))
+                    HStack { LocalAvatar(reference: appearance.settings.yogurtAvatar, symbol: "sparkle", assets: assets)
+                        PhotosPicker("Avatar", selection: $yogurtPhoto, matching: .images) }
+                    Button("Re-crop original") { edit(appearance.settings.yogurtAvatar, .yogurt) }.disabled(appearance.settings.yogurtAvatar == nil)
+                    Button("Use default avatar") { appearance.update { $0.yogurtAvatar = nil } }
+                }
+    }
+    private var appearanceSection: some View {
+                Section("Appearance") {
+                    PhotosPicker("Chat Background", selection: $backgroundPhoto, matching: .images)
+                    Button("Background Position") { edit(appearance.settings.chatBackground, .background) }.disabled(appearance.settings.chatBackground == nil)
+                    Button("Use default background") { appearance.update { $0.chatBackground = nil } }
+                    labelledSlider("Blur", binding(\.backgroundBlur), 0...24)
+                    labelledSlider("Dim", binding(\.backgroundDim), 0...0.8)
+                    Picker("Bubble Style", selection: binding(\.bubbleStyle)) {
+                        ForEach(AppearanceSettings.BubbleStyle.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
+                    }
+                    labelledSlider("Bubble Opacity", binding(\.bubbleOpacity), 0.2...1)
+                    labelledSlider("Corner Radius", binding(\.bubbleCornerRadius), 0...32)
+                    labelledSlider("Font Size", binding(\.fontScale), 0.8...1.6)
+                    Picker("Theme", selection: binding(\.theme)) {
+                        ForEach(AppearanceSettings.Theme.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
+                    }
+                    ZStack {
+                        ChatBackground(settings: appearance.settings, assets: assets)
+                        VStack(alignment: .leading) {
+                            Text(appearance.settings.yogurtDisplayName).font(.caption)
+                            Text("A local preview of your conversation.").padding(12)
+                                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: appearance.settings.bubbleCornerRadius))
+                        }.font(.system(size: 16 * appearance.settings.fontScale)).padding()
+                    }.frame(height: 150)
+                }
+    }
+    private var credentialSection: some View {
+                Section("Gateway credential") {
+                    SecureField("Bearer token", text: $token)
+                    Button("Save to Keychain") {
+                        do { try tokens.save(token); token = ""; savedToken = true; error = nil }
+                        catch { self.error = ClientError.credentials.localizedDescription }
+                    }
+                    if savedToken { Text("Saved locally. Return to chat and reconnect.").font(.caption) }
+                    Text("Development: 127.0.0.1:17622 · Mac and simulators only").font(.caption)
+                }
+    }
     private func labelledSlider(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>) -> some View {
         HStack { Text(title); Slider(value: value, in: range).accessibilityLabel(title) }
     }
@@ -112,14 +126,14 @@ public struct AppearanceView: View {
             do {
                 guard let data = try await item.loadTransferable(type: Data.self) else { throw ClientError.image }
                 draft = ImageDraft(data: data, image: try await assets.preview(data), kind: kind); error = nil
-            } catch { error = ClientError.image.localizedDescription }
+            } catch { self.error = ClientError.image.localizedDescription }
         }
     }
     private func edit(_ reference: AssetReference?, _ kind: ImageKind) {
         guard let reference else { return }
         Task {
             do { let data = try await assets.original(reference); draft = ImageDraft(data: data, image: try await assets.preview(data), kind: kind) }
-            catch { error = ClientError.image.localizedDescription }
+            catch { self.error = ClientError.image.localizedDescription }
         }
     }
 }
