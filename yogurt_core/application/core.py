@@ -3,7 +3,7 @@
 import uuid
 import asyncio
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional, Tuple, TypeVar
+from typing import AsyncGenerator, AsyncIterator, Optional, Tuple, TypeVar
 
 from yogurt_contracts.conversation.fingerprint import turn_fingerprint
 from yogurt_contracts.conversation.lifecycle import AbortReason, TurnState
@@ -197,22 +197,26 @@ class YogurtCore:
                 )
                 response = await self._store.add_execution_attempt(token, response_id, attempt)
                 terminal = AttemptTerminal(kind=AttemptTerminalKind.SUCCEEDED)
-                async for draft in self._observed_model(conversation_ref, turn_id, context, attempt):
-                    if isinstance(draft, VisibleTextDelta):
-                        text = draft.text.strip()
-                        if not text:
-                            continue
-                        segment = AgentOutputSegmentCommitted(
-                            response_id=response_id,
-                            segment_id=SegmentId(value="segment-" + uuid.uuid4().hex),
-                            sequence=len(response.segments) + 1,
-                            text=text,
-                            language=draft.language,
-                        )
-                        response = self._commit_value(await self._store.commit_segment_commit(token, response_id, response.revision, segment))
-                        saw_committed_prefix = True
-                    elif isinstance(draft, AttemptTerminal):
-                        terminal = draft
+                drafts = self._observed_model(conversation_ref, turn_id, context, attempt)
+                try:
+                    async for draft in drafts:
+                        if isinstance(draft, VisibleTextDelta):
+                            text = draft.text
+                            if not text:
+                                continue
+                            segment = AgentOutputSegmentCommitted(
+                                response_id=response_id,
+                                segment_id=SegmentId(value="segment-" + uuid.uuid4().hex),
+                                sequence=len(response.segments) + 1,
+                                text=text,
+                                language=draft.language,
+                            )
+                            response = self._commit_value(await self._store.commit_segment_commit(token, response_id, response.revision, segment))
+                            saw_committed_prefix = True
+                        elif isinstance(draft, AttemptTerminal):
+                            terminal = draft
+                finally:
+                    await drafts.aclose()
                 if terminal.kind == AttemptTerminalKind.SUCCEEDED:
                     response = await self._store.finalize_response(token, response_id, response.revision)
                     await self._converge_turn_from_response_terminal(conversation_ref, turn.turn_ref.turn_id, response)
@@ -255,15 +259,21 @@ class YogurtCore:
                 pass  # Telemetry never changes admission/execution outcomes.
 
     async def _observed_model(self, ref: ConversationRef, turn_id: TurnId,
-                              context: ModelContext, attempt: ExecutionAttemptSnapshot) -> AsyncIterator[ModelDraftEvent]:
+                              context: ModelContext, attempt: ExecutionAttemptSnapshot) -> AsyncGenerator[ModelDraftEvent, None]:
         self._checkpoint(ref, turn_id, "model_started")
+        stream = self._model.run(context, attempt)
         try:
-            async for event in self._model.run(context, attempt):
+            async for event in stream:
                 if isinstance(event, VisibleTextDelta):
                     self._checkpoint(ref, turn_id, "first_model_output")
                 yield event
         finally:
-            self._checkpoint(ref, turn_id, "model_finished")
+            try:
+                close = getattr(stream, "aclose", None)
+                if close is not None:
+                    await close()
+            finally:
+                self._checkpoint(ref, turn_id, "model_finished")
 
     async def list_conversations(self, caller: "CallerContext") -> Tuple[ConversationRef, ...]:
         self._require_serving()

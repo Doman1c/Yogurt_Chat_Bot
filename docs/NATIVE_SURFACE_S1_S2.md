@@ -1,5 +1,9 @@
 # S1/S2 Native Surface foundation
 
+Historical S1/S2 behavior is recorded below. The bundled model adapter and launcher
+now use [S2.5 real model streaming](NATIVE_S25_REAL_STREAMING.md); final-only model
+and blocking HTTP limitations below apply to the original S1/S2 implementation.
+
 Base: `origin/main` at `7f92f994209025432c494d9eedd3700af8f2cb23`.
 No R3 stack dependency. Memory B.7/B.8 gates remain untouched.
 

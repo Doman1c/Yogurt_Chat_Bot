@@ -34,7 +34,7 @@ def main() -> None:
     core = YogurtCore(SQLiteCoreStateStore(os.environ["YOGURT_NATIVE_DATABASE"]), identities,
         ConfiguredPersona(persona),
         LocalOllamaModel(os.environ["YOGURT_NATIVE_MODEL"]), CoreInstanceId(value="native-local"), observer=telemetry)
-    app = create_app(NativeGateway(core, mapping_key, telemetry), identities)
+    app = create_app(NativeGateway(core, mapping_key, telemetry, token_streaming=True), identities)
     uvicorn.run(app, host="127.0.0.1", port=17622, access_log=False)
 
 if __name__ == "__main__":

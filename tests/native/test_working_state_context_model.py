@@ -1,6 +1,9 @@
 """Capture Ollama protocol locally; no model or Memory network is contacted."""
 
+import asyncio
 import json
+import httpx
+from tests.native.test_streaming import attempt
 
 from tests.core.test_working_state_context import material
 from tests.core.test_working_state import source
@@ -11,19 +14,14 @@ from yogurt_native.model import LocalOllamaModel
 
 def request_messages(monkeypatch, context):
     captured = []
-    class Response:
-        def __enter__(self):
-            return self
-        def __exit__(self, *args):
-            pass
-        def read(self, bound):
-            return b'{"message":{"content":"ok"}}'
-    class Opener:
-        def open(self, request, timeout):
-            captured.append(json.loads(request.data))
-            return Response()
-    monkeypatch.setattr("urllib.request.build_opener", lambda *args: Opener())
-    assert LocalOllamaModel("fake")._generate(context) == "ok"
+    def handle(request):
+        captured.append(json.loads(request.content))
+        assert captured[-1]["stream"] is True
+        return httpx.Response(200, content=b'{"message":{"content":"ok"},"done":true}\n')
+    async def run():
+        model = LocalOllamaModel("fake", transport=httpx.MockTransport(handle))
+        assert "".join([event.text async for event in model.run(context, attempt())]) == "ok"
+    asyncio.run(run())
     return captured[0]["messages"]
 
 
