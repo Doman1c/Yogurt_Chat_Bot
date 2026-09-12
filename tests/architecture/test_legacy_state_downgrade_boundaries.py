@@ -3,31 +3,61 @@
 import ast
 import hashlib
 from pathlib import Path
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+FORBIDDEN = ("social_layer", "yogurt_social", "conversation_state_runtime",
+             "working_state_shadow", "current_topic", "open_threads", "ConversationState")
+
+
+def assert_no_legacy_inputs(source):
+    tree = ast.parse(source)
+    # Only genuine module/class/function docstrings are documentation. Arbitrary
+    # string expressions, assignments, mapping keys and import names are code.
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if (node.body and isinstance(node.body[0], ast.Expr)
+                    and isinstance(node.body[0].value, ast.Constant)
+                    and isinstance(node.body[0].value.value, str)):
+                node.body = node.body[1:]
+    for node in ast.walk(tree):
+        values = []
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+            values.append(node.value.decode("utf-8", errors="replace") if isinstance(node.value, bytes) else node.value)
+        if isinstance(node, ast.Name):
+            values.append(node.id)
+        if isinstance(node, ast.Attribute):
+            values.append(node.attr)
+        if isinstance(node, ast.ImportFrom):
+            values.append(node.module or "")
+        if isinstance(node, ast.alias):
+            values.extend((node.name, node.asname or ""))
+        assert not any(term in value for value in values for term in FORBIDDEN), (node.lineno, values)
 
 
 def test_core_and_native_have_no_legacy_authority_inputs():
-    forbidden = ("social_layer", "yogurt_social", "conversation_state_runtime",
-                 "working_state_shadow", "current_topic", "open_threads", "ConversationState")
     for package in ("yogurt_core", "yogurt_core_adapters", "yogurt_core_domain", "yogurt_native"):
         for path in (ROOT / package).rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            # Include dynamic-import literals and field keys, not only imports.
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                    # Ignore documentation (checked separately by import rules).
-                    continue
-                if isinstance(node, ast.ImportFrom):
-                    assert not any(term in (node.module or "") for term in forbidden), path
-                if isinstance(node, ast.Import):
-                    assert not any(term in alias.name for alias in node.names for term in forbidden), path
-                if isinstance(node, (ast.Name, ast.Attribute)):
-                    value = node.id if isinstance(node, ast.Name) else node.attr
-                    assert not any(term in value for term in forbidden), path
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.Call, ast.Subscript)):
-                    assert not any(term in ast.dump(node) for term in forbidden), path
+            assert_no_legacy_inputs(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("term", FORBIDDEN)
+@pytest.mark.parametrize("template", [
+    'name = "{term}"', 'getattr(state, "{term}")',
+    'value = {{"{term}": 1}}', 'value = state["{term}"]',
+    'module = "pkg.{term}"\nimportlib.import_module(module)',
+    '__import__("{term}")', 'value = b"{term}"',
+    'from pkg import {term} as permitted',
+])
+def test_guard_rejects_indirect_legacy_leakage(term, template):
+    with pytest.raises(AssertionError):
+        assert_no_legacy_inputs(template.format(term=term))
+
+
+def test_guard_only_exempts_real_docstrings_and_comments():
+    assert_no_legacy_inputs('"""current_topic is forbidden"""\n# open_threads\nvalue = "safe"')
+    with pytest.raises(AssertionError):
+        assert_no_legacy_inputs('value = 1\n"current_topic"')
 
 
 def executable_fingerprint(path):

@@ -101,4 +101,6 @@ the existing Native, Memory, adapter, Voice/Singing regressions.
 
 W2 sample counts are completely separate from B.7 `gate_evaluated_events`. W2
 does not access production DBs, port 17621, thresholds, experiment counters or
-B.8 criteria. W3/W4/W5 and R3-D/E are not implemented; R3-D remains NO-GO.
+B.8 criteria. W3/W4 are now merged and W5 is the final conformance stage; see
+[current track status](runtime-r3w-status.md). R3-D/E remain unimplemented;
+R3-D is BLOCKED by B.7/B.8.

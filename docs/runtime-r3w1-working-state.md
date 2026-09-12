@@ -69,4 +69,6 @@ ports. WorkingState modules import no Memory, Social Layer, Native, model or
 external service implementation. Existing legacy V4, ContextProjection,
 ModelContext and Native Surface behavior remains unchanged.
 
-W2/W3/W4/W5, R3-D/E, production recall and prompt injection are not implemented.
+Those integrations were outside W1's original scope. For current W1–W5 status,
+see [R3-W final ownership status](runtime-r3w-status.md). W3 now admits WorkingState
+as user-derived context; R3-D/E and production Memory recall remain unimplemented.

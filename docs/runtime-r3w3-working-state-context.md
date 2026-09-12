@@ -86,5 +86,6 @@ by the W3 seam checks; W1 derivation isolation checks remain intact.
 
 W1 semantic policy/contracts and W2 comparison are unchanged. Native client/API
 contracts, legacy V4, B.7/B.8, production thresholds and Voice/Singing are untouched.
-No production Memory or model calls are needed by the tests. R3-D/R3-E and W4/W5
-remain NO-GO. No PR or merge is performed by this implementation.
+No production Memory or model calls are needed by the tests. W4 is now merged;
+W5 is the final conformance stage. See [current track status](runtime-r3w-status.md).
+R3-D remains BLOCKED by B.7/B.8; R3-D/R3-E are not implemented.
