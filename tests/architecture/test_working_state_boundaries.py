@@ -40,6 +40,6 @@ def test_projection_has_no_model_or_legacy_wiring():
         imports = [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
         imports += [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
         assert not any(any(part in module for part in ("memory", "social", "native", "model.execution", "time", "random", "uuid")) for module in imports)
-    for package in ("yogurt_native", "yogurt_core/application", "yogurt_core/model"):
-        for path in (root / package).rglob("*.py"):
-            assert "working_state" not in path.read_text(encoding="utf-8")
+    # W3 explicitly admits derived data through ModelContext. W1's deriver
+    # remains provider/model independent; W3's authority seam is tested in
+    # test_working_state_context_boundaries.py.

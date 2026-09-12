@@ -16,6 +16,8 @@ class LocalOllamaModel:
     def _generate(self, context: ModelContext) -> str:
         messages = [{"role": "system", "content": context.persona_material}]
         messages.extend({"role": entry.role.value, "content": entry.text} for entry in context.history)
+        if context.working_state is not None:
+            messages.append({"role": "user", "content": context.working_state.material})
         messages.append({"role": "user", "content": context.user_input})
         body = json.dumps({"model": self.model, "messages": messages, "stream": False}).encode()
         request = urllib.request.Request("http://127.0.0.1:11434/api/chat", data=body,

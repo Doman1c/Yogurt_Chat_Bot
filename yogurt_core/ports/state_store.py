@@ -15,6 +15,7 @@ from yogurt_contracts.runtime.core_authority import CoreAuthorityToken
 
 from yogurt_core.application.results import TurnAdmissionResult
 from yogurt_core.context.models import ContextEntry
+from yogurt_core.context.working_state import WorkingStateSource
 from yogurt_core.model.execution import StoredResponse, StoredTurn
 
 
@@ -36,7 +37,7 @@ class StateCommit(Generic[CommitValue]):
     stable_identity: str
 
 
-class CoreStateStore(Protocol):
+class CoreStateStore(WorkingStateSource, Protocol):
     async def acquire_authority(self, core_instance_id: CoreInstanceId) -> CoreAuthorityToken: ...
     async def release_authority(self, token: CoreAuthorityToken) -> None: ...
     async def recover(self, token: CoreAuthorityToken) -> None: ...
