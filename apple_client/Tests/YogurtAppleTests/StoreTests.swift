@@ -150,4 +150,23 @@ import XCTest
         XCTAssertEqual(restarted.selected?.turns.first?.assistantText, "authoritative final")
         XCTAssertNil(restarted.selected?.turns.first?.response)
     }
+    func testRestartTerminalHistoryOverridesActiveCacheAndCorruptDiskRebuilds() async throws {
+        let disk = file(), api = FakeAPI()
+        var projection = ResponseProjection(responseID: "r1")
+        try projection.apply(event(1, .started)); try projection.apply(event(2, .delta, "cached partial"))
+        var snapshot = ChatSnapshot(); snapshot.selectedID = "c1"
+        snapshot.conversations = [ChatConversation(id: "c1", turns: [ChatTurn(id: "t1", userText: "hello", response: projection, historyText: "", state: "processing")])]
+        try disk.save(snapshot)
+        api.histories["c1"] = ConversationHistory(conversationID: "c1", turns: [HistoryTurn(turnRef: "t1", text: "hello", responseID: "r1", responseText: "server final  ", state: "completed")])
+        let store = ChatStore(api: api, disk: disk, pause: {})
+        await store.launch()
+        XCTAssertEqual(store.selected?.turns.first?.assistantText, "server final  ")
+        XCTAssertNil(store.selected?.turns.first?.response); XCTAssertTrue(api.cursors.isEmpty)
+        try Data("{broken cache".utf8).write(to: disk.url, options: .atomic)
+        api.histories["c1"] = ConversationHistory(conversationID: "c1", turns: [HistoryTurn(turnRef: "t1", text: "hello", responseID: "r1", responseText: "ignored history prefix", state: "processing")])
+        let rebuilt = ChatStore(api: api, disk: disk, pause: {})
+        await rebuilt.launch(); await settle { rebuilt.selected?.turns.first?.terminal == true }
+        XCTAssertEqual(api.cursors, [0, 2]); XCTAssertEqual(rebuilt.selected?.turns.first?.assistantText, " partial 🙂\n")
+        await rebuilt.stopConsumers()
+    }
 }
