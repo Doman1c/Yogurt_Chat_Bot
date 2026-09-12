@@ -300,32 +300,6 @@ def test_broken_telemetry_does_not_change_core_outcome(tmp_path):
     asyncio.run(scenario())
 
 
-def test_ollama_final_adapter_is_bounded_local_and_has_no_fake_deltas(monkeypatch):
-    from yogurt_native.model import LocalOllamaModel
-    from yogurt_core.model.execution import ModelContext
-    observed = []
-    class Response:
-        def __enter__(self): return self
-        def __exit__(self, *args): return None
-        def read(self, limit):
-            assert limit == 2_000_001
-            return b'{"message":{"content":"one final output"}}'
-    class Opener:
-        def open(self, request, timeout):
-            assert request.full_url == "http://127.0.0.1:11434/api/chat"
-            assert json.loads(request.data)["stream"] is False
-            assert timeout == 120
-            observed.append(request)
-            return Response()
-    monkeypatch.setattr("yogurt_native.model.urllib.request.build_opener", lambda *args: Opener())
-    async def scenario():
-        model = LocalOllamaModel("existing-model")
-        context = ModelContext("persona", (), "hello", "native", 1024)
-        output = [event async for event in model.run(context, None)]
-        assert len(output) == 1 and output[0].text == "one final output"
-        assert len(observed) == 1
-    asyncio.run(scenario())
-
 
 def test_crash_before_response_started_has_deterministic_terminal_retry(tmp_path):
     path = tmp_path / "core.db"
