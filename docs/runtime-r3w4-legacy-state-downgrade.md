@@ -1,5 +1,8 @@
 # R3-W4 — Legacy ConversationState authority downgrade
 
+W4 is merged. W5 closes the string-literal guard gap and adds final conformance;
+see [current track status](runtime-r3w-status.md). The scope below describes W4.
+
 Core ConversationWorkingState is the sole authority for current conversational
 cognition in the new Core runtime. W4 establishes ownership, not a production
 migration. The existing WeChat/OpenClaw path remains a legacy compatibility path.
