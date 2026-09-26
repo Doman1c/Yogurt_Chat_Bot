@@ -45,6 +45,14 @@ assets/stickers/stickers.review.json
 assets/stickers/cache/
 social_layer/config/stickers.json
 
+# Private singing assets, job outputs, and local model material
+assets/singing/source/
+assets/singing/reference/
+assets/singing/output/
+singing_runtime/
+singing_checkpoints/
+assets/singing/private/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -55,13 +55,14 @@ jobs:
             social_layer/tests/test_memory_gate_experiment.py \
             social_layer/tests/test_memory_gate_experiment_report.py
 
-      - name: Run P10 Mouth and VoiceSession tests
+      - name: Run P10 speech and Singing capability tests
         run: |
           PYTHONPATH=social_layer/src python -m pytest -q \
             voice_runtime \
             voice_orchestrator \
             capabilities/mouth \
-            capabilities/voice_session
+            capabilities/voice_session \
+            capabilities/singing
 
       - name: Run adapter, sticker, V3, V4, and P10 tests
         run: |
